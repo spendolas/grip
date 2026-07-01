@@ -1,0 +1,149 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root {
+        --c-disconnected: #b3b3b3;
+        --c-connected: #19e54c;
+        --c-warning: #e5c319;
+        --c-error: #e53519;
+      }
+      html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+      #state {
+        width: 100%;
+        height: 100%;
+        background: var(--c-disconnected);
+        transition: background 180ms ease;
+      }
+      #state.connected { background: var(--c-connected); }
+      #state.warning { background: var(--c-warning); }
+      #state.error { background: var(--c-error); }
+      @keyframes grip-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.55; }
+      }
+      #state.pulsing { animation: grip-pulse 900ms ease-in-out infinite; }
+    </style>
+  </head>
+  <body>
+    <div id="state"></div>
+    <script>
+      const URL = 'ws://localhost:7777';
+      const el = document.getElementById('state');
+      let ws = null;
+      let backoff = 500;
+      let reconnectTimer = null;
+      let busyCount = 0;
+      let errorClearTimer = null;
+      let current = 'disconnected';
+
+      function setState(name) {
+        if (current === name) return;
+        current = name;
+        el.classList.remove('connected', 'warning', 'error');
+        if (name !== 'disconnected') el.classList.add(name);
+        applyPulse();
+      }
+
+      function applyPulse() {
+        if (current === 'connected' && busyCount > 0) {
+          el.classList.add('pulsing');
+        } else {
+          el.classList.remove('pulsing');
+        }
+      }
+
+      function flashError() {
+        setState('error');
+        if (errorClearTimer) clearTimeout(errorClearTimer);
+        errorClearTimer = setTimeout(() => {
+          errorClearTimer = null;
+          if (ws && ws.readyState === 1) setState('connected');
+        }, 2000);
+      }
+
+      function connect() {
+        if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
+        try {
+          ws = new WebSocket(URL);
+        } catch (e) {
+          setState('error');
+          scheduleReconnect();
+          return;
+        }
+        ws.onopen = () => {
+          setState('connected');
+          backoff = 500;
+        };
+        ws.onclose = (ev) => {
+          if (ev.code === 1000 && ev.reason === 'duplicate') {
+            setState('warning');
+            backoff = 10000;
+          } else {
+            setState('disconnected');
+          }
+          busyCount = 0;
+          applyPulse();
+          scheduleReconnect();
+        };
+        ws.onerror = () => setState('error');
+        ws.onmessage = (ev) => {
+          let msg;
+          try { msg = JSON.parse(ev.data); } catch { return; }
+          // Bridge → UI control (welcome) is forwarded to plugin so it can hello back.
+          if (msg && msg.kind === 'welcome') {
+            parent.postMessage({ pluginMessage: { kind: 'welcome', sessionId: msg.sessionId } }, '*');
+            return;
+          }
+          if (msg && msg.id && msg.method) {
+            parent.postMessage(
+              { pluginMessage: { kind: 'request', id: msg.id, method: msg.method, params: msg.params || {} } },
+              '*'
+            );
+          }
+        };
+      }
+
+      function scheduleReconnect() {
+        if (reconnectTimer !== null) return;
+        const MAX_BACKOFF = 2000;
+        const delay = Math.min(backoff, MAX_BACKOFF);
+        backoff = Math.min(backoff * 2, MAX_BACKOFF);
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          connect();
+        }, delay);
+      }
+
+      function send(obj) {
+        if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+      }
+
+      window.onmessage = (ev) => {
+        const msg = ev.data && ev.data.pluginMessage;
+        if (!msg) return;
+
+        if (msg.kind === 'response') {
+          send({ id: msg.id, result: msg.result, error: msg.error });
+        } else if (msg.kind === 'event') {
+          send({ event: msg.event, data: msg.data });
+        } else if (msg.kind === 'hello') {
+          // Forward every field the plugin set (including `version` and
+          // any future additions). An earlier allow-list dropped fields
+          // silently and led to a long false-positive Figma-cache hunt.
+          const { pluginMessage: _drop, ...rest } = msg;
+          send({ ...rest, kind: 'hello' });
+        } else if (msg.kind === 'busy') {
+          if (msg.busy) busyCount++;
+          else busyCount = Math.max(0, busyCount - 1);
+          applyPulse();
+        } else if (msg.kind === 'error') {
+          flashError();
+        }
+      };
+
+      connect();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "grip-plugin",
+  "version": "0.2.3",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.100.0",
+    "typescript": "^5.5.0"
+  }
+}
