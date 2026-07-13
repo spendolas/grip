@@ -23,7 +23,7 @@ const STATUS_PATH = process.env.GRIP_STATUS_PATH ?? join(homedir(), '.grip-bridg
 const IS_DAEMON = process.argv.includes('--daemon');
 const IDLE_GRACE_MS = 60_000;       // daemon exits this long after 0 plugins AND 0 shims
 const MAX_LIFETIME_MS = 6 * 60 * 60 * 1000;
-const BRIDGE_VERSION = '0.2.3';
+const BRIDGE_VERSION = '0.2.4';
 
 // Mirror stderr to ~/.grip-bridge.log (or GRIP_LOG_PATH) so forensics
 // survive across crashes. Done in-process — no bash wrap, no PATH issue.

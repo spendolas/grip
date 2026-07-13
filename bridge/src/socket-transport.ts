@@ -19,6 +19,10 @@ export class SocketTransport implements Transport {
   onmessage?: (message: JSONRPCMessage) => void;
   onerror?: (error: Error) => void;
   onclose?: () => void;
+  // Out-of-band grip control frames (e.g. {grip:'bind',...}) sent by the
+  // shim ahead of MCP traffic. Routed here instead of being mis-parsed as
+  // JSON-RPC. Shim + daemon are the same binary, so the shape is in sync.
+  onControl?: (msg: Record<string, unknown>) => void;
 
   private buf = '';
   private started = false;
@@ -47,9 +51,20 @@ export class SocketTransport implements Transport {
         const line = this.buf.slice(0, nl).trim();
         this.buf = this.buf.slice(nl + 1);
         if (!line) continue;
+        let json: unknown;
         try {
-          const parsed = JSONRPCMessageSchema.parse(JSON.parse(line));
-          this.onmessage?.(parsed);
+          json = JSON.parse(line);
+        } catch (err) {
+          this.onerror?.(err as Error);
+          continue;
+        }
+        // Grip control frame — not JSON-RPC. Route out-of-band, don't error.
+        if (json && typeof json === 'object' && 'grip' in (json as object)) {
+          this.onControl?.(json as Record<string, unknown>);
+          continue;
+        }
+        try {
+          this.onmessage?.(JSONRPCMessageSchema.parse(json));
         } catch (err) {
           this.onerror?.(err as Error);
         }

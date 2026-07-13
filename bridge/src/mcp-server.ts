@@ -137,7 +137,7 @@ export function createSession(bridge: PluginBridge): LiveSession {
   const session: McpSession = {
     id: uuid(),
     activeFileId: null,
-    activeFileKey: null,
+    bind: null,
     subscriptions: { selection: false, document: false, currentPage: false },
     rateBucket: { tokens: RATE_LIMIT_BURST, lastRefillMs: Date.now() },
   };
@@ -266,6 +266,18 @@ export function createSession(bridge: PluginBridge): LiveSession {
       try {
         const target = (parsed.data as { target: string }).target;
         return okResult(bridge.setActive(target, session));
+      } catch (err) {
+        return errorResult((err as Error).message);
+      }
+    }
+    // get_page_context is a plugin round-trip, but we annotate it with this
+    // agent's bind (bridge-side state) so the answer covers both "where am
+    // I" and "where am I bound" in one call. It routed, so bind is resolved.
+    if (name === 'get_page_context') {
+      try {
+        const result = (await bridge.request(name, parsed.data as Record<string, unknown>, session)) as object;
+        const bind = session.bind ? { target: session.bind, resolved: true } : null;
+        return okResult({ ...result, bind });
       } catch (err) {
         return errorResult((err as Error).message);
       }

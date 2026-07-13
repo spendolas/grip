@@ -68,6 +68,16 @@ export async function runProxy(ipcPath: string): Promise<boolean> {
   }
   process.stderr.write(`[grip] proxy attached to leader at ${ipcPath}\n`);
 
+  // Launch-time file binding. If this agent was started with GRIP_FILE, hand
+  // the daemon its target as a control frame BEFORE any MCP traffic, so the
+  // session is bound the moment it attaches. Re-sent on every reconnect
+  // (runProxy re-runs), so the bind survives a daemon restart too.
+  const gripFile = process.env.GRIP_FILE?.trim();
+  if (gripFile) {
+    sock.write(JSON.stringify({ grip: 'bind', target: gripFile }) + '\n');
+    process.stderr.write(`[grip] proxy sent launch bind GRIP_FILE=${gripFile}\n`);
+  }
+
   hookStdin();
 
   // Track in-flight request ids. On close we emit a typed error response

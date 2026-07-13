@@ -41,13 +41,16 @@ export interface PluginSessionInfo {
 // each other's active file or subscription set.
 export interface McpSession {
   id: string;
+  // Resolved live pin: the plugin session id this agent is routed to now.
+  // Cleared and re-resolved from `bind` when that session dies (Figma
+  // respawns plugin iframes every ~1–3min, new sessionId each time).
   activeFileId: string | null;
-  // Remembered fileKey of the pinned file. Plugin iframes respawn every
-  // 1–3min (new sessionId each time), so a sessionId pin dies on reconnect.
-  // When activeFileId's session is gone, routing re-pins to the live
-  // session with this fileKey — keeping the agent on the same FILE across
-  // churn instead of silently falling to another open file's page.
-  activeFileKey: string | null;
+  // What file this agent WANTS — its durable binding, independent of how
+  // many other files are open. Set by set_active_file (runtime) or a
+  // GRIP_FILE launch hint. `key` is a Figma fileKey; `name` is held until
+  // the file connects and resolves to a key. null = unbound (auto-route
+  // only when exactly one file is open, else ambiguous).
+  bind: { key?: string; name?: string } | null;
   subscriptions: { selection: boolean; document: boolean; currentPage: boolean };
   // Token-bucket rate limiter — refills at RATE_LIMIT_REFILL/sec, caps at
   // RATE_LIMIT_BURST. Tool calls cost 1 token. Stops an agent runaway

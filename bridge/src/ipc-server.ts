@@ -17,6 +17,15 @@ export class IpcServer {
     this.server = createServer((socket) => {
       const live = createSession(this.bridge);
       const transport = new SocketTransport(socket);
+      // Launch-time file binding: the shim forwards GRIP_FILE as a control
+      // frame ahead of MCP traffic. Applied to this session so the agent is
+      // routed to its file without ever calling a tool. Set before connect()
+      // so it's ready when the transport starts reading.
+      transport.onControl = (msg) => {
+        if (msg.grip === 'bind' && typeof msg.target === 'string') {
+          this.bridge.bindFromLaunch(msg.target, live.session);
+        }
+      };
       let cleaned = false;
       const cleanup = (reason: string) => {
         if (cleaned) return;

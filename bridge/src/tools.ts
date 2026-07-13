@@ -44,12 +44,13 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'list_files',
-    description: 'List all Figma files currently connected to Grip. The "active" file is where read/write tools execute by default.',
+    description: 'List all Figma files currently connected to Grip. The "active" file is where read/write tools execute. With >1 file open and no binding, tools error with `ambiguous_active_file` until you set_active_file — grip never guesses.',
     schema: z.object({}),
   },
   {
     name: 'set_active_file',
-    description: 'Switch which connected file subsequent tool calls operate on. Pass either a sessionId or a fileKey.',
+    description:
+      "Bind this agent to a Figma file — all subsequent tool calls route there, regardless of how many other files are open, and the binding survives Figma's plugin reconnects. `target` accepts a fileKey, an exact file name, a sessionId, or a figma.com URL. If the file isn't open yet the binding is held (deferred) and resolves when it connects; the result reports `{ bound, resolved }` and, when unresolved, the list of currently-open files (so a typo is obvious). A file name matching >1 open file errors `ambiguous_file_name` — use the fileKey. (Launchers can skip this by starting the agent with env GRIP_FILE=<key|name|url>.)",
     schema: z.object({ target: z.string() }),
   },
   {
@@ -90,7 +91,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'get_page_context',
-    description: "Cheap 'where am I' probe. Returns { file: {key, name}, page: {id, name}, selectionCount } for the currently-routed plugin session — no node tree, no round-trip cost. Call before page-scoped reads (get_selection, search_nodes) when unsure which file/page is active: an empty result from those means 'nothing here', not 'wrong page', only if this confirms you're on the file/page you intended.",
+    description: "Cheap 'where am I' probe. Returns { file: {key, name}, page: {id, name}, selectionCount, bind } for the currently-routed plugin session — no node tree, no round-trip cost. `bind` is this agent's file binding ({ target, resolved } or null). Call before page-scoped reads (get_selection, search_nodes) when unsure which file/page is active: an empty result from those means 'nothing here', not 'wrong page', only if this confirms you're on the file/page you intended.",
     schema: z.object({}),
   },
   {

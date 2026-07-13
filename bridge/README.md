@@ -49,6 +49,10 @@ up changes.
 - `GRIP_WS_PORT` — override `7777`.
 - `GRIP_IPC_PATH` — override the leader's UNIX-socket path
   (default `tmpdir/grip-bridge.sock`).
+- `GRIP_FILE` — bind this agent to a Figma file at launch (fileKey, exact
+  file name, or figma.com URL). The shim forwards it to the daemon so tool
+  calls route to that file without the agent calling `set_active_file`.
+  Binds even before the file is open (resolves when it connects).
 
 ## Important
 
