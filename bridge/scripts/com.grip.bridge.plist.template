@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  grip bridge LaunchAgent (template). install-launchd.sh substitutes
+  __NODE__ and __DIST__ and writes the result to
+  ~/Library/LaunchAgents/com.grip.bridge.plist.
+
+  Keeps ONE long-lived grip daemon running (WS :7777 for Figma, IPC socket
+  for stdio shims, HTTP :7778 for direct MCP clients). GRIP_PERSISTENT=1
+  disables the daemon's idle-exit + lifetime ceiling so launchd owns the
+  lifecycle. RunAtLoad + KeepAlive → starts at login, respawns on crash.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.grip.bridge</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__DIST__</string>
+    <string>--daemon</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>GRIP_PERSISTENT</key>
+    <string>1</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.grip-bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.grip-bridge.log</string>
+</dict>
+</plist>

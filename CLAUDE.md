@@ -8,30 +8,32 @@ Grip is a Figma plugin + local Node bridge that exposes full canvas read/write a
 
 ## Architecture
 
-Three-tier pipeline with a **shim + detached-daemon** split so the server's lifetime is independent of any agent:
+One long-lived **daemon** serves three MCP transports against the same `PluginBridge`; its lifetime is independent of any agent:
 
 ```
-agent (claude -p) ─stdio MCP─ shim (dist/index.js)        ─IPC unix sock─┐
-agent (claude -p) ─stdio MCP─ shim (dist/index.js)        ─IPC unix sock─┤
-                                                                          ▼
+agent ─HTTP MCP──── http://127.0.0.1:7778/mcp ──────────────────────────┐   (direct; no shim)
+agent (claude -p) ─stdio MCP─ shim (dist/index.js) ─IPC unix sock─┐      │
+agent (claude -p) ─stdio MCP─ shim (dist/index.js) ─IPC unix sock─┤      │
+                                                                  ▼      ▼
                               DETACHED daemon (dist/index.js --daemon)
-                                • own session (setsid), PPID 1 — survives agent kills
-                                • WS :7777 ⇄ each Figma plugin iframe ⇄ postMessage ⇄ plugin main (Figma API)
-                                • IPC unix sock (tmpdir/grip-bridge.sock) ⇄ each shim, one McpSession per
+                                • own session, PPID 1 — survives agent kills
+                                • HTTP :7778 /mcp  ⇄ direct MCP clients (one McpSession per HTTP session)
+                                • IPC unix sock    ⇄ each shim (one McpSession per)
+                                • WS :7777         ⇄ each Figma plugin iframe ⇄ postMessage ⇄ plugin main
 ```
 
-`~/.claude.json` registers grip as **stdio** `command: dist/index.js` (no flag). That binary is the **shim** by default and the **daemon** with `--daemon`:
+Two transports for agents, chosen by how grip is registered in `~/.claude.json`:
 
-- Each `claude` / Hub agent spawns a **shim**. The shim probes the IPC socket; if no daemon, it `spawn(detached:true)`s `dist/index.js --daemon` (own session, `stdio:'ignore'`, `.unref()`), waits for it to bind, then pipes its stdio MCP traffic to the daemon over the IPC socket. Agent never knows.
-- The **daemon** is a single long-lived process, reparented to init. Because it's in its own process group, a Hub watchdog `SIGTERM` to an agent's group **cannot reach it** — this is the fix for the historical stall where the in-process "leader" died with whatever agent spawned it.
-- Single-instance: the daemon binds WS `:7777` first; a second daemon losing that bind exits immediately (atomic lock). Concurrent shims may each spawn a daemon; only one wins, the rest exit, all shims then connect to the winner.
+- **HTTP (preferred for Hub):** register `{type:'http', url:'http://127.0.0.1:7778/mcp'}`. The agent connects **directly** to the daemon — no shim, no IPC hop. This removes the leader-death stall class: a call can't be lost in a dying intermediary, and a dead daemon is an instant connection error, not a silent hang. `http-server.ts` runs a stateful `StreamableHTTPServerTransport` per session (one `createSession()` each, reused verbatim). Requires the daemon to be already running → keep it warm with the launchd LaunchAgent (`bridge/scripts/install-launchd.sh`, sets `GRIP_PERSISTENT=1` which disables idle-exit so KeepAlive owns lifecycle).
+- **stdio (on-demand, zero-setup):** register `command: dist/index.js` (no flag). That binary is the **shim** by default, **daemon** with `--daemon`. Each agent spawns a shim; the shim probes the IPC socket and, if no daemon, `spawn(detached:true)`s `dist/index.js --daemon` (`stdio:'ignore'`, `.unref()`), waits for the bind, then pipes stdio MCP traffic over IPC. Good for local Claude Code — no always-on daemon needed.
+- **Single-instance:** the daemon binds WS `:7777` first (atomic lock); a second daemon losing that bind exits. HTTP `:7778` bind failure is non-fatal (logs + skips HTTP). The launchd install kills any on-demand daemon so the persistent one wins the port.
 
 Implications that span files:
 
 - **stdout is sacred.** Shim stdout is the MCP transport to the agent. All logging goes to **stderr only** (mirrored to `~/.grip-bridge.log`). Any `console.log` corrupts the stream.
-- **Per-MCP-session state.** Each shim connection becomes one `McpSession` (`bridge/src/types.ts`) on the daemon, with independent `activeFileId`, `activeFileKey`, `subscriptions`, `rateBucket`. `bridge.request(method, params, mcp)` and `bridge.list/setActive(target, mcp)` route by the passed session — no global "active file."
+- **Per-MCP-session state.** Each transport connection (shim over IPC, or a direct HTTP session) becomes one `McpSession` (`bridge/src/types.ts`) on the daemon, with independent `activeFileId`, `bind`, `subscriptions`, `rateBucket`. `bridge.request(method, params, mcp)` and `bridge.list/setActive(target, mcp)` route by the passed session — no global "active file."
 - **Agents bind to a file; routing never guesses.** `route()` (`ws-server.ts`) is the single decision, driven by `McpSession.bind` (`{key?,name?}` — what the agent WANTS) and `activeFileId` (resolved live pin). Order: (1) live pin still open → route; (2) `bind` set → newest live session matching it, else **`deferred`** (never falls to another file); (3) unbound → one open file routes frictionlessly, zero → `plugin_disconnected` after cold-start grace, **>1 → `ambiguous_active_file`** naming every open file + fileKey. grip will NOT silently pick among files (the old auto-pick only logged a stderr warning the agent couldn't see → agents landed on the wrong file).
-- **Two ways to bind.** Runtime: `set_active_file` accepts fileKey / exact name / sessionId / figma.com URL (`resolveBind` + `FIGMA_URL_RE`); binds even if the file isn't open yet (deferred), returning `{bound,resolved,...}` + the open-file list so a typo is caught. Launch-time: env **`GRIP_FILE=<key|name|url>`** on the agent process — the shim (`proxy.ts`) forwards it as a `{grip:'bind'}` **control frame** (first line on the IPC socket, before MCP traffic); `SocketTransport.onControl` routes it out-of-band (not JSON-RPC) and `ipc-server` calls `bridge.bindFromLaunch`. Agent never calls a tool. Re-sent on every reconnect.
+- **Two ways to bind.** Runtime: `set_active_file` accepts fileKey / exact name / sessionId / figma.com URL (`resolveBind` + `FIGMA_URL_RE`); binds even if the file isn't open yet (deferred), returning `{bound,resolved,...}` + the open-file list so a typo is caught. Launch-time: env **`GRIP_FILE=<key|name|url>`** on the agent process — the shim (`proxy.ts`) forwards it as a `{grip:'bind'}` **control frame** (first line on the IPC socket, before MCP traffic); `SocketTransport.onControl` routes it out-of-band (not JSON-RPC) and `ipc-server` calls `bridge.bindFromLaunch`. Agent never calls a tool. Re-sent on every reconnect. **Launch-time `GRIP_FILE` is stdio-only** — there is no shim over HTTP, so env doesn't reach the daemon per-agent; HTTP clients bind at runtime via `set_active_file` (multi-file unbound calls fail loud with `ambiguous_active_file`, so the agent knows to bind).
 - **Sticky across reconnect churn.** Figma respawns plugin iframes every ~1–3min — each is a **new sessionId**. When the live pin dies, `route()` re-resolves from `bind` (re-pins to the same file's newest live session; a name-bind promotes to `bind.key` on first resolve). If the bound file is fully closed → `deferred` → `bound_file_not_open` after the wait grace (never hops). Sessions carry `helloAt`; same-fileKey ties resolve newest-wins so routing never lands on a dying zombie. This all exists because a dead pin + two open files used to make page-scoped reads (`figma.currentPage.findAll`, `.selection`) silently hit the *wrong file's* page and return `[]` — a false-negative, not an error.
 - **Plugin sessions.** Many Figma windows can run the plugin at once. Each opens its own WebSocket to the daemon; plugin replies with a `hello` carrying `version`/`capabilities`/`fileKey`/`fileName`/page. Fan-out by design.
 - **Correlation by UUID.** `bridge/src/ws-server.ts` keeps `Map<uuid, {...}>` for in-flight WS requests. 10s timeout + 5s heartbeat (`ws.ping`); dead plugin → reject pending with `plugin_disconnected`. Response >8MB rejected with `response_too_large`.
@@ -51,6 +53,7 @@ bridge/src/
   index.ts            role split: shim (default) vs daemon (--daemon); shim spawns detached daemon
   ws-server.ts        WebSocketServer on :7777; PluginBridge tracks plugin sessions; heartbeat; response cap
   ipc-server.ts       UNIX socket server; one MCP session per accepted shim
+  http-server.ts      HTTP :7778 /mcp; StreamableHTTPServerTransport per session (direct clients)
   socket-transport.ts MCP SDK Transport over a Node socket (newline JSON-RPC)
   proxy.ts            shim pipe: stdin↔socket↔stdout + typed-error-on-drop + reconnect signal
   mcp-server.ts       per-session Server() factory; event fan-out; grip_health/grip_diagnose; call logging
@@ -155,13 +158,18 @@ npm run build              # produces build/code.js (referenced by manifest)
 # Plugin hot-reloads on rebuild — no manual reload needed.
 ```
 
-Register with Claude Code (writes user-scope MCP config to `~/.claude.json`):
+Register — two options (writes user-scope MCP config to `~/.claude.json`):
 
 ```sh
+# stdio (on-demand, zero-setup — good for local Claude Code)
 claude mcp add --scope user grip node /abs/path/to/grip/bridge/dist/index.js
+
+# HTTP (preferred for Claude Hub — direct connect, no shim; fixes leader-death hang)
+bash bridge/scripts/install-launchd.sh                                   # keep the daemon always-on
+claude mcp add --transport http -s user grip http://127.0.0.1:7778/mcp   # then register the URL
 ```
 
-Note: spec/older docs say `~/.claude/mcp.json` — that file isn't read by Claude Code; the CLI writes `~/.claude.json`.
+Order matters for HTTP: load the LaunchAgent first (nothing else starts the daemon for HTTP — Figma's sandbox can't). Note: spec/older docs say `~/.claude/mcp.json` — that file isn't read by Claude Code; the CLI writes `~/.claude.json`.
 
 Multiple Claude sessions / Claude Hub all share one detached daemon automatically. To inspect: `lsof -i:7777` shows the daemon (PPID 1, own process group); each agent's shim lives only as long as its `claude` session. `cat ~/.grip-bridge.status` for daemon pid/version/counts without an MCP round-trip.
 

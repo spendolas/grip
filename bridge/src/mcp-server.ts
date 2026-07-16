@@ -79,7 +79,7 @@ function reapUploads() {
   }
 }
 
-interface LiveSession {
+export interface LiveSession {
   server: Server;
   session: McpSession;
 }

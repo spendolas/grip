@@ -15,15 +15,20 @@ import { connect } from 'node:net';
 import { PluginBridge } from './ws-server.js';
 import { activeSessionCount } from './mcp-server.js';
 import { IpcServer } from './ipc-server.js';
+import { HttpServer } from './http-server.js';
 import { runProxy } from './proxy.js';
 
 const WS_PORT = Number(process.env.GRIP_WS_PORT ?? 7777);
+const HTTP_PORT = Number(process.env.GRIP_HTTP_PORT ?? 7778);
 const IPC_PATH = process.env.GRIP_IPC_PATH ?? join(tmpdir(), 'grip-bridge.sock');
 const STATUS_PATH = process.env.GRIP_STATUS_PATH ?? join(homedir(), '.grip-bridge.status');
 const IS_DAEMON = process.argv.includes('--daemon');
+// Set by the launchd LaunchAgent. Disables idle-exit + lifetime ceiling so
+// launchd owns the lifecycle (its KeepAlive would just fight self-exit).
+const PERSISTENT = process.env.GRIP_PERSISTENT === '1' || process.argv.includes('--persistent');
 const IDLE_GRACE_MS = 60_000;       // daemon exits this long after 0 plugins AND 0 shims
 const MAX_LIFETIME_MS = 6 * 60 * 60 * 1000;
-const BRIDGE_VERSION = '0.2.4';
+const BRIDGE_VERSION = '0.2.5';
 
 // Mirror stderr to ~/.grip-bridge.log (or GRIP_LOG_PATH) so forensics
 // survive across crashes. Done in-process — no bash wrap, no PATH issue.
@@ -152,8 +157,15 @@ async function runDaemon(bridge: PluginBridge) {
   startWatchdog(bridge);
   const ipc = new IpcServer(IPC_PATH, bridge);
   await ipc.listen();
-  // No connectStdio: the daemon is detached with stdio ignored. Its only
-  // MCP peers are shims arriving over the IPC socket (one session each).
+  // No connectStdio: the daemon is detached with stdio ignored. Its MCP peers
+  // are shims over the IPC socket (one session each) plus any direct HTTP
+  // clients below.
+
+  // HTTP MCP transport — direct-connect clients (no shim, no IPC hop). Best
+  // effort: if the port is taken we keep serving WS+IPC (WS :7777 is the real
+  // single-instance lock). Same PluginBridge, so routing/binding is shared.
+  const http = new HttpServer(HTTP_PORT, bridge);
+  await http.listen();
 
   // Status file — cheap external probe target. Future tooling can read
   // this instead of paying the MCP-handshake cost to check liveness.
@@ -165,10 +177,13 @@ async function runDaemon(bridge: PluginBridge) {
         pid: process.pid,
         version: BRIDGE_VERSION,
         wsPort: WS_PORT,
+        httpPort: HTTP_PORT,
         ipcPath: IPC_PATH,
+        persistent: PERSISTENT,
         startedAt,
         uptimeMs: Date.now() - startedAt,
         activeMcpSessions: activeSessionCount(),
+        httpSessions: http.sessionCount(),
         pluginCount: snap.pluginCount,
         pluginsReady: snap.plugins.filter((p) => p.wsReady).length,
         pendingCount: snap.pendingCount,
@@ -197,7 +212,8 @@ async function runDaemon(bridge: PluginBridge) {
 
   // Lifetime ceiling — exit cleanly after MAX_LIFETIME_MS when no MCP
   // sessions are attached. Avoids slow leaks accumulating across days.
-  setInterval(() => {
+  // Skipped when PERSISTENT: launchd owns the lifecycle and would respawn us.
+  if (!PERSISTENT) setInterval(() => {
     if (Date.now() - startedAt < MAX_LIFETIME_MS) return;
     if (activeSessionCount() !== 0) {
       process.stderr.write('[grip] uptime ceiling reached but sessions active; deferring\n');
@@ -205,6 +221,7 @@ async function runDaemon(bridge: PluginBridge) {
     }
     process.stderr.write('[grip] uptime ceiling reached + idle, self-exiting for fresh spawn\n');
     ipc.close();
+    http.close();
     bridge.close();
     process.exit(0);
   }, 60_000).unref();
@@ -213,14 +230,19 @@ async function runDaemon(bridge: PluginBridge) {
   // connected plugins for the grace period. While any Figma plugin is
   // open the daemon stays warm, so the common case (Figma running) keeps
   // it alive across agent churn. Fully idle → clean up so nothing lingers.
+  // Skipped when PERSISTENT (launchd): a KeepAlive respawn would just fight
+  // idle-exit. Otherwise: exit only when NO MCP sessions (shims OR http) AND
+  // NO connected plugins for the grace period. HTTP sessions count via
+  // activeSessionCount(), so the daemon stays warm while any client is bound.
   let idleTimer: NodeJS.Timeout | null = null;
   const checkIdle = () => {
     const idle = activeSessionCount() === 0 && bridge.snapshot().pluginCount === 0;
     if (idle) {
       if (idleTimer) return;
       idleTimer = setTimeout(() => {
-        process.stderr.write('[grip] idle (no shims, no plugins), shutting down\n');
+        process.stderr.write('[grip] idle (no shims, no http, no plugins), shutting down\n');
         ipc.close();
+        http.close();
         bridge.close();
         process.exit(0);
       }, IDLE_GRACE_MS);
@@ -229,7 +251,7 @@ async function runDaemon(bridge: PluginBridge) {
       idleTimer = null;
     }
   };
-  setInterval(checkIdle, 5_000).unref();
+  if (!PERSISTENT) setInterval(checkIdle, 5_000).unref();
 
   const shutdown = async (signal: string) => {
     process.stderr.write(`[grip] ${signal} received, shutting down\n`);
@@ -237,6 +259,7 @@ async function runDaemon(bridge: PluginBridge) {
     // clients see actionable codes instead of stdio-just-closed -32000s.
     bridge.close();
     ipc.close();
+    http.close();
     // Give the event loop one tick to flush JSON-RPC error frames before
     // we exit; otherwise the stderr->stdout flush races process.exit.
     await new Promise((r) => setImmediate(r));

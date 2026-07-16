@@ -36,6 +36,27 @@ This writes to `~/.claude.json` under user scope. Other clients use their
 own config — the only requirement is `command: node`, `args: [<path to
 dist/index.js>]`, transport: stdio.
 
+### HTTP transport (preferred for Claude Hub)
+
+For a host that spawns many short-lived agents (Claude Hub), register grip
+by **URL** instead of stdio. Agents then connect directly to one long-lived
+daemon — no per-process shim to die mid-call, no IPC hop to lose a message
+(the leader-death stall class). Requires the daemon to be always running,
+so install it as a launchd LaunchAgent first:
+
+```sh
+npm run build                                     # ensure dist/ is current
+bash scripts/install-launchd.sh                   # daemon on WS :7777 + HTTP :7778, KeepAlive
+claude mcp add --transport http -s user grip http://127.0.0.1:7778/mcp
+```
+
+Load the agent **before** registering the URL — Figma's sandbox can't start
+the daemon the way gaffer's AE panel starts gaffer's, so nothing else will.
+Uninstall: `launchctl unload ~/Library/LaunchAgents/com.grip.bridge.plist`.
+
+Note: launch-time `GRIP_FILE` binding is stdio-only (it rides the shim's IPC
+control frame). Over HTTP, agents bind at runtime with `set_active_file`.
+
 Then in Figma Desktop: **Plugins → Development → Import from manifest…** →
 point to `plugin/manifest.json`. Run the plugin in any file (or several).
 The status strip goes green when the WebSocket connects.
@@ -46,7 +67,10 @@ up changes.
 
 ## Environment
 
-- `GRIP_WS_PORT` — override `7777`.
+- `GRIP_WS_PORT` — override `7777` (WebSocket to Figma plugins).
+- `GRIP_HTTP_PORT` — override `7778` (HTTP `/mcp` for direct MCP clients).
+- `GRIP_PERSISTENT=1` — disable idle-exit + lifetime ceiling (set by the
+  launchd LaunchAgent, which owns the daemon's lifecycle).
 - `GRIP_IPC_PATH` — override the leader's UNIX-socket path
   (default `tmpdir/grip-bridge.sock`).
 - `GRIP_FILE` — bind this agent to a Figma file at launch (fileKey, exact
