@@ -30,6 +30,20 @@ echo "node:  $NODE"
 echo "dist:  $DIST"
 echo "plist: $PLIST_DEST"
 
+# Preflight: launchd refuses to bootstrap an agent whose program lives on a
+# volume mounted `noowners` (secondary APFS, cloud mounts like
+# /Volumes/…/CloudStorage). It returns a cryptic "Bootstrap failed: 5:
+# Input/output error". Detect it up front and redirect to the nohup starter.
+VOL_FLAGS="$(df "$DIST" 2>/dev/null | awk 'NR==2{print $1}' | xargs -I{} mount | grep -F "{} " | head -1)"
+if mount | grep -F " $(df "$DIST" | awk 'NR==2{print $NF}') " | grep -q noowners 2>/dev/null; then
+  echo
+  echo "error: '$DIST' is on a 'noowners' volume — launchd will not run an agent from here" >&2
+  echo "       (this is why 'Bootstrap failed: 5: Input/output error' happens)." >&2
+  echo "       Use the nohup starter instead (no launchd needed):" >&2
+  echo "         bash \"$SCRIPT_DIR/start-daemon.sh\"" >&2
+  exit 1
+fi
+
 mkdir -p "$HOME/Library/LaunchAgents"
 DOMAIN="gui/$(id -u)"
 

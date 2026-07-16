@@ -165,11 +165,11 @@ Register — two options (writes user-scope MCP config to `~/.claude.json`):
 claude mcp add --scope user grip node /abs/path/to/grip/bridge/dist/index.js
 
 # HTTP (preferred for Claude Hub — direct connect, no shim; fixes leader-death hang)
-bash bridge/scripts/install-launchd.sh                                   # keep the daemon always-on
+bash bridge/scripts/start-daemon.sh                                      # keep the daemon always-on (nohup)
 claude mcp add --transport http -s user grip http://127.0.0.1:7778/mcp   # then register the URL
 ```
 
-Order matters for HTTP: load the LaunchAgent first (nothing else starts the daemon for HTTP — Figma's sandbox can't). Note: spec/older docs say `~/.claude/mcp.json` — that file isn't read by Claude Code; the CLI writes `~/.claude.json`.
+Order matters for HTTP: start the daemon first (nothing else starts it for HTTP — Figma's sandbox can't). **Always-on mechanism:** use `start-daemon.sh` (nohup, gaffer-style) — run it once and/or have Claude Hub run it at startup. A launchd LaunchAgent (`install-launchd.sh`) is the "nicer" option BUT **launchd refuses to run a program on a `noowners` volume** (secondary APFS / `/Volumes/…/CloudStorage` cloud mounts) with `Bootstrap failed: 5: Input/output error` — grip's repo lives on exactly such a volume, so launchd is unusable here (this is why gaffer, same Dropbox tree, also uses nohup). `install-launchd.sh` preflights for this and redirects to the starter. Note: spec/older docs say `~/.claude/mcp.json` — that file isn't read by Claude Code; the CLI writes `~/.claude.json`.
 
 Multiple Claude sessions / Claude Hub all share one detached daemon automatically. To inspect: `lsof -i:7777` shows the daemon (PPID 1, own process group); each agent's shim lives only as long as its `claude` session. `cat ~/.grip-bridge.status` for daemon pid/version/counts without an MCP round-trip.
 

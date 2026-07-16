@@ -46,13 +46,21 @@ so install it as a launchd LaunchAgent first:
 
 ```sh
 npm run build                                     # ensure dist/ is current
-bash scripts/install-launchd.sh                   # daemon on WS :7777 + HTTP :7778, KeepAlive
+bash scripts/start-daemon.sh                      # persistent daemon on WS :7777 + HTTP :7778 (nohup)
 claude mcp add --transport http -s user grip http://127.0.0.1:7778/mcp
 ```
 
-Load the agent **before** registering the URL — Figma's sandbox can't start
-the daemon the way gaffer's AE panel starts gaffer's, so nothing else will.
-Uninstall: `launchctl unload ~/Library/LaunchAgents/com.grip.bridge.plist`.
+Start the daemon **before** registering the URL — Figma's sandbox can't start
+it the way gaffer's AE panel starts gaffer's, so nothing else will. Run
+`start-daemon.sh` once and/or have Claude Hub run it at startup (gaffer's
+pattern). It's idempotent and reparents past the launching shell.
+
+`scripts/install-launchd.sh` (a launchd LaunchAgent) exists as the "nicer"
+alternative, **but launchd refuses to run a program on a `noowners` volume**
+— secondary APFS / cloud mounts like `/Volumes/…/CloudStorage` — with
+`Bootstrap failed: 5: Input/output error`. If grip lives on such a volume
+(it does here, under Dropbox), use `start-daemon.sh`; the launchd installer
+preflights for this and points you at the starter.
 
 Note: launch-time `GRIP_FILE` binding is stdio-only (it rides the shim's IPC
 control frame). Over HTTP, agents bind at runtime with `set_active_file`.
