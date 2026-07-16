@@ -29,21 +29,39 @@ if [[ -f "$STATUS" ]] && grep -q '"persistent": true' "$STATUS" 2>/dev/null && l
   exit 0
 fi
 
-# An on-demand (non-persistent) daemon may hold the port; replace it so the
-# persistent one — which never idle-exits — owns :7777.
-lsof -ti:7777 2>/dev/null | while read -r pid; do kill "$pid" 2>/dev/null || true; done
-sleep 1
-
-GRIP_PERSISTENT=1 nohup "$NODE" "$DIST" --daemon >>"$LOG" 2>&1 &
-disown || true
-sleep 2
+# Claim the port for a PERSISTENT daemon. A shim from an active Claude
+# session can respawn a non-persistent daemon the instant the port frees and
+# win the bind (and, with Figma attached, hold it warm), so a single try
+# races and loses. Retry: kill whatever holds :7777, immediately start our
+# persistent daemon, verify it won (status persistent:true). It converges
+# because once ours holds the port it never idle-exits, while shim-spawned
+# ones lose the next bind and exit. Fully reliable only once the stdio
+# registration is gone (no more shims) — see the remove/add step below.
+for i in 1 2 3 4 5 6 7 8; do
+  if [[ -f "$STATUS" ]] && grep -q '"persistent": true' "$STATUS" 2>/dev/null && lsof -ti:7777 >/dev/null 2>&1; then
+    break
+  fi
+  lsof -ti:7777 2>/dev/null | while read -r pid; do kill "$pid" 2>/dev/null || true; done
+  GRIP_PERSISTENT=1 nohup "$NODE" "$DIST" --daemon >>"$LOG" 2>&1 &
+  disown || true
+  sleep 1.5
+done
 
 if [[ -f "$STATUS" ]]; then
   echo "grip daemon started:"
   grep -E '"pid"|"version"|"httpPort"|"persistent"' "$STATUS"
+  if ! grep -q '"persistent": true' "$STATUS" 2>/dev/null; then
+    echo
+    echo "note: a non-persistent daemon keeps winning the port — an active Claude"
+    echo "      stdio session's shim is respawning it. HTTP still works, but it may"
+    echo "      idle-exit when Figma is closed. It becomes persistent once no stdio"
+    echo "      shims remain: switch the registration to HTTP (below) and restart your"
+    echo "      Claude/Hub sessions, then re-run this script."
+  fi
 else
   echo "started; check $LOG"
 fi
 echo
-echo "Register grip by URL (once):"
+echo "Register grip by URL (replaces the stdio entry):"
+echo "  claude mcp remove -s user grip"
 echo "  claude mcp add --transport http -s user grip http://127.0.0.1:7778/mcp"
