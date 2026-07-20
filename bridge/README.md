@@ -46,21 +46,22 @@ so install it as a launchd LaunchAgent first:
 
 ```sh
 npm run build                                     # ensure dist/ is current
-bash scripts/start-daemon.sh                      # persistent daemon on WS :7777 + HTTP :7778 (nohup)
-claude mcp add --transport http -s user grip http://127.0.0.1:7778/mcp
+bash scripts/install-loginitem.sh                 # always-on daemon as a Login Item; also starts it now
+claude mcp remove -s user grip 2>/dev/null; claude mcp add --transport http -s user grip http://127.0.0.1:7778/mcp
 ```
 
-Start the daemon **before** registering the URL — Figma's sandbox can't start
-it the way gaffer's AE panel starts gaffer's, so nothing else will. Run
-`start-daemon.sh` once and/or have Claude Hub run it at startup (gaffer's
-pattern). It's idempotent and reparents past the launching shell.
+`install-loginitem.sh` builds `~/Applications/Grip Daemon.app` (a hidden
+`LSUIElement` background app whose executable is the persistent daemon) and
+registers it as a **Login Item** — so grip starts at every login. This is
+the same mechanism Claude Hub / FigmaAgent use; Login Item `.app`s launch
+fine from a secondary/cloud volume. (A hand-rolled LaunchAgent plist via
+`launchctl bootstrap` errors `5: Input/output error` on such a box —
+`install-launchd.sh` is kept only for boot-volume installs.)
 
-`scripts/install-launchd.sh` (a launchd LaunchAgent) exists as the "nicer"
-alternative, **but launchd refuses to run a program on a `noowners` volume**
-— secondary APFS / cloud mounts like `/Volumes/…/CloudStorage` — with
-`Bootstrap failed: 5: Input/output error`. If grip lives on such a volume
-(it does here, under Dropbox), use `start-daemon.sh`; the launchd installer
-preflights for this and points you at the starter.
+Start the daemon **before** registering the URL — HTTP has no on-demand
+bootstrap, so if nothing is listening grip is simply dead (Figma's sandbox
+can't start it). `scripts/start-daemon.sh` is a manual one-shot starter
+(nohup) if you just need it up now without the login item.
 
 Note: launch-time `GRIP_FILE` binding is stdio-only (it rides the shim's IPC
 control frame). Over HTTP, agents bind at runtime with `set_active_file`.
