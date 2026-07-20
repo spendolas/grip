@@ -165,11 +165,11 @@ Register — two options (writes user-scope MCP config to `~/.claude.json`):
 claude mcp add --scope user grip node /abs/path/to/grip/bridge/dist/index.js
 
 # HTTP (preferred for Claude Hub — direct connect, no shim; fixes leader-death hang)
-bash bridge/scripts/start-daemon.sh                                      # keep the daemon always-on (nohup)
-claude mcp add --transport http -s user grip http://127.0.0.1:7778/mcp   # then register the URL
+bash bridge/scripts/install-loginitem.sh                                 # always-on daemon as a Login Item
+claude mcp remove -s user grip; claude mcp add --transport http -s user grip http://127.0.0.1:7778/mcp
 ```
 
-Order matters for HTTP: start the daemon first (nothing else starts it for HTTP — Figma's sandbox can't, and HTTP has no on-demand bootstrap; after a reboot grip is dead until something starts the daemon). **Always-on mechanism — a macOS Login Item** (`bridge/scripts/install-loginitem.sh`): builds `~/Applications/Grip Daemon.app` (a background `LSUIElement` app whose executable IS the persistent daemon, `GRIP_PERSISTENT=1`) and registers it as a hidden login item. This is the mechanism Claude Hub and FigmaAgent use — Login Item `.app`s launch fine from this secondary/cloud volume (Hub proves it). A hand-rolled **LaunchAgent plist** (`install-launchd.sh`) is NOT reliable here — `launchctl bootstrap` errored `5: Input/output error` on this box; use the Login Item. `start-daemon.sh` (nohup) remains the manual one-shot starter. Note: spec/older docs say `~/.claude/mcp.json` — that file isn't read by Claude Code; the CLI writes `~/.claude.json`.
+Order matters for HTTP: start the daemon first (nothing else starts it for HTTP — Figma's sandbox can't, and HTTP has no on-demand bootstrap; after a reboot grip is dead until something starts the daemon). **Always-on mechanism — a macOS Login Item** (`bridge/scripts/install-loginitem.sh`): builds `/Applications/Grip Daemon.app` (a background `LSUIElement` app whose executable IS the persistent daemon, `GRIP_PERSISTENT=1`) and registers it as a hidden login item. This is the mechanism Claude Hub and FigmaAgent use — Login Item `.app`s launch fine from this secondary/cloud volume (Hub proves it). A hand-rolled **LaunchAgent plist** (`install-launchd.sh`) is NOT reliable here — `launchctl bootstrap` errored `5: Input/output error` on this box; use the Login Item. `start-daemon.sh` (nohup) remains the manual one-shot starter. Note: spec/older docs say `~/.claude/mcp.json` — that file isn't read by Claude Code; the CLI writes `~/.claude.json`.
 
 Multiple Claude sessions / Claude Hub all share one detached daemon automatically. To inspect: `lsof -i:7777` shows the daemon (PPID 1, own process group); each agent's shim lives only as long as its `claude` session. `cat ~/.grip-bridge.status` for daemon pid/version/counts without an MCP round-trip.
 

@@ -42,7 +42,7 @@ For a host that spawns many short-lived agents (Claude Hub), register grip
 by **URL** instead of stdio. Agents then connect directly to one long-lived
 daemon — no per-process shim to die mid-call, no IPC hop to lose a message
 (the leader-death stall class). Requires the daemon to be always running,
-so install it as a launchd LaunchAgent first:
+so install it as a Login Item first:
 
 ```sh
 npm run build                                     # ensure dist/ is current
@@ -50,7 +50,7 @@ bash scripts/install-loginitem.sh                 # always-on daemon as a Login 
 claude mcp remove -s user grip 2>/dev/null; claude mcp add --transport http -s user grip http://127.0.0.1:7778/mcp
 ```
 
-`install-loginitem.sh` builds `~/Applications/Grip Daemon.app` (a hidden
+`install-loginitem.sh` builds `/Applications/Grip Daemon.app` (a hidden
 `LSUIElement` background app whose executable is the persistent daemon) and
 registers it as a **Login Item** — so grip starts at every login. This is
 the same mechanism Claude Hub / FigmaAgent use; Login Item `.app`s launch

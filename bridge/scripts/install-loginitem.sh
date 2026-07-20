@@ -5,30 +5,42 @@
 # LaunchAgent plist `launchctl bootstrap` errored, but Login Item .apps run
 # fine from the cloud/secondary volume (Hub proves it).
 #
-# Builds "Grip Daemon.app" in ~/Applications whose executable IS the
+# Builds "Grip Daemon.app" in /Applications whose executable IS the
 # persistent daemon (GRIP_PERSISTENT=1 → never idle-exits), registers it as a
 # hidden login item, and launches it now.
+#
+# Run as YOURSELF (not sudo) — the login item must belong to your user. The
+# script builds the bundle in a temp dir and elevates ONLY the copy into
+# /Applications (sudo prompts just for that step if needed).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST="$(cd "$SCRIPT_DIR/.." && pwd)/dist/index.js"
 NODE="$(command -v node)"
-APP="$HOME/Applications/Grip Daemon.app"
+APP="/Applications/Grip Daemon.app"
 
+if [[ $EUID -eq 0 ]]; then
+  echo "error: don't run this with sudo — the login item would be registered for root." >&2
+  echo "       Run it as yourself; it will sudo only the /Applications copy if needed." >&2
+  exit 1
+fi
 if [[ ! -f "$DIST" ]]; then
   echo "error: $DIST not found — run 'npm run build' in bridge/ first." >&2
   exit 1
 fi
 
+# Remove a stale copy from the old ~/Applications location, if present.
+rm -rf "$HOME/Applications/Grip Daemon.app" 2>/dev/null || true
+
 echo "node: $NODE"
 echo "dist: $DIST"
 echo "app:  $APP"
 
-# --- build the .app bundle ---
-rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+# --- build the .app bundle in a temp dir, then place it in /Applications ---
+BUILD="$(mktemp -d)/Grip Daemon.app"
+mkdir -p "$BUILD/Contents/MacOS"
 
-cat > "$APP/Contents/Info.plist" <<PLIST
+cat > "$BUILD/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -45,7 +57,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 # The bundle executable IS the daemon (exec → the .app process becomes node).
-cat > "$APP/Contents/MacOS/grip-daemon" <<LAUNCHER
+cat > "$BUILD/Contents/MacOS/grip-daemon" <<LAUNCHER
 #!/bin/bash
 export GRIP_PERSISTENT=1
 # A daemon may already own the port (e.g. an on-demand shim spawned one);
@@ -53,7 +65,16 @@ export GRIP_PERSISTENT=1
 # fine — steady state is one persistent daemon holding the port.
 exec "$NODE" "$DIST" --daemon
 LAUNCHER
-chmod +x "$APP/Contents/MacOS/grip-daemon"
+chmod +x "$BUILD/Contents/MacOS/grip-daemon"
+
+# Place into /Applications, elevating only if the dir isn't user-writable.
+if [[ -w "/Applications" ]]; then
+  rm -rf "$APP"; mv "$BUILD" "$APP"
+else
+  echo "(/Applications needs admin — sudo will prompt for the copy only)"
+  sudo rm -rf "$APP"; sudo mv "$BUILD" "$APP"
+  sudo chown -R "$(id -u):$(id -g)" "$APP" 2>/dev/null || true
+fi
 
 # --- register as a login item (idempotent: remove any prior, then add) ---
 osascript -e 'tell application "System Events" to delete (every login item whose name is "Grip Daemon")' 2>/dev/null || true
