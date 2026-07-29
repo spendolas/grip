@@ -53,8 +53,13 @@ const REQUEST_TIMEOUT_MS = 10_000;          // tighter than before; matches hear
 // long-but-alive op cannot reopen the cascade-hang class. Override the export
 // budget with GRIP_EXPORT_TIMEOUT_MS.
 const EXPORT_TIMEOUT_MS = Number(process.env.GRIP_EXPORT_TIMEOUT_MS ?? 60_000);
+// A file-wide library-usage scan walks the tree + resolves remote items; it
+// chunks with yields so it never wedges, but the whole thing can still run
+// tens of seconds on a large file. Same reasoning as export.
+const SCAN_TIMEOUT_MS = Number(process.env.GRIP_SCAN_TIMEOUT_MS ?? 60_000);
 const SLOW_METHOD_TIMEOUT_MS: Record<string, number> = {
   export_node: EXPORT_TIMEOUT_MS,
+  get_library_usage: SCAN_TIMEOUT_MS,
 };
 // Fail-fast threshold. The plugin runs on Figma's single main thread; a
 // synchronous run_script loop wedges it and CANNOT be preempted from here.

@@ -818,6 +818,7 @@ export const TOOLS: ToolDef[] = [
     }),
   },
   { name: 'transform_group', description: 'Wrap nodes in a Figma Draw TRANSFORM_GROUP (non-destructive transform container). transformModifiers is an array (default [] = plain group).', schema: z.object({ nodeIds: z.array(z.string()), parentId: z.string().optional(), index: z.number().int().nonnegative().optional(), transformModifiers: z.array(z.any()).optional() }) },
+  { name: 'get_library_usage', description: 'Report team-library items used in the file: added variable libraries WITH their source filename (variableLibraries), plus distinct remote components and styles used (key + name). IMPORTANT LIMIT — the plugin API exposes source library FILENAMES only for variables; for components/styles you get key+name, never the library file (use the Figma REST API for that). Every response includes a `limitations` array spelling this out. Walks the tree in yielding chunks with budget caps (maxNodes, maxResolve) and reports `truncated` if a cap is hit. Scope defaults to the current page; pass scope:"document" for the whole file (slower).', schema: z.object({ scope: z.enum(['page', 'document']).optional(), maxNodes: z.number().int().positive().optional(), maxResolve: z.number().int().positive().optional() }) },
   {
     name: 'create_gif',
     description: 'Create a GIF node referencing an existing image hash.',
@@ -2017,6 +2018,16 @@ export function toolInputSchema(name: string): Record<string, unknown> {
           transformModifiers: { type: 'array', description: 'Transform modifiers; [] = plain group' },
         },
         required: ['nodeIds'],
+        additionalProperties: false,
+      };
+    case 'get_library_usage':
+      return {
+        type: 'object',
+        properties: {
+          scope: { type: 'string', enum: ['page', 'document'], description: 'Default page (current page); document walks all pages (slower).' },
+          maxNodes: { type: 'integer', description: 'Node-visit budget (default 50000); truncated.nodes=true if hit.' },
+          maxResolve: { type: 'integer', description: 'Max instance→component resolves (default 2000); truncated.components=true if hit.' },
+        },
         additionalProperties: false,
       };
     case 'create_gif':

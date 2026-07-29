@@ -188,6 +188,7 @@ type ToolMethod =
   | 'set_timeline_duration'
   | 'spring_to_normalized'
   | 'transform_group'
+  | 'get_library_usage'
   | 'run_script'
   | 'set_buzz_asset_type'
   | 'get_buzz_asset_type'
@@ -2344,6 +2345,86 @@ async function handle(method: ToolMethod, params: any): Promise<any> {
     case 'spring_to_normalized': {
       return plainData((figma as any).motion.physicalSpringToNormalized(coerce(params.spring)));
     }
+    case 'get_library_usage': {
+      const scope = params.scope === 'document' ? 'document' : 'page';
+      const nodeBudget = typeof params.maxNodes === 'number' && params.maxNodes > 0 ? params.maxNodes : 50000;
+      const maxResolve = typeof params.maxResolve === 'number' && params.maxResolve > 0 ? params.maxResolve : 2000;
+      const breathe = () => new Promise((r) => setTimeout(r, 0));
+
+      // (1) Added variable libraries — the ONLY item type whose source library
+      // FILENAME the plugin API exposes (`libraryName`). Cheap, no walk.
+      const variableLibraries: Record<string, string[]> = {};
+      try {
+        const cols = await (figma as any).teamLibrary.getAvailableLibraryVariableCollectionsAsync();
+        for (const c of cols) (variableLibraries[c.libraryName] = variableLibraries[c.libraryName] || []).push(c.name);
+      } catch (e) { /* teamLibrary unavailable — leave empty */ }
+
+      // (2) Walk the tree (iterative DFS, budget-capped, yielding) collecting
+      // instances + style ids. Chunked so the main thread never freezes.
+      let roots: readonly BaseNode[] = figma.currentPage.children;
+      if (scope === 'document') {
+        await figma.loadAllPagesAsync();
+        const all: BaseNode[] = [];
+        for (const pg of figma.root.children) for (const c of (pg as PageNode).children) all.push(c);
+        roots = all;
+      }
+      const stack: BaseNode[] = roots.slice();
+      const styleIdProps = ['fillStyleId', 'strokeStyleId', 'effectStyleId', 'gridStyleId', 'textStyleId'];
+      const instances: InstanceNode[] = [];
+      const styleIds = new Set<string>();
+      let visited = 0, nodesTruncated = false, sinceYield = 0;
+      while (stack.length) {
+        if (visited >= nodeBudget) { nodesTruncated = true; break; }
+        const n = stack.pop() as any;
+        visited++;
+        if (n.type === 'INSTANCE') instances.push(n as InstanceNode);
+        for (const p of styleIdProps) { const id = n[p]; if (id && typeof id === 'string') styleIds.add(id); }
+        if ('children' in n) { const ch = n.children; for (let i = 0; i < ch.length; i++) stack.push(ch[i]); }
+        if (++sinceYield >= 500) { sinceYield = 0; await breathe(); }
+      }
+
+      // (3) Resolve distinct REMOTE components (capped). No source filename
+      // available — key + name only.
+      const compByKey = new Map<string, string>();
+      let resolved = 0, componentsTruncated = false;
+      for (let i = 0; i < instances.length; i++) {
+        if (resolved >= maxResolve) { componentsTruncated = true; break; }
+        try {
+          const mc = await instances[i].getMainComponentAsync();
+          resolved++;
+          if (mc && (mc as any).remote) compByKey.set(mc.key, mc.name);
+        } catch (e) { /* skip unresolvable */ }
+        if (resolved % 200 === 0) await breathe();
+      }
+
+      // (4) Resolve distinct REMOTE styles (usually few). Key + name only.
+      const remoteStyles: Array<{ name: string; key: string; type: string }> = [];
+      let sinceStyleYield = 0;
+      for (const id of styleIds) {
+        try {
+          const st = await figma.getStyleByIdAsync(id);
+          if (st && (st as any).remote) remoteStyles.push({ name: st.name, key: st.key, type: st.type });
+        } catch (e) { /* skip */ }
+        if (++sinceStyleYield >= 200) { sinceStyleYield = 0; await breathe(); }
+      }
+
+      const remoteComponents = Array.from(compByKey, ([key, name]) => ({ name, key }));
+      return {
+        scope,
+        variableLibraries,   // { <libraryFilename>: [collection, ...] } — filenames available
+        remoteComponents,    // [{ name, key }] — NO source filename (see limitations)
+        remoteStyles,        // [{ name, key, type }] — NO source filename (see limitations)
+        stats: { nodesVisited: visited, instancesFound: instances.length, componentsResolved: resolved, distinctStyleIds: styleIds.size },
+        truncated: { nodes: nodesTruncated, components: componentsTruncated },
+        limitations: [
+          "Source library FILENAMES are available ONLY for variables (variableLibraries). For components and styles the Figma plugin API exposes only key + name — NOT the library file they came from. Use the Figma REST API GET /v1/files/:key for component/style library attribution.",
+          "An item name may look path-like (e.g. 'header/status_bar') but that is the item's own name, not a library filename.",
+          "variableLibraries lists ENABLED libraries only; a used variable whose source library is disabled is not attributed here.",
+          "truncated.nodes / truncated.components = a budget cap (maxNodes / maxResolve) was hit; results are PARTIAL — raise the caps or narrow scope to complete.",
+          "This does not distinguish 'used' vs merely referenced beyond presence in the scanned tree; scope is the current page unless scope='document'.",
+        ],
+      };
+    }
     case 'transform_group': {
       const ids = asIds(params.nodeIds);
       const nodes: SceneNode[] = [];
@@ -3006,7 +3087,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.2.13';
+const PLUGIN_VERSION = '0.2.14';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
@@ -3047,7 +3128,7 @@ const READ_ONLY_METHODS = new Set<string>([
   'slides_get_canvas_grid', 'get_slide_transition',
   // listings + loaders that don't change the canvas
   'list_fonts', 'load_font', 'load_brushes', 'list_shaders',
-  'list_animation_styles', 'get_animations', 'spring_to_normalized',
+  'list_animation_styles', 'get_animations', 'spring_to_normalized', 'get_library_usage',
   // exports + transient UI
   'export_node', 'notify',
   // subscribe just flips a flag; no document mutation

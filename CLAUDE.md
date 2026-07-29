@@ -74,7 +74,7 @@ plugin/
 
 ## MCP tool surface
 
-190 tools. Per-tool reference lives in [`TOOLS.md`](./TOOLS.md). Quick map:
+191 tools. Per-tool reference lives in [`TOOLS.md`](./TOOLS.md). Quick map:
 
 **Bridge-side (no plugin round-trip):**
 - `list_files`, `set_active_file` — multi-file session routing.

@@ -1,6 +1,6 @@
 # Grip MCP Tools
 
-190 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
+191 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
 
 Conventions:
 - `nodeId` — Figma node id (e.g. `"167:290"`).
@@ -85,6 +85,16 @@ Find nodes by combination of filters. Paginated.
 Read pluginData stored on a node.
 - Params: `nodeId` (req), `key` (optional — omit to dump all).
 - Returns: `{ key, value }` or `{ keys, data }`.
+
+### `get_library_usage`
+Report team-library items used in the file.
+- Params: `scope` (`page` default | `document`), `maxNodes` (walk budget, default 50000), `maxResolve` (instance→component resolves, default 2000).
+- Returns: `{ variableLibraries, remoteComponents, remoteStyles, stats, truncated, limitations }`.
+  - `variableLibraries` — `{ <libraryFilename>: [collection,…] }`. **The only place a source library FILENAME is available** (via `getAvailableLibraryVariableCollectionsAsync`), and only for *enabled* libraries.
+  - `remoteComponents` / `remoteStyles` — distinct remote items used, as `{ name, key }` (+ `type` for styles). **No source filename** — the plugin API doesn't expose which library file a component/style came from (use the Figma REST API for that).
+  - `truncated: { nodes, components }` — a budget cap was hit; results are partial. Raise caps or narrow scope.
+  - `limitations` — array restating the above, returned on every call so callers can't mistake absence for "not from a library" or a name for a filename.
+- Walks in yielding chunks (never wedges); gets a 60s timeout (`GRIP_SCAN_TIMEOUT_MS`).
 
 ---
 
