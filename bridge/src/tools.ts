@@ -959,6 +959,8 @@ export const TOOLS: ToolDef[] = [
   { name: 'table_resize_column', description: 'Set a TABLE column\'s width.', schema: z.object({ nodeId: z.string(), index: z.number().int().nonnegative(), width: z.number().positive() }) },
   { name: 'create_slot', description: 'Create a SLOT inside a COMPONENT (used for slot-based variant authoring).', schema: z.object({ componentId: z.string(), name: z.string().optional() }) },
   { name: 'set_grid_child_position', description: 'Place a direct child of a GRID auto-layout frame at a 0-based (row, column) cell. Configure the grid container first via set_node_property (layoutMode="GRID", gridRowCount/gridColumnCount, gridRowGap/gridColumnGap, gridColumnSizes/gridRowSizes).', schema: z.object({ nodeId: z.string(), row: z.number().int().nonnegative(), column: z.number().int().nonnegative() }) },
+  { name: 'list_shaders', description: 'List shaders available to this file (Figma shader subsystem). Returns an array of shader descriptors (empty if the file has none). Use a returned id with import_shader, then apply via set_node_property fills/effects with {type:"SHADER", shaderId}.', schema: z.object({}) },
+  { name: 'import_shader', description: 'Materialize a shader into this file by id (get the id from list_shaders). Returns the imported shader descriptor. Required before a SHADER paint/effect referencing it can be applied.', schema: z.object({ shaderId: z.string() }) },
   {
     name: 'run_script',
     description:
@@ -1177,6 +1179,13 @@ export function toolInputSchema(name: string): Record<string, unknown> {
           column: { type: 'integer', description: '0-based grid column' },
         },
         required: ['nodeId', 'row', 'column'],
+        additionalProperties: false,
+      };
+    case 'import_shader':
+      return {
+        type: 'object',
+        properties: { shaderId: { type: 'string', description: 'Shader id from list_shaders' } },
+        required: ['shaderId'],
         additionalProperties: false,
       };
     case 'set_node_property':

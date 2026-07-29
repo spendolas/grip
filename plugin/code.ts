@@ -177,6 +177,8 @@ type ToolMethod =
   | 'table_resize_column'
   | 'create_slot'
   | 'set_grid_child_position'
+  | 'list_shaders'
+  | 'import_shader'
   | 'run_script'
   | 'set_buzz_asset_type'
   | 'get_buzz_asset_type'
@@ -302,6 +304,20 @@ function serializeEffectValue(v: any): any {
   const out: any = {};
   for (const k of Object.keys(v)) out[k] = serializeEffectValue(v[k]);
   return out;
+}
+
+// Project an arbitrary host object (e.g. a Shader) to plain JSON-safe data,
+// dropping functions so the postMessage structured-clone can't throw.
+function plainData(v: any): any {
+  if (v == null || typeof v === 'function') return undefined;
+  if (typeof v !== 'object') return v;
+  if (Array.isArray(v)) return v.map(plainData).filter((x) => x !== undefined);
+  const o: any = {};
+  for (const k of Object.keys(v)) {
+    const pv = plainData(v[k]);
+    if (pv !== undefined) o[k] = pv;
+  }
+  return o;
 }
 
 function hasFills(node: BaseNode): node is BaseNode & MinimalFillsMixin {
@@ -2228,6 +2244,14 @@ async function handle(method: ToolMethod, params: any): Promise<any> {
       (n as any).setGridChildPosition(Number(params.row), Number(params.column));
       return { success: true };
     }
+    case 'list_shaders': {
+      const list = await (figma as any).listAvailableShaders();
+      return (list ?? []).map((s: any) => plainData(s));
+    }
+    case 'import_shader': {
+      const s = await (figma as any).importShaderById(params.shaderId);
+      return plainData(s);
+    }
     case 'run_script': {
       // Compile + run arbitrary JS inside the plugin sandbox. Trades
       // safety for throughput: scripts that loop over thousands of nodes
@@ -2869,7 +2893,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.2.8';
+const PLUGIN_VERSION = '0.2.9';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
@@ -2909,7 +2933,7 @@ const READ_ONLY_METHODS = new Set<string>([
   'get_relaunch_data', 'get_buzz_asset_type',
   'slides_get_canvas_grid', 'get_slide_transition',
   // listings + loaders that don't change the canvas
-  'list_fonts', 'load_font', 'load_brushes',
+  'list_fonts', 'load_font', 'load_brushes', 'list_shaders',
   // exports + transient UI
   'export_node', 'notify',
   // subscribe just flips a flag; no document mutation
