@@ -1,6 +1,6 @@
 {
   "name": "grip-bridge",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "private": true,
   "description": "Bridge between Figma plugin and MCP agents for Grip",
   "main": "dist/index.js",

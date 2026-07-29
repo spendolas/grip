@@ -249,6 +249,14 @@ function serializePaint(paint: Paint): any {
     if (ip.scalingFactor !== undefined) base.scalingFactor = ip.scalingFactor;
     if (ip.rotation !== undefined) base.rotation = ip.rotation;
     if (ip.filters) base.filters = ip.filters;
+  } else {
+    // Newer paint variants (SHADER, VIDEO, …) — copy remaining keys generically
+    // so reads aren't lossy, reusing the effect value-walker (handles color →
+    // {hex,opacity}, vectors, variable aliases, nested arrays/objects).
+    for (const key of Object.keys(paint)) {
+      if (key in base) continue;
+      base[key] = serializeEffectValue((paint as any)[key]);
+    }
   }
   return base;
 }
@@ -2861,7 +2869,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.2.7';
+const PLUGIN_VERSION = '0.2.8';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
