@@ -433,6 +433,7 @@ async function serializeNode(
   if (want('constraints') && 'constraints' in node) out.constraints = sn.constraints;
   if (want('relativeTransform') && 'relativeTransform' in node) out.relativeTransform = sn.relativeTransform;
   if (want('absoluteBoundingBox') && 'absoluteBoundingBox' in node) out.absoluteBoundingBox = sn.absoluteBoundingBox;
+  if (want('targetAspectRatio') && 'targetAspectRatio' in node && sn.targetAspectRatio) out.targetAspectRatio = sn.targetAspectRatio;
 
   // Fills / strokes / effects
   if (want('fills')) {
@@ -1335,7 +1336,7 @@ async function handle(method: ToolMethod, params: any): Promise<any> {
       const n = await getNode(params.nodeId);
       if (n.type !== 'TEXT') throw new Error(`Not a TEXT node: ${params.nodeId}`);
       const fields = (params.fields ?? [
-        'fontName', 'fontSize', 'textCase', 'textDecoration',
+        'fontName', 'fontStyle', 'fontSize', 'textCase', 'textDecoration',
         'fills', 'lineHeight', 'letterSpacing', 'hyperlink', 'listOptions',
         'paragraphSpacing', 'paragraphIndent', 'openTypeFeatures',
       ]) as Parameters<TextNode['getStyledTextSegments']>[0];
@@ -2974,7 +2975,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.2.11';
+const PLUGIN_VERSION = '0.2.12';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
