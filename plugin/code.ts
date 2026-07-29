@@ -330,6 +330,15 @@ function plainData(v: any): any {
   return o;
 }
 
+// Paginated library-usage scans. A scan walks the tree ONCE (cached here as
+// node refs), then each get_library_usage call resolves the next batch of
+// instances → components, advancing a cursor until every node is covered — so
+// the union across pages is COMPLETE (never a silently-capped partial). Keyed
+// by an opaque cursor id; pruned when finished or when too many pile up.
+interface LibScan { nodes: BaseNode[]; i: number; scope: string; styleSeen: Set<string>; startedAt: number; }
+const _libScans = new Map<string, LibScan>();
+let _libScanSeq = 0;
+
 // Inverse of serializeEffectValue — accept the shapes our reads emit so a
 // read → edit → write round-trip works. Converts {hex,opacity} back to an
 // RGBA color and {variableId,type:'VARIABLE_ALIAS'} back to Figma's alias
@@ -2346,84 +2355,91 @@ async function handle(method: ToolMethod, params: any): Promise<any> {
       return plainData((figma as any).motion.physicalSpringToNormalized(coerce(params.spring)));
     }
     case 'get_library_usage': {
-      const scope = params.scope === 'document' ? 'document' : 'page';
-      const nodeBudget = typeof params.maxNodes === 'number' && params.maxNodes > 0 ? params.maxNodes : 50000;
-      const maxResolve = typeof params.maxResolve === 'number' && params.maxResolve > 0 ? params.maxResolve : 2000;
       const breathe = () => new Promise((r) => setTimeout(r, 0));
-
-      // (1) Added variable libraries — the ONLY item type whose source library
-      // FILENAME the plugin API exposes (`libraryName`). Cheap, no walk.
-      const variableLibraries: Record<string, string[]> = {};
-      try {
-        const cols = await (figma as any).teamLibrary.getAvailableLibraryVariableCollectionsAsync();
-        for (const c of cols) (variableLibraries[c.libraryName] = variableLibraries[c.libraryName] || []).push(c.name);
-      } catch (e) { /* teamLibrary unavailable — leave empty */ }
-
-      // (2) Walk the tree (iterative DFS, budget-capped, yielding) collecting
-      // instances + style ids. Chunked so the main thread never freezes.
-      let roots: readonly BaseNode[] = figma.currentPage.children;
-      if (scope === 'document') {
-        await figma.loadAllPagesAsync();
-        const all: BaseNode[] = [];
-        for (const pg of figma.root.children) for (const c of (pg as PageNode).children) all.push(c);
-        roots = all;
-      }
-      const stack: BaseNode[] = roots.slice();
       const styleIdProps = ['fillStyleId', 'strokeStyleId', 'effectStyleId', 'gridStyleId', 'textStyleId'];
-      const instances: InstanceNode[] = [];
-      const styleIds = new Set<string>();
-      let visited = 0, nodesTruncated = false, sinceYield = 0;
-      while (stack.length) {
-        if (visited >= nodeBudget) { nodesTruncated = true; break; }
-        const n = stack.pop() as any;
-        visited++;
-        if (n.type === 'INSTANCE') instances.push(n as InstanceNode);
-        for (const p of styleIdProps) { const id = n[p]; if (id && typeof id === 'string') styleIds.add(id); }
-        if ('children' in n) { const ch = n.children; for (let i = 0; i < ch.length; i++) stack.push(ch[i]); }
-        if (++sinceYield >= 500) { sinceYield = 0; await breathe(); }
+      const batchResolveCap = typeof params.maxResolve === 'number' && params.maxResolve > 0 ? params.maxResolve : 1500;
+      const TIME_BUDGET_MS = 45000;  // stop well before the 60s WS timeout
+
+      // Resume an in-progress scan, or start a new one (walk the tree ONCE and
+      // cache node refs so later pages don't re-walk).
+      let scanId: string;
+      let scan: LibScan;
+      const firstCall = !(typeof params.cursor === 'string' && params.cursor);
+      if (!firstCall) {
+        scanId = params.cursor;
+        const existing = _libScans.get(scanId);
+        if (!existing) {
+          throw new Error(`get_library_usage: cursor '${scanId}' expired or unknown (the Figma plugin likely reloaded mid-scan). Restart the scan by calling again WITHOUT a cursor.`);
+        }
+        scan = existing;
+      } else {
+        const scope = params.scope === 'document' ? 'document' : 'page';
+        let root: BaseNode;
+        if (scope === 'document') { await figma.loadAllPagesAsync(); root = figma.root; }
+        else root = figma.currentPage;
+        const nodes = (root as any).findAll(() => true) as BaseNode[];
+        scanId = `libscan-${++_libScanSeq}`;
+        scan = { nodes, i: 0, scope, styleSeen: new Set<string>(), startedAt: Date.now() };
+        _libScans.set(scanId, scan);
+        // Prune: keep at most a few concurrent scans.
+        if (_libScans.size > 4) { const oldest = _libScans.keys().next().value as string; if (oldest !== scanId) _libScans.delete(oldest); }
       }
 
-      // (3) Resolve distinct REMOTE components (capped). No source filename
-      // available — key + name only.
-      const compByKey = new Map<string, string>();
-      let resolved = 0, componentsTruncated = false;
-      for (let i = 0; i < instances.length; i++) {
-        if (resolved >= maxResolve) { componentsTruncated = true; break; }
+      // variableLibraries — the ONLY item type whose source library FILENAME the
+      // plugin API exposes. Cheap + complete; return on the first page only.
+      let variableLibraries: Record<string, string[]> | undefined;
+      if (firstCall) {
+        variableLibraries = {};
         try {
-          const mc = await instances[i].getMainComponentAsync();
-          resolved++;
-          if (mc && (mc as any).remote) compByKey.set(mc.key, mc.name);
-        } catch (e) { /* skip unresolvable */ }
-        if (resolved % 200 === 0) await breathe();
+          const cols = await (figma as any).teamLibrary.getAvailableLibraryVariableCollectionsAsync();
+          for (const c of cols) (variableLibraries[c.libraryName] = variableLibraries[c.libraryName] || []).push(c.name);
+        } catch (e) { /* teamLibrary unavailable */ }
       }
 
-      // (4) Resolve distinct REMOTE styles (usually few). Key + name only.
-      const remoteStyles: Array<{ name: string; key: string; type: string }> = [];
-      let sinceStyleYield = 0;
-      for (const id of styleIds) {
-        try {
-          const st = await figma.getStyleByIdAsync(id);
-          if (st && (st as any).remote) remoteStyles.push({ name: st.name, key: st.key, type: st.type });
-        } catch (e) { /* skip */ }
-        if (++sinceStyleYield >= 200) { sinceStyleYield = 0; await breathe(); }
+      // Process a batch window of the cached node list, bounded by resolve count
+      // and wall-clock so one call never trips the timeout.
+      const comps = new Map<string, string>();
+      const styles: Array<{ name: string; key: string; type: string }> = [];
+      const t0 = Date.now();
+      let resolves = 0, processed = 0;
+      const nodes = scan.nodes;
+      while (scan.i < nodes.length) {
+        if (resolves >= batchResolveCap) break;
+        if (Date.now() - t0 > TIME_BUDGET_MS) break;
+        const n = nodes[scan.i] as any;
+        scan.i++; processed++;
+        for (const p of styleIdProps) {
+          const id = n[p];
+          if (id && typeof id === 'string' && !scan.styleSeen.has(id)) {
+            scan.styleSeen.add(id);
+            try { const st = await figma.getStyleByIdAsync(id); if (st && (st as any).remote) styles.push({ name: st.name, key: st.key, type: st.type }); } catch (e) {}
+          }
+        }
+        if (n.type === 'INSTANCE') {
+          try { const mc = await n.getMainComponentAsync(); resolves++; if (mc && (mc as any).remote) comps.set(mc.key, mc.name); } catch (e) {}
+        }
+        if (processed % 300 === 0) await breathe();
       }
+      const done = scan.i >= nodes.length;
+      if (done) _libScans.delete(scanId);
 
-      const remoteComponents = Array.from(compByKey, ([key, name]) => ({ name, key }));
-      return {
-        scope,
-        variableLibraries,   // { <libraryFilename>: [collection, ...] } — filenames available
-        remoteComponents,    // [{ name, key }] — NO source filename (see limitations)
-        remoteStyles,        // [{ name, key, type }] — NO source filename (see limitations)
-        stats: { nodesVisited: visited, instancesFound: instances.length, componentsResolved: resolved, distinctStyleIds: styleIds.size },
-        truncated: { nodes: nodesTruncated, components: componentsTruncated },
+      const out: any = {
+        scope: scan.scope,
+        complete: done,
+        nextCursor: done ? null : scanId,   // loop until null → union is COMPLETE
+        remoteComponents: Array.from(comps, ([key, name]) => ({ name, key })),  // key+name only — no source filename
+        remoteStyles: styles,                                                    // key+name+type — no source filename
+        progress: { scanned: scan.i, total: nodes.length },
         limitations: [
-          "Source library FILENAMES are available ONLY for variables (variableLibraries). For components and styles the Figma plugin API exposes only key + name — NOT the library file they came from. Use the Figma REST API GET /v1/files/:key for component/style library attribution.",
+          "Not done until nextCursor is null — keep calling with cursor:nextCursor and UNION remoteComponents/remoteStyles by key across pages (items may repeat across pages).",
+          "Source library FILENAMES are available ONLY for variables (variableLibraries, returned on the first page). For components/styles the plugin API exposes only key + name — NOT the source library file. Use the Figma REST API GET /v1/files/:key for that attribution.",
           "An item name may look path-like (e.g. 'header/status_bar') but that is the item's own name, not a library filename.",
-          "variableLibraries lists ENABLED libraries only; a used variable whose source library is disabled is not attributed here.",
-          "truncated.nodes / truncated.components = a budget cap (maxNodes / maxResolve) was hit; results are PARTIAL — raise the caps or narrow scope to complete.",
-          "This does not distinguish 'used' vs merely referenced beyond presence in the scanned tree; scope is the current page unless scope='document'.",
+          "variableLibraries lists ENABLED libraries only; a variable whose source library is disabled is not attributed.",
+          "A cursor is invalidated if the Figma plugin reloads mid-scan — you'll get an explicit error to restart (never a silent partial).",
         ],
       };
+      if (firstCall) out.variableLibraries = variableLibraries;
+      return out;
     }
     case 'transform_group': {
       const ids = asIds(params.nodeIds);
@@ -3087,7 +3103,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.2.14';
+const PLUGIN_VERSION = '0.2.15';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie

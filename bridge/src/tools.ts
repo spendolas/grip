@@ -818,7 +818,7 @@ export const TOOLS: ToolDef[] = [
     }),
   },
   { name: 'transform_group', description: 'Wrap nodes in a Figma Draw TRANSFORM_GROUP (non-destructive transform container). transformModifiers is an array (default [] = plain group).', schema: z.object({ nodeIds: z.array(z.string()), parentId: z.string().optional(), index: z.number().int().nonnegative().optional(), transformModifiers: z.array(z.any()).optional() }) },
-  { name: 'get_library_usage', description: 'Report team-library items used in the file: added variable libraries WITH their source filename (variableLibraries), plus distinct remote components and styles used (key + name). IMPORTANT LIMIT — the plugin API exposes source library FILENAMES only for variables; for components/styles you get key+name, never the library file (use the Figma REST API for that). Every response includes a `limitations` array spelling this out. Walks the tree in yielding chunks with budget caps (maxNodes, maxResolve) and reports `truncated` if a cap is hit. Scope defaults to the current page; pass scope:"document" for the whole file (slower).', schema: z.object({ scope: z.enum(['page', 'document']).optional(), maxNodes: z.number().int().positive().optional(), maxResolve: z.number().int().positive().optional() }) },
+  { name: 'get_library_usage', description: 'Report team-library items used in the file — PAGINATED so the result is COMPLETE, never a silent partial. First call (no cursor): pass scope ("page" default | "document"); returns variableLibraries (enabled variable libraries WITH source filename) + the first page of remoteComponents/remoteStyles + nextCursor. Keep calling with cursor:nextCursor and UNION results by key until nextCursor is null (done). IMPORTANT LIMIT — the plugin API exposes source FILENAMES only for variables; components/styles come back as key+name only (use the Figma REST API for their library file). Every response carries a `limitations` array. maxResolve bounds per-call work (default 1500); a cursor is invalidated if the plugin reloads mid-scan (explicit error to restart).', schema: z.object({ scope: z.enum(['page', 'document']).optional(), cursor: z.string().optional(), maxResolve: z.number().int().positive().optional() }) },
   {
     name: 'create_gif',
     description: 'Create a GIF node referencing an existing image hash.',
@@ -2024,9 +2024,9 @@ export function toolInputSchema(name: string): Record<string, unknown> {
       return {
         type: 'object',
         properties: {
-          scope: { type: 'string', enum: ['page', 'document'], description: 'Default page (current page); document walks all pages (slower).' },
-          maxNodes: { type: 'integer', description: 'Node-visit budget (default 50000); truncated.nodes=true if hit.' },
-          maxResolve: { type: 'integer', description: 'Max instance→component resolves (default 2000); truncated.components=true if hit.' },
+          scope: { type: 'string', enum: ['page', 'document'], description: 'First call only. Default page (current page); document walks all pages.' },
+          cursor: { type: 'string', description: 'nextCursor from the previous page. Omit on the first call. Loop until nextCursor is null.' },
+          maxResolve: { type: 'integer', description: 'Per-call instance→component resolve budget (default 1500).' },
         },
         additionalProperties: false,
       };

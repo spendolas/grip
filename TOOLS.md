@@ -87,14 +87,14 @@ Read pluginData stored on a node.
 - Returns: `{ key, value }` or `{ keys, data }`.
 
 ### `get_library_usage`
-Report team-library items used in the file.
-- Params: `scope` (`page` default | `document`), `maxNodes` (walk budget, default 50000), `maxResolve` (instance→component resolves, default 2000).
-- Returns: `{ variableLibraries, remoteComponents, remoteStyles, stats, truncated, limitations }`.
-  - `variableLibraries` — `{ <libraryFilename>: [collection,…] }`. **The only place a source library FILENAME is available** (via `getAvailableLibraryVariableCollectionsAsync`), and only for *enabled* libraries.
+Report team-library items used in the file. **Paginated so the result is COMPLETE — never a silently-capped partial.**
+- Params: `scope` (`page` default | `document`, first call only), `cursor` (`nextCursor` from the previous page — omit on the first call), `maxResolve` (per-call resolve budget, default 1500).
+- Flow: call with no cursor → get the first page + `nextCursor`. Keep calling with `cursor: nextCursor`, **unioning `remoteComponents`/`remoteStyles` by `key`**, until `nextCursor` is `null` (`complete: true`). Items may repeat across pages — dedupe by key.
+- Returns per page: `{ scope, complete, nextCursor, remoteComponents, remoteStyles, progress:{scanned,total}, limitations }`; the **first page** also carries `variableLibraries`.
+  - `variableLibraries` — `{ <libraryFilename>: [collection,…] }`. **The only place a source library FILENAME is available** (`getAvailableLibraryVariableCollectionsAsync`), and only for *enabled* libraries.
   - `remoteComponents` / `remoteStyles` — distinct remote items used, as `{ name, key }` (+ `type` for styles). **No source filename** — the plugin API doesn't expose which library file a component/style came from (use the Figma REST API for that).
-  - `truncated: { nodes, components }` — a budget cap was hit; results are partial. Raise caps or narrow scope.
-  - `limitations` — array restating the above, returned on every call so callers can't mistake absence for "not from a library" or a name for a filename.
-- Walks in yielding chunks (never wedges); gets a 60s timeout (`GRIP_SCAN_TIMEOUT_MS`).
+  - `limitations` — array restating the above on every page, so callers can't mistake absence for "not from a library" or a name for a filename.
+- The tree is walked ONCE per scan (cached as node refs, keyed by the cursor); each call resolves the next batch, yielding so it never wedges. 60s per-call timeout (`GRIP_SCAN_TIMEOUT_MS`). A cursor is invalidated if the plugin reloads mid-scan → explicit error to restart (never a silent partial).
 
 ---
 
