@@ -179,6 +179,14 @@ type ToolMethod =
   | 'set_grid_child_position'
   | 'list_shaders'
   | 'import_shader'
+  | 'list_animation_styles'
+  | 'get_animations'
+  | 'apply_animation_style'
+  | 'remove_animation_style'
+  | 'apply_manual_keyframe_track'
+  | 'remove_manual_keyframe_track'
+  | 'set_timeline_duration'
+  | 'spring_to_normalized'
   | 'run_script'
   | 'set_buzz_asset_type'
   | 'get_buzz_asset_type'
@@ -2252,6 +2260,58 @@ async function handle(method: ToolMethod, params: any): Promise<any> {
       const s = await (figma as any).importShaderById(params.shaderId);
       return plainData(s);
     }
+    // ---------- Motion (native keyframe/timeline animation) ----------
+    case 'list_animation_styles': {
+      const styles = (figma as any).motion.figmaAnimationStyles();
+      // Each preset self-describes its `props`; note the props DESCRIPTOR is
+      // not the applyAnimationStyle input schema (which is stricter).
+      return (styles ?? []).map((s: any) => plainData(s));
+    }
+    case 'get_animations': {
+      const n = (await getNode(params.nodeId)) as any;
+      return {
+        animationStyles: plainData(n.animationStyles),
+        animations: plainData(n.animations),
+        manualKeyframeTracks: plainData(n.manualKeyframeTracks),
+        timelines: plainData(n.timelines),
+      };
+    }
+    case 'apply_animation_style': {
+      const n = (await getNode(params.nodeId)) as any;
+      if (typeof n.applyAnimationStyle !== 'function') throw new Error(`Node ${params.nodeId} (${n.type}) is not animatable`);
+      // Forward presetData verbatim — Figma validates it per-preset and its
+      // error is surfaced to the caller.
+      n.applyAnimationStyle(params.styleId, coerce(params.props) ?? {});
+      return { success: true };
+    }
+    case 'remove_animation_style': {
+      const n = (await getNode(params.nodeId)) as any;
+      // Takes the APPLIED-INSTANCE id (animationStyles[].id from get_animations),
+      // not the preset styleId passed to apply_animation_style.
+      n.removeAnimationStyle(params.id);
+      return { success: true };
+    }
+    case 'apply_manual_keyframe_track': {
+      const n = (await getNode(params.nodeId)) as any;
+      if (typeof n.applyManualKeyframeTrack !== 'function') throw new Error(`Node ${params.nodeId} (${n.type}) is not animatable`);
+      n.applyManualKeyframeTrack(coerce(params.track));
+      return { success: true };
+    }
+    case 'remove_manual_keyframe_track': {
+      const n = (await getNode(params.nodeId)) as any;
+      n.removeManualKeyframeTrack(coerce(params.track));
+      return { success: true };
+    }
+    case 'set_timeline_duration': {
+      const n = (await getNode(params.nodeId)) as any;
+      if (typeof n.setTimelineDuration !== 'function') throw new Error(`Node ${params.nodeId} (${n.type}) has no timeline`);
+      // (timelineId, durationSeconds) — timelineId from get_animations timelines[].id.
+      n.setTimelineDuration(params.timelineId, Number(params.duration));
+      return { success: true };
+    }
+    case 'spring_to_normalized': {
+      return plainData((figma as any).motion.physicalSpringToNormalized(coerce(params.spring)));
+    }
     case 'run_script': {
       // Compile + run arbitrary JS inside the plugin sandbox. Trades
       // safety for throughput: scripts that loop over thousands of nodes
@@ -2893,7 +2953,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.2.9';
+const PLUGIN_VERSION = '0.2.10';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
@@ -2934,6 +2994,7 @@ const READ_ONLY_METHODS = new Set<string>([
   'slides_get_canvas_grid', 'get_slide_transition',
   // listings + loaders that don't change the canvas
   'list_fonts', 'load_font', 'load_brushes', 'list_shaders',
+  'list_animation_styles', 'get_animations', 'spring_to_normalized',
   // exports + transient UI
   'export_node', 'notify',
   // subscribe just flips a flag; no document mutation

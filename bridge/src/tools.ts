@@ -961,6 +961,16 @@ export const TOOLS: ToolDef[] = [
   { name: 'set_grid_child_position', description: 'Place a direct child of a GRID auto-layout frame at a 0-based (row, column) cell. Configure the grid container first via set_node_property (layoutMode="GRID", gridRowCount/gridColumnCount, gridRowGap/gridColumnGap, gridColumnSizes/gridRowSizes).', schema: z.object({ nodeId: z.string(), row: z.number().int().nonnegative(), column: z.number().int().nonnegative() }) },
   { name: 'list_shaders', description: 'List shaders available to this file (Figma shader subsystem). Returns an array of shader descriptors (empty if the file has none). Use a returned id with import_shader, then apply via set_node_property fills/effects with {type:"SHADER", shaderId}.', schema: z.object({}) },
   { name: 'import_shader', description: 'Materialize a shader into this file by id (get the id from list_shaders). Returns the imported shader descriptor. Required before a SHADER paint/effect referencing it can be applied.', schema: z.object({ shaderId: z.string() }) },
+
+  // ---------- Motion (native keyframe/timeline animation, distinct from prototype reactions) ----------
+  { name: 'list_animation_styles', description: 'List Figma Motion built-in animation presets (Position, Scale, Rotation, Size, Opacity, Path). Each returns {styleId, name, description, props}. NOTE: `props` is a human/type DESCRIPTOR of the preset, not the exact applyAnimationStyle input schema (which is stricter and validated by Figma) — start minimal (e.g. {duration}) and read Figma\'s error to refine.', schema: z.object({}) },
+  { name: 'get_animations', description: 'Read a node\'s Motion data: {animationStyles, animations, manualKeyframeTracks, timelines}. Dedicated read tool (not part of get_node) to avoid bloating every node read.', schema: z.object({ nodeId: z.string() }) },
+  { name: 'apply_animation_style', description: 'Apply a Figma Motion preset to a node. styleId from list_animation_styles; props is the preset data (forwarded verbatim to node.applyAnimationStyle — Figma validates per-preset). Mutating.', schema: z.object({ nodeId: z.string(), styleId: z.string(), props: z.record(z.any()).optional() }) },
+  { name: 'remove_animation_style', description: 'Remove an applied Motion preset from a node. `id` is the applied-instance id (animationStyles[].id from get_animations), NOT the preset styleId.', schema: z.object({ nodeId: z.string(), id: z.string() }) },
+  { name: 'apply_manual_keyframe_track', description: 'Add/replace a manual keyframe track on a node (Figma Motion). `track` is forwarded verbatim to node.applyManualKeyframeTrack — Figma validates its shape.', schema: z.object({ nodeId: z.string(), track: z.any() }) },
+  { name: 'remove_manual_keyframe_track', description: 'Remove a manual keyframe track from a node. `track` (id or descriptor) forwarded to node.removeManualKeyframeTrack.', schema: z.object({ nodeId: z.string(), track: z.any() }) },
+  { name: 'set_timeline_duration', description: 'Set a Motion timeline\'s duration (seconds). timelineId from get_animations timelines[].id.', schema: z.object({ nodeId: z.string(), timelineId: z.string(), duration: z.number().nonnegative() }) },
+  { name: 'spring_to_normalized', description: 'Figma Motion helper: convert physical spring params to a normalized easing curve. `spring` forwarded to figma.motion.physicalSpringToNormalized.', schema: z.object({ spring: z.any() }) },
   {
     name: 'run_script',
     description:
@@ -1188,6 +1198,29 @@ export function toolInputSchema(name: string): Record<string, unknown> {
         required: ['shaderId'],
         additionalProperties: false,
       };
+    case 'get_animations':
+      return { type: 'object', properties: { nodeId: { type: 'string' } }, required: ['nodeId'], additionalProperties: false };
+    case 'apply_animation_style':
+      return {
+        type: 'object',
+        properties: {
+          nodeId: { type: 'string' },
+          styleId: { type: 'string', description: 'Preset id from list_animation_styles (Position/Scale/Rotation/Size/Opacity/Path)' },
+          props: { type: 'object', description: 'Preset data, forwarded verbatim to Figma (validated per-preset). Start minimal, e.g. {duration:0.5}.' },
+        },
+        required: ['nodeId', 'styleId'],
+        additionalProperties: false,
+      };
+    case 'remove_animation_style':
+      return { type: 'object', properties: { nodeId: { type: 'string' }, id: { type: 'string', description: 'Applied-instance id (animationStyles[].id)' } }, required: ['nodeId', 'id'], additionalProperties: false };
+    case 'apply_manual_keyframe_track':
+      return { type: 'object', properties: { nodeId: { type: 'string' }, track: { type: 'object', description: 'Keyframe track descriptor (forwarded verbatim).' } }, required: ['nodeId', 'track'], additionalProperties: false };
+    case 'remove_manual_keyframe_track':
+      return { type: 'object', properties: { nodeId: { type: 'string' }, track: { description: 'Track id or descriptor (forwarded verbatim).' } }, required: ['nodeId', 'track'], additionalProperties: false };
+    case 'set_timeline_duration':
+      return { type: 'object', properties: { nodeId: { type: 'string' }, timelineId: { type: 'string', description: 'timelines[].id from get_animations' }, duration: { type: 'number', description: 'Seconds' } }, required: ['nodeId', 'timelineId', 'duration'], additionalProperties: false };
+    case 'spring_to_normalized':
+      return { type: 'object', properties: { spring: { type: 'object', description: 'Physical spring params (mass, stiffness, damping, …).' } }, required: ['spring'], additionalProperties: false };
     case 'set_node_property':
       return {
         type: 'object',
