@@ -808,12 +808,16 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'create_text_path',
-    description: 'Create a TextPath node (text along a path).',
+    description: 'Create a TEXT_PATH node running text along an existing path node (Figma Draw). Requires pathNodeId (a vector/shape); startSegment (default 0) and startPosition (default 0) set where the text begins. Returns {id, type, textPathStartData}.',
     schema: z.object({
+      pathNodeId: z.string(),
+      startSegment: z.number().int().nonnegative().optional(),
+      startPosition: z.number().optional(),
       text: z.string().optional(),
       parentId: z.string().optional(),
     }),
   },
+  { name: 'transform_group', description: 'Wrap nodes in a Figma Draw TRANSFORM_GROUP (non-destructive transform container). transformModifiers is an array (default [] = plain group).', schema: z.object({ nodeIds: z.array(z.string()), parentId: z.string().optional(), index: z.number().int().nonnegative().optional(), transformModifiers: z.array(z.any()).optional() }) },
   {
     name: 'create_gif',
     description: 'Create a GIF node referencing an existing image hash.',
@@ -1984,7 +1988,26 @@ export function toolInputSchema(name: string): Record<string, unknown> {
     case 'create_text_path':
       return {
         type: 'object',
-        properties: { text: { type: 'string' }, parentId: { type: 'string' } },
+        properties: {
+          pathNodeId: { type: 'string', description: 'Existing vector/shape node the text follows' },
+          startSegment: { type: 'integer', description: 'Path segment index to start on (default 0)' },
+          startPosition: { type: 'number', description: 'Position along the start segment (default 0)' },
+          text: { type: 'string' },
+          parentId: { type: 'string' },
+        },
+        required: ['pathNodeId'],
+        additionalProperties: false,
+      };
+    case 'transform_group':
+      return {
+        type: 'object',
+        properties: {
+          nodeIds: { type: 'array', items: { type: 'string' } },
+          parentId: { type: 'string' },
+          index: { type: 'integer' },
+          transformModifiers: { type: 'array', description: 'Transform modifiers; [] = plain group' },
+        },
+        required: ['nodeIds'],
         additionalProperties: false,
       };
     case 'create_gif':

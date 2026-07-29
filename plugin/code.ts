@@ -187,6 +187,7 @@ type ToolMethod =
   | 'remove_manual_keyframe_track'
   | 'set_timeline_duration'
   | 'spring_to_normalized'
+  | 'transform_group'
   | 'run_script'
   | 'set_buzz_asset_type'
   | 'get_buzz_asset_type'
@@ -450,7 +451,7 @@ async function serializeNode(
   if (want('strokeWeight') && 'strokeWeight' in node && sn.strokeWeight !== figma.mixed) {
     out.strokeWeight = sn.strokeWeight;
   }
-  for (const k of ['strokeAlign', 'strokeJoin', 'strokeCap', 'strokeMiterLimit', 'dashPattern', 'strokeTopWeight', 'strokeRightWeight', 'strokeBottomWeight', 'strokeLeftWeight']) {
+  for (const k of ['strokeAlign', 'strokeJoin', 'strokeCap', 'strokeMiterLimit', 'dashPattern', 'strokeTopWeight', 'strokeRightWeight', 'strokeBottomWeight', 'strokeLeftWeight', 'complexStrokeProperties', 'variableWidthStrokeProperties']) {
     if (want(k) && k in node) {
       const v = sn[k];
       if (v !== undefined && v !== figma.mixed) out[k] = v;
@@ -1734,18 +1735,21 @@ async function handle(method: ToolMethod, params: any): Promise<any> {
       return { id: s.id, name: s.name, type: s.type };
     }
     case 'create_text_path': {
-      const t = (figma as any).createTextPath();
-      let parent: BaseNode & ChildrenMixin = figma.currentPage;
+      // New Draw signature: createTextPath(pathNode, startSegment, startPosition).
+      // The old no-arg form now throws "Expected node".
+      const src = await getNode(params.pathNodeId);
+      const startSegment = typeof params.startSegment === 'number' ? params.startSegment : 0;
+      const startPosition = typeof params.startPosition === 'number' ? params.startPosition : 0;
+      const t = (figma as any).createTextPath(src, startSegment, startPosition);
       if (params.parentId) {
         const p = await getNode(params.parentId);
-        if (hasChildren(p)) parent = p;
+        if (hasChildren(p)) (p as any).appendChild(t);
       }
-      parent.appendChild(t);
       if (params.text) {
         await figma.loadFontAsync(t.fontName);
         t.characters = String(params.text);
       }
-      return { id: t.id, type: t.type };
+      return { id: t.id, type: t.type, textPathStartData: t.textPathStartData };
     }
     case 'create_gif': {
       const g = (figma as any).createGif(String(params.imageHash));
@@ -2312,6 +2316,21 @@ async function handle(method: ToolMethod, params: any): Promise<any> {
     case 'spring_to_normalized': {
       return plainData((figma as any).motion.physicalSpringToNormalized(coerce(params.spring)));
     }
+    case 'transform_group': {
+      const ids = asIds(params.nodeIds);
+      const nodes: SceneNode[] = [];
+      for (const id of ids) nodes.push((await getNode(id)) as SceneNode);
+      let parent: BaseNode & ChildrenMixin = figma.currentPage;
+      if (params.parentId) {
+        const p = await getNode(params.parentId);
+        if (hasChildren(p)) parent = p;
+      }
+      const idx = typeof params.index === 'number' ? params.index : (parent as any).children.length;
+      // modifiers is a required array (empty = plain transform group).
+      const modifiers = params.transformModifiers ? coerce(params.transformModifiers) : [];
+      const tg = (figma as any).transformGroup(nodes, parent, idx, modifiers);
+      return { id: tg.id, name: tg.name, type: tg.type };
+    }
     case 'run_script': {
       // Compile + run arbitrary JS inside the plugin sandbox. Trades
       // safety for throughput: scripts that loop over thousands of nodes
@@ -2613,6 +2632,8 @@ const PASSTHROUGH_PROPS = new Set([
   // CSS-grid auto-layout: track-size arrays + enums (assigned as-is).
   'gridColumnSizes', 'gridRowSizes', 'gridAutoTracks', 'gridItemsPositioning',
   'gridChildHorizontalAlign', 'gridChildVerticalAlign',
+  // Figma Draw dynamic strokes (brush/variable-width profiles, assigned as-is).
+  'complexStrokeProperties', 'variableWidthStrokeProperties',
 ]);
 
 async function applyProperty(node: SceneNode, property: string, value: any) {
@@ -2953,7 +2974,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.2.10';
+const PLUGIN_VERSION = '0.2.11';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
