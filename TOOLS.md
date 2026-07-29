@@ -93,11 +93,13 @@ Read pluginData stored on a node.
 ### `export_node`
 Export one node as bytes/string.
 - Params: `nodeId` (req), `format` (req: `SVG | PNG | JPG | PDF | CSS | JSON`).
+- `path` (optional, absolute file path): the **bridge writes the bytes to disk** and returns `{ path, format, bytes }` instead of inline data. **Required for PNG/JPG/PDF beyond a tiny image** — an inline raster result is base64 that overflows the MCP tool-result token limit and fails before reaching the agent. PNG/JPG/PDF are decoded from base64; SVG/CSS/JSON are written as text. Mirrors `upload_image_from_path` in reverse.
 - For raster (PNG/JPG/PDF): `constraint: { type: 'SCALE'|'WIDTH'|'HEIGHT', value }` (default SCALE @ 2). Or legacy `scale: number`.
 - Common: `contentsOnly`, `useAbsoluteBounds`, `suffix`, `colorProfile` (`DOCUMENT | SRGB | DISPLAY_P3_V4`).
 - SVG-only: `svgOutlineText`, `svgIdAttribute`, `svgSimplifyStroke`.
 - JSON-only: rich-read params (depth, properties, etc.) — same as `get_node`.
-- Returns: `{ format, data }`. Raster formats return base64; SVG/CSS return raw text; JSON returns stringified `SerializedNode`.
+- Returns (no `path`): `{ format, data }` — raster formats return base64; SVG/CSS return raw text; JSON returns stringified `SerializedNode`. With `path`: `{ path, format, bytes }`.
+- Timeout: `export_node` gets a 60s ceiling (vs the 10s default) — raster export of a large frame is legitimately slow. Override with `GRIP_EXPORT_TIMEOUT_MS`.
 
 ---
 

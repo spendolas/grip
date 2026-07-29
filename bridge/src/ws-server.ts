@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { v4 as uuid } from 'uuid';
 import { EventEmitter } from 'events';
 import type { McpSession, PluginSessionInfo, WSEvent, WSHello, WSResponse } from './types.js';
+import { BRIDGE_VERSION } from './types.js';
 
 interface Pending {
   resolve: (result: unknown) => void;
@@ -65,7 +66,6 @@ const SLOW_METHOD_TIMEOUT_MS: Record<string, number> = {
 const BUSY_THRESHOLD_MS = 5_000;
 const HEARTBEAT_INTERVAL_MS = 5_000;
 const HEARTBEAT_TIMEOUT_MS = 10_000;        // miss two pings → declare plugin dead
-const BRIDGE_VERSION = '0.2.4';
 // Reject plugin responses larger than this — a payload this big means an
 // unbounded serialize (old plugin / no maxNodes) and ferrying it stalls
 // the agent. 8 MB clears legit PNG/PDF exports while catching runaway

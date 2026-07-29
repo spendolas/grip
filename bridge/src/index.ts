@@ -13,6 +13,7 @@ import { spawn } from 'node:child_process';
 import { openSync, writeSync, closeSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
 import { connect } from 'node:net';
 import { PluginBridge } from './ws-server.js';
+import { BRIDGE_VERSION } from './types.js';
 import { activeSessionCount } from './mcp-server.js';
 import { IpcServer } from './ipc-server.js';
 import { HttpServer } from './http-server.js';
@@ -28,7 +29,6 @@ const IS_DAEMON = process.argv.includes('--daemon');
 const PERSISTENT = process.env.GRIP_PERSISTENT === '1' || process.argv.includes('--persistent');
 const IDLE_GRACE_MS = 60_000;       // daemon exits this long after 0 plugins AND 0 shims
 const MAX_LIFETIME_MS = 6 * 60 * 60 * 1000;
-const BRIDGE_VERSION = '0.2.5';
 
 // Mirror stderr to ~/.grip-bridge.log (or GRIP_LOG_PATH) so forensics
 // survive across crashes. Done in-process — no bash wrap, no PATH issue.
