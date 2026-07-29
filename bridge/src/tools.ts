@@ -140,19 +140,24 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'export_node',
     description:
-      'Export a node. Formats: SVG, PNG, JPG, PDF (base64), CSS, JSON. Constraint can be SCALE/WIDTH/HEIGHT. ' +
+      'Export a node. Formats: SVG, PNG, JPG, PDF (base64), CSS, JSON, and video MP4/GIF/WEBM. Constraint can be SCALE/WIDTH/HEIGHT. ' +
       'For PNG/JPG/PDF, pass `path` (absolute file path) — the bridge writes the bytes to disk and returns ' +
       '{path, format, bytes} instead of base64. REQUIRED for anything beyond a tiny image: a raster result inline ' +
-      'is base64 that overflows the MCP result token limit and fails. Without `path`, only small SVG/CSS/JSON are safe inline.',
+      'is base64 that overflows the MCP result token limit and fails. Without `path`, only small SVG/CSS/JSON are safe inline. ' +
+      'Video (MP4/GIF/WEBM) works only on an ANIMATED top-level frame (uses Figma Motion), ALWAYS requires `path`, and takes fps / ' +
+      'quality (MP4/WEBM) / loopCount (GIF). A large video may exceed the 8MB WS response cap — raise GRIP_RESPONSE_CAP_BYTES if so.',
     schema: z.object({
       nodeId: z.string(),
-      format: z.enum(['SVG', 'PNG', 'JPG', 'PDF', 'CSS', 'JSON']),
+      format: z.enum(['SVG', 'PNG', 'JPG', 'PDF', 'CSS', 'JSON', 'MP4', 'GIF', 'WEBM']),
       path: z.string().optional(),
       scale: z.number().positive().optional(),
       constraint: z.object({
         type: z.enum(['SCALE', 'WIDTH', 'HEIGHT']),
         value: z.number().positive(),
       }).optional(),
+      fps: z.number().positive().optional(),
+      quality: z.enum(['LOW', 'MEDIUM', 'HIGH']).optional(),
+      loopCount: z.number().int().nonnegative().optional(),
       contentsOnly: z.boolean().optional(),
       useAbsoluteBounds: z.boolean().optional(),
       suffix: z.string().optional(),
@@ -1137,9 +1142,12 @@ export function toolInputSchema(name: string): Record<string, unknown> {
         type: 'object',
         properties: {
           nodeId: { type: 'string' },
-          format: { type: 'string', enum: ['SVG', 'PNG', 'JPG', 'PDF', 'CSS', 'JSON'] },
-          path: { type: 'string', description: 'Absolute file path; bridge writes bytes to disk, returns {path,format,bytes}. Use for PNG/JPG/PDF.' },
+          format: { type: 'string', enum: ['SVG', 'PNG', 'JPG', 'PDF', 'CSS', 'JSON', 'MP4', 'GIF', 'WEBM'] },
+          path: { type: 'string', description: 'Absolute file path; bridge writes bytes to disk, returns {path,format,bytes}. Required for PNG/JPG/PDF and all video formats.' },
           scale: { type: 'number' },
+          fps: { type: 'number', description: 'Video only (MP4/GIF/WEBM).' },
+          quality: { type: 'string', enum: ['LOW', 'MEDIUM', 'HIGH'], description: 'Video only: MP4/WEBM encode quality.' },
+          loopCount: { type: 'integer', description: 'Video only: GIF loop count (0 = infinite).' },
           constraint: {
             type: 'object',
             properties: {

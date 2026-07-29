@@ -488,7 +488,8 @@ export class PluginBridge extends EventEmitter {
       if (raw.length > RESPONSE_SOFT_CAP_BYTES) {
         pending.reject(new Error(
           `response_too_large: ${Math.round(raw.length / 1024)}KB exceeds ${Math.round(RESPONSE_SOFT_CAP_BYTES / 1024)}KB. ` +
-          `Re-call with depth + maxNodes to bound it (e.g. depth:3, maxNodes:500), or reload the plugin if it predates the nodeBudget cap.`,
+          `For reads: re-call with depth + maxNodes to bound it (e.g. depth:3, maxNodes:500), or reload the plugin if it predates the nodeBudget cap. ` +
+          `For a large export (esp. video): raise GRIP_RESPONSE_CAP_BYTES on the daemon.`,
         ));
         return;
       }

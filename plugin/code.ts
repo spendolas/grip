@@ -870,6 +870,20 @@ async function handle(method: ToolMethod, params: any): Promise<any> {
         const bytes = await (node as ExportMixin).exportAsync(settings);
         return { format: fmt, data: bytesToBase64(bytes) };
       }
+      if (fmt === 'MP4' || fmt === 'GIF' || fmt === 'WEBM') {
+        // Video export (U131) — only valid on an animated top-level frame.
+        // Keep the settings minimal (video schemas reject the raster/svg
+        // extras in settingsBase).
+        const settings: any = {
+          format: fmt,
+          constraint: { type: constraintType, value: constraintValue },
+        };
+        if (typeof params.fps === 'number') settings.fps = params.fps;
+        if (typeof params.quality === 'number') settings.quality = params.quality; // MP4/WEBM
+        if (typeof params.loopCount === 'number') settings.loopCount = params.loopCount; // GIF
+        const bytes = await (node as ExportMixin).exportAsync(settings);
+        return { format: fmt, data: bytesToBase64(bytes) };
+      }
       throw new Error(`Unsupported export format: ${fmt}`);
     }
     case 'set_node_property': {
@@ -2847,7 +2861,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.2.6';
+const PLUGIN_VERSION = '0.2.7';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie

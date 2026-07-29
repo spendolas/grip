@@ -338,6 +338,14 @@ export function createSession(bridge: PluginBridge): LiveSession {
     // bridge writes the bytes to disk itself (like upload_image_from_path in
     // reverse) and returns just {path, format, bytes} — no giant payload
     // crosses MCP. PNG/JPG/PDF decode from base64; SVG/CSS/JSON write as text.
+    // Video formats always produce large binary — inline base64 would blow
+    // the MCP token limit. Refuse them without a `path`.
+    if (name === 'export_node') {
+      const fmt = (parsed.data as any)?.format;
+      if ((fmt === 'MP4' || fmt === 'GIF' || fmt === 'WEBM') && typeof (parsed.data as any)?.path !== 'string') {
+        return errorResult(`export_node ${fmt} requires a 'path' (video is written to disk, never returned inline).`);
+      }
+    }
     if (name === 'export_node' && typeof (parsed.data as any)?.path === 'string') {
       const { path: outPath, ...exportArgs } = parsed.data as Record<string, unknown> & { path: string };
       try {
