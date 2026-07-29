@@ -5,7 +5,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { v4 as uuid } from 'uuid';
-import { readFile, stat, open } from 'node:fs/promises';
+import { readFile, writeFile, stat, open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { TOOLS, toolInputSchema } from './tools.js';
@@ -329,6 +329,28 @@ export function createSession(bridge: PluginBridge): LiveSession {
         return okResult(result);
       } catch (err) {
         return errorResult((err as Error).message);
+      }
+    }
+
+    // Export-to-disk. A raster export returns base64 in `data`; even a
+    // modest PNG (~165KB) blows the MCP tool-result token limit, so the
+    // agent gets an error instead of an image. When `path` is set, the
+    // bridge writes the bytes to disk itself (like upload_image_from_path in
+    // reverse) and returns just {path, format, bytes} — no giant payload
+    // crosses MCP. PNG/JPG/PDF decode from base64; SVG/CSS/JSON write as text.
+    if (name === 'export_node' && typeof (parsed.data as any)?.path === 'string') {
+      const { path: outPath, ...exportArgs } = parsed.data as Record<string, unknown> & { path: string };
+      try {
+        const result = (await bridge.request('export_node', exportArgs, session)) as {
+          format: string;
+          data: string;
+        };
+        const isText = result.format === 'SVG' || result.format === 'CSS' || result.format === 'JSON';
+        const buf = isText ? Buffer.from(result.data, 'utf8') : Buffer.from(result.data, 'base64');
+        await writeFile(outPath, buf);
+        return okResult({ path: outPath, format: result.format, bytes: buf.length });
+      } catch (err) {
+        return errorResult(`export_node to '${outPath}' failed: ${(err as Error).message}`);
       }
     }
 

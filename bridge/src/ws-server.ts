@@ -42,6 +42,19 @@ type Routing =
   | { kind: 'deferred'; bind: { key?: string; name?: string }; files: FileMap }; // bound file not open (yet)
 
 const REQUEST_TIMEOUT_MS = 10_000;          // tighter than before; matches heartbeat
+// Some plugin ops are legitimately slow and must NOT be fast-failed as if
+// wedged. A raster export (`exportAsync` → PNG/JPG/PDF) of a real frame on a
+// big file routinely runs tens of seconds — SVG of a 72×72 node measured
+// 7.5s on a large design-system file, so PNG tipped past the 10s default and
+// got killed with `request_timeout`. Give known-heavy methods a generous
+// ceiling. The plugin_busy guard below still rejects OTHER calls to the same
+// plugin instantly once one has been outstanding past BUSY_THRESHOLD_MS, so a
+// long-but-alive op cannot reopen the cascade-hang class. Override the export
+// budget with GRIP_EXPORT_TIMEOUT_MS.
+const EXPORT_TIMEOUT_MS = Number(process.env.GRIP_EXPORT_TIMEOUT_MS ?? 60_000);
+const SLOW_METHOD_TIMEOUT_MS: Record<string, number> = {
+  export_node: EXPORT_TIMEOUT_MS,
+};
 // Fail-fast threshold. The plugin runs on Figma's single main thread; a
 // synchronous run_script loop wedges it and CANNOT be preempted from here.
 // When a prior request to a plugin has been outstanding past this, the
@@ -284,12 +297,13 @@ export class PluginBridge extends EventEmitter {
       );
     }
     const id = uuid();
+    const timeoutMs = SLOW_METHOD_TIMEOUT_MS[method] ?? REQUEST_TIMEOUT_MS;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         if (this.pending.delete(id)) {
-          reject(new Error(`request_timeout: '${method}' exceeded ${REQUEST_TIMEOUT_MS / 1000}s`));
+          reject(new Error(`request_timeout: '${method}' exceeded ${timeoutMs / 1000}s`));
         }
-      }, REQUEST_TIMEOUT_MS);
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timeout, sessionId: session.id, startedAt: Date.now(), method });
       session.ws.send(JSON.stringify({ id, method, params }));
     });

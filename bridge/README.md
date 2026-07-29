@@ -91,9 +91,13 @@ up changes.
 
 - **stdout is the MCP transport.** All bridge logs go to stderr. Do not
   add `console.log` in this package.
-- 30s per-request timeout. Plugin no answer → agent gets a descriptive
-  error; pending requests bound to a dropped plugin session are rejected
-  with `"Plugin disconnected"`.
+- 10s per-request timeout (60s for `export_node` — raster export of a big
+  frame is legitimately slow; `GRIP_EXPORT_TIMEOUT_MS` overrides). Plugin no
+  answer → agent gets a descriptive error; pending requests bound to a
+  dropped plugin session are rejected with `"Plugin disconnected"`.
+- `export_node` with a `path` writes bytes to disk on the bridge and returns
+  `{path, format, bytes}` — required for PNG/JPG/PDF, whose inline base64
+  overflows the MCP result token limit.
 - Many plugins, many MCP sessions. Each plugin window gets its own
   `sessionId`; each MCP client (stdio leader or IPC proxy) gets its own
   `activeFileId` and subscription set. Use `list_files` /

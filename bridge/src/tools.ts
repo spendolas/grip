@@ -140,10 +140,14 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'export_node',
     description:
-      'Export a node. Formats: SVG, PNG, JPG, PDF (base64), CSS, JSON. Constraint can be SCALE/WIDTH/HEIGHT.',
+      'Export a node. Formats: SVG, PNG, JPG, PDF (base64), CSS, JSON. Constraint can be SCALE/WIDTH/HEIGHT. ' +
+      'For PNG/JPG/PDF, pass `path` (absolute file path) — the bridge writes the bytes to disk and returns ' +
+      '{path, format, bytes} instead of base64. REQUIRED for anything beyond a tiny image: a raster result inline ' +
+      'is base64 that overflows the MCP result token limit and fails. Without `path`, only small SVG/CSS/JSON are safe inline.',
     schema: z.object({
       nodeId: z.string(),
       format: z.enum(['SVG', 'PNG', 'JPG', 'PDF', 'CSS', 'JSON']),
+      path: z.string().optional(),
       scale: z.number().positive().optional(),
       constraint: z.object({
         type: z.enum(['SCALE', 'WIDTH', 'HEIGHT']),
@@ -1133,6 +1137,7 @@ export function toolInputSchema(name: string): Record<string, unknown> {
         properties: {
           nodeId: { type: 'string' },
           format: { type: 'string', enum: ['SVG', 'PNG', 'JPG', 'PDF', 'CSS', 'JSON'] },
+          path: { type: 'string', description: 'Absolute file path; bridge writes bytes to disk, returns {path,format,bytes}. Use for PNG/JPG/PDF.' },
           scale: { type: 'number' },
           constraint: {
             type: 'object',
