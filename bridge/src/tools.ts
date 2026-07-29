@@ -971,8 +971,8 @@ export const TOOLS: ToolDef[] = [
   { name: 'get_animations', description: 'Read a node\'s Motion data: {animationStyles, animations, manualKeyframeTracks, timelines}. Dedicated read tool (not part of get_node) to avoid bloating every node read.', schema: z.object({ nodeId: z.string() }) },
   { name: 'apply_animation_style', description: 'Apply a Figma Motion preset to a node. styleId from list_animation_styles; props is the preset data (forwarded verbatim to node.applyAnimationStyle — Figma validates per-preset). Mutating.', schema: z.object({ nodeId: z.string(), styleId: z.string(), props: z.record(z.any()).optional() }) },
   { name: 'remove_animation_style', description: 'Remove an applied Motion preset from a node. `id` is the applied-instance id (animationStyles[].id from get_animations), NOT the preset styleId.', schema: z.object({ nodeId: z.string(), id: z.string() }) },
-  { name: 'apply_manual_keyframe_track', description: 'Add/replace a manual keyframe track on a node (Figma Motion). `track` is forwarded verbatim to node.applyManualKeyframeTrack — Figma validates its shape.', schema: z.object({ nodeId: z.string(), track: z.any() }) },
-  { name: 'remove_manual_keyframe_track', description: 'Remove a manual keyframe track from a node. `track` (id or descriptor) forwarded to node.removeManualKeyframeTrack.', schema: z.object({ nodeId: z.string(), track: z.any() }) },
+  { name: 'apply_manual_keyframe_track', description: 'Add/replace a manual keyframe track on a node (Figma Motion). `field` identifies what to animate: {type:"PROPERTY", name} for a node property, or {type:"INDEXED_ITEM", collection:"effects", index, field:"RADIUS"|"COLOR"|"SPREAD"|...} for an item in a collection. `track` is {keyframes:[{timelinePosition:<sec>, value:{type:"FLOAT", value:<n>}, easing?}]}. Node must have a timeline (apply a preset first) and the referenced item must exist.', schema: z.object({ nodeId: z.string(), field: z.any(), track: z.any() }) },
+  { name: 'remove_manual_keyframe_track', description: 'Remove a manual keyframe track from a node by the same `field` descriptor passed to apply_manual_keyframe_track.', schema: z.object({ nodeId: z.string(), field: z.any() }) },
   { name: 'set_timeline_duration', description: 'Set a Motion timeline\'s duration (seconds). timelineId from get_animations timelines[].id.', schema: z.object({ nodeId: z.string(), timelineId: z.string(), duration: z.number().nonnegative() }) },
   { name: 'spring_to_normalized', description: 'Figma Motion helper: convert physical spring params to a normalized easing curve. `spring` forwarded to figma.motion.physicalSpringToNormalized.', schema: z.object({ spring: z.any() }) },
   {
@@ -1218,9 +1218,18 @@ export function toolInputSchema(name: string): Record<string, unknown> {
     case 'remove_animation_style':
       return { type: 'object', properties: { nodeId: { type: 'string' }, id: { type: 'string', description: 'Applied-instance id (animationStyles[].id)' } }, required: ['nodeId', 'id'], additionalProperties: false };
     case 'apply_manual_keyframe_track':
-      return { type: 'object', properties: { nodeId: { type: 'string' }, track: { type: 'object', description: 'Keyframe track descriptor (forwarded verbatim).' } }, required: ['nodeId', 'track'], additionalProperties: false };
+      return {
+        type: 'object',
+        properties: {
+          nodeId: { type: 'string' },
+          field: { type: 'object', description: 'What to animate: {type:"PROPERTY",name} or {type:"INDEXED_ITEM",collection:"effects",index,field:"RADIUS"|"COLOR"|...}' },
+          track: { type: 'object', description: '{keyframes:[{timelinePosition, value:{type:"FLOAT",value}, easing?}]}' },
+        },
+        required: ['nodeId', 'field', 'track'],
+        additionalProperties: false,
+      };
     case 'remove_manual_keyframe_track':
-      return { type: 'object', properties: { nodeId: { type: 'string' }, track: { description: 'Track id or descriptor (forwarded verbatim).' } }, required: ['nodeId', 'track'], additionalProperties: false };
+      return { type: 'object', properties: { nodeId: { type: 'string' }, field: { type: 'object', description: 'Same field descriptor passed to apply' } }, required: ['nodeId', 'field'], additionalProperties: false };
     case 'set_timeline_duration':
       return { type: 'object', properties: { nodeId: { type: 'string' }, timelineId: { type: 'string', description: 'timelines[].id from get_animations' }, duration: { type: 'number', description: 'Seconds' } }, required: ['nodeId', 'timelineId', 'duration'], additionalProperties: false };
     case 'spring_to_normalized':

@@ -329,6 +329,29 @@ function plainData(v: any): any {
   return o;
 }
 
+// Inverse of serializeEffectValue — accept the shapes our reads emit so a
+// read → edit → write round-trip works. Converts {hex,opacity} back to an
+// RGBA color and {variableId,type:'VARIABLE_ALIAS'} back to Figma's alias
+// shape; passes everything else (incl. {x,y} vectors) through, recursing
+// arrays/objects. Assigned shapes like set_node_property effects flow through
+// this so agents can write back exactly what get_node returned.
+function rehydrateValue(v: any): any {
+  if (v == null || typeof v !== 'object') return v;
+  if (Array.isArray(v)) return v.map(rehydrateValue);
+  // {hex, opacity} → RGBA (only when it isn't already an {r,g,b} color).
+  if (typeof v.hex === 'string' && !('r' in v)) {
+    const rgb = hexToRgb(v.hex);
+    return { r: rgb.r, g: rgb.g, b: rgb.b, a: typeof v.opacity === 'number' ? v.opacity : 1 };
+  }
+  // Our serialized alias shape → Figma's alias shape.
+  if (v.type === 'VARIABLE_ALIAS' && typeof v.variableId === 'string' && !('id' in v)) {
+    return { type: 'VARIABLE_ALIAS', id: v.variableId };
+  }
+  const out: any = {};
+  for (const k of Object.keys(v)) out[k] = rehydrateValue(v[k]);
+  return out;
+}
+
 function hasFills(node: BaseNode): node is BaseNode & MinimalFillsMixin {
   return 'fills' in node;
 }
@@ -2299,12 +2322,16 @@ async function handle(method: ToolMethod, params: any): Promise<any> {
     case 'apply_manual_keyframe_track': {
       const n = (await getNode(params.nodeId)) as any;
       if (typeof n.applyManualKeyframeTrack !== 'function') throw new Error(`Node ${params.nodeId} (${n.type}) is not animatable`);
-      n.applyManualKeyframeTrack(coerce(params.track));
+      // Two args: field descriptor + the keyframe track. `field` is
+      // {type:'PROPERTY',name} or {type:'INDEXED_ITEM',collection,index,field};
+      // `track` is {keyframes:[{timelinePosition, value:{type,value}, easing?}]}.
+      n.applyManualKeyframeTrack(coerce(params.field), coerce(params.track));
       return { success: true };
     }
     case 'remove_manual_keyframe_track': {
       const n = (await getNode(params.nodeId)) as any;
-      n.removeManualKeyframeTrack(coerce(params.track));
+      // Removes by the same field descriptor apply took.
+      n.removeManualKeyframeTrack(coerce(params.field));
       return { success: true };
     }
     case 'set_timeline_duration': {
@@ -2704,7 +2731,9 @@ async function applyProperty(node: SceneNode, property: string, value: any) {
       return;
     case 'effects':
       must('effects' in node, 'no effects');
-      sn.effects = coerce<Effect[]>(value);
+      // rehydrate so a read-back effect ({hex,opacity} colors, alias shapes)
+      // can be written straight back — full round-trip editability.
+      sn.effects = rehydrateValue(coerce<Effect[]>(value)) as Effect[];
       return;
     case 'layoutGrids':
       must('layoutGrids' in node, 'no layoutGrids');
@@ -2797,7 +2826,9 @@ function paintsFromInput(rawInput: any): Paint[] {
         blendMode: p.blendMode,
       } as GradientPaint;
     }
-    return p as Paint;
+    // Fully-shaped paint of any other type (SHADER, VIDEO, …). Rehydrate so a
+    // read-back paint (nested {hex,opacity} colors / alias shapes) writes back.
+    return rehydrateValue(p) as Paint;
   });
 }
 
@@ -2975,7 +3006,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.2.12';
+const PLUGIN_VERSION = '0.2.13';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie

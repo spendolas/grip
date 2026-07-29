@@ -604,7 +604,8 @@ Native Figma Motion; distinct from prototype `reactions`.
 ### `get_animations` — `{ nodeId }`. Returns `{ animationStyles, animations, manualKeyframeTracks, timelines }`.
 ### `apply_animation_style` — `{ nodeId, styleId, props? }`. `props` forwarded verbatim (Figma validates per-preset — start minimal, e.g. `{ duration: 0.5 }`).
 ### `remove_animation_style` — `{ nodeId, id }`. `id` = applied-instance id (`animationStyles[].id`), NOT the preset styleId.
-### `apply_manual_keyframe_track` / `remove_manual_keyframe_track` — `{ nodeId, track }`. `track` forwarded verbatim.
+### `apply_manual_keyframe_track` — `{ nodeId, field, track }`. `field` = `{type:'PROPERTY', name}` or `{type:'INDEXED_ITEM', collection:'effects', index, field:'RADIUS'|'COLOR'|'SPREAD'|…}`; `track` = `{ keyframes:[{ timelinePosition, value:{type:'FLOAT', value}, easing? }] }`. Node needs a timeline (apply a preset first) and the referenced item must exist.
+### `remove_manual_keyframe_track` — `{ nodeId, field }` (same `field` descriptor).
 ### `set_timeline_duration` — `{ nodeId, timelineId, duration }` (seconds). `timelineId` from `get_animations` `timelines[].id`.
 ### `spring_to_normalized` — `{ spring }` → `figma.motion.physicalSpringToNormalized`.
 
