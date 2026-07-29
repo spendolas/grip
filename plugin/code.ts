@@ -176,6 +176,7 @@ type ToolMethod =
   | 'table_resize_row'
   | 'table_resize_column'
   | 'create_slot'
+  | 'set_grid_child_position'
   | 'run_script'
   | 'set_buzz_asset_type'
   | 'get_buzz_asset_type'
@@ -443,8 +444,16 @@ async function serializeNode(
     for (const k of ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'itemSpacing', 'counterAxisSpacing', 'primaryAxisSizingMode', 'counterAxisSizingMode', 'primaryAxisAlignItems', 'counterAxisAlignItems', 'layoutWrap', 'itemReverseZIndex', 'strokesIncludedInLayout']) {
       if (want(k) && k in f) out[k] = (f as any)[k];
     }
+    // CSS-grid auto-layout container props (layoutMode 'GRID').
+    for (const k of ['gridRowCount', 'gridColumnCount', 'gridRowGap', 'gridColumnGap', 'gridColumnSizes', 'gridRowSizes', 'gridAutoTracks', 'gridItemsPositioning']) {
+      if (want(k) && k in f) out[k] = (f as any)[k];
+    }
   }
   for (const k of ['layoutAlign', 'layoutGrow', 'layoutPositioning', 'layoutSizingHorizontal', 'layoutSizingVertical', 'minWidth', 'maxWidth', 'minHeight', 'maxHeight']) {
+    if (want(k) && k in node) out[k] = sn[k];
+  }
+  // Grid-child placement props (present on children of a GRID frame).
+  for (const k of ['gridRowSpan', 'gridColumnSpan', 'gridRowAnchorIndex', 'gridColumnAnchorIndex', 'gridChildHorizontalAlign', 'gridChildVerticalAlign']) {
     if (want(k) && k in node) out[k] = sn[k];
   }
   if (want('layoutGrids') && 'layoutGrids' in node) out.layoutGrids = sn.layoutGrids;
@@ -2189,6 +2198,14 @@ async function handle(method: ToolMethod, params: any): Promise<any> {
       if (params.name) slot.name = params.name;
       return { id: slot.id, name: slot.name, type: slot.type };
     }
+    case 'set_grid_child_position': {
+      const n = await getNode(params.nodeId);
+      if (!('setGridChildPosition' in n)) {
+        throw new Error(`Node ${params.nodeId} (${n.type}) is not a grid child`);
+      }
+      (n as any).setGridChildPosition(Number(params.row), Number(params.column));
+      return { success: true };
+    }
     case 'run_script': {
       // Compile + run arbitrary JS inside the plugin sandbox. Trades
       // safety for throughput: scripts that loop over thousands of nodes
@@ -2464,6 +2481,9 @@ const NUMERIC_PROPS = new Set([
   'layoutGrow', 'minWidth', 'maxWidth', 'minHeight', 'maxHeight',
   'paragraphSpacing', 'paragraphIndent',
   'arcStartingAngle', 'arcEndingAngle', 'arcInnerRadius',
+  // CSS-grid auto-layout (container + child).
+  'gridRowCount', 'gridColumnCount', 'gridRowGap', 'gridColumnGap',
+  'gridRowSpan', 'gridColumnSpan', 'gridRowAnchorIndex', 'gridColumnAnchorIndex',
 ]);
 const BOOL_PROPS = new Set([
   'visible', 'locked', 'isMask', 'clipsContent', 'expanded',
@@ -2484,6 +2504,9 @@ const PASSTHROUGH_PROPS = new Set([
   'textAutoResize', 'lineHeight', 'letterSpacing', 'hyperlink', 'listOptions',
   'fillStyleId', 'strokeStyleId', 'effectStyleId', 'gridStyleId', 'textStyleId',
   'componentProperties', 'overrides',
+  // CSS-grid auto-layout: track-size arrays + enums (assigned as-is).
+  'gridColumnSizes', 'gridRowSizes', 'gridAutoTracks', 'gridItemsPositioning',
+  'gridChildHorizontalAlign', 'gridChildVerticalAlign',
 ]);
 
 async function applyProperty(node: SceneNode, property: string, value: any) {
@@ -2824,7 +2847,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.2.5';
+const PLUGIN_VERSION = '0.2.6';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
