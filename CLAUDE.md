@@ -74,7 +74,7 @@ plugin/
 
 ## MCP tool surface
 
-178 tools. Per-tool reference lives in [`TOOLS.md`](./TOOLS.md). Quick map:
+190 tools. Per-tool reference lives in [`TOOLS.md`](./TOOLS.md). Quick map:
 
 **Bridge-side (no plugin round-trip):**
 - `list_files`, `set_active_file` — multi-file session routing.
@@ -132,6 +132,8 @@ plugin/
 **FigJam timer:** `timer_start`, `timer_stop`, `timer_pause`, `timer_resume`.
 
 **Multiplayer / identity:** `get_active_users`, `get_current_user`. Both require manifest `permissions: ["activeusers", "currentuser"]` (added).
+
+**Post-2025 Figma API (v0.2.6–0.2.12):** CSS-grid auto-layout (`layoutMode:'GRID'` + `grid*` props on `set_node_property`, `set_grid_child_position`); video export (`export_node` MP4/GIF/WEBM, path-required); new paint/effect variants (SHADER/VIDEO/GRADIENT_DIAMOND paints; NOISE/TEXTURE/GLASS/progressive-blur effects — ride the generic `effects`/`fills` passthrough + serializers); shaders (`list_shaders`/`import_shader`); **Motion** keyframe/timeline (`list_animation_styles`, `get_animations`, `apply`/`remove_animation_style`, `apply`/`remove_manual_keyframe_track`, `set_timeline_duration`, `spring_to_normalized`); Figma Draw (`complexStrokeProperties`/`variableWidthStrokeProperties` passthrough, `transform_group`, `create_text_path` new signature).
 
 Highlights worth knowing while editing:
 

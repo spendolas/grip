@@ -1,6 +1,6 @@
 # Grip MCP Tools
 
-178 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
+190 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
 
 Conventions:
 - `nodeId` — Figma node id (e.g. `"167:290"`).
@@ -92,7 +92,8 @@ Read pluginData stored on a node.
 
 ### `export_node`
 Export one node as bytes/string.
-- Params: `nodeId` (req), `format` (req: `SVG | PNG | JPG | PDF | CSS | JSON`).
+- Params: `nodeId` (req), `format` (req: `SVG | PNG | JPG | PDF | CSS | JSON | MP4 | GIF | WEBM`).
+- Video (`MP4`/`GIF`/`WEBM`): only on an **animated top-level frame** (Figma Motion); **always requires `path`**; takes `fps`, `quality` (`LOW|MEDIUM|HIGH`, MP4/WEBM), `loopCount` (GIF). A large video may exceed the 8MB WS cap → raise `GRIP_RESPONSE_CAP_BYTES`.
 - `path` (optional, absolute file path): the **bridge writes the bytes to disk** and returns `{ path, format, bytes }` instead of inline data. **Required for PNG/JPG/PDF beyond a tiny image** — an inline raster result is base64 that overflows the MCP tool-result token limit and fails before reaching the agent. PNG/JPG/PDF are decoded from base64; SVG/CSS/JSON are written as text. Mirrors `upload_image_from_path` in reverse.
 - For raster (PNG/JPG/PDF): `constraint: { type: 'SCALE'|'WIDTH'|'HEIGHT', value }` (default SCALE @ 2). Or legacy `scale: number`.
 - Common: `contentsOnly`, `useAbsoluteBounds`, `suffix`, `colorProfile` (`DOCUMENT | SRGB | DISPLAY_P3_V4`).
@@ -552,7 +553,7 @@ Open URL in a new browser tab.
 ## Niche node creation
 
 ### `create_slice` — slice/export region.
-### `create_text_path` — text along a path.
+### `create_text_path` — text along an existing path node (Figma Draw). Params: `pathNodeId` (req), `startSegment` (default 0), `startPosition` (default 0), `text?`, `parentId?`. Returns `{ id, type, textPathStartData }`.
 ### `create_gif` — GIF node referencing existing image hash.
 ### `create_video` — video node from base64 bytes.
 ### `create_link_preview` — link preview from URL (FigJam).
@@ -580,3 +581,40 @@ Returns array of `{ id, name, color, sessionId, position }`.
 
 ### `get_current_user`
 Returns `{ id, name, color, sessionId }` or null.
+
+---
+
+## CSS-grid auto-layout (v0.2.6)
+
+Set `layoutMode="GRID"` via `set_node_property`, then configure with more `set_node_property` calls:
+- Container: `gridRowCount`, `gridColumnCount`, `gridRowGap`, `gridColumnGap`, `gridColumnSizes`/`gridRowSizes` (arrays of `{ type: 'FLEX'|'FIXED'|'HUG', value }`), `gridAutoTracks`, `gridItemsPositioning`.
+- Grid child (on a direct child): `gridRowSpan`, `gridColumnSpan`, `gridRowAnchorIndex`, `gridColumnAnchorIndex`, `gridChildHorizontalAlign`, `gridChildVerticalAlign`.
+
+### `set_grid_child_position` — `{ nodeId, row, column }` (0-based). Wraps `node.setGridChildPosition`.
+
+## Shaders (v0.2.9)
+
+### `list_shaders` — none. Returns shader descriptors available to the file (`[]` if none).
+### `import_shader` — `{ shaderId }` (from `list_shaders`). Materializes it into the file. Apply via `set_node_property` fills/effects with `{ type: 'SHADER', shaderId }`.
+
+## Motion — keyframe/timeline animation (v0.2.10)
+
+Native Figma Motion; distinct from prototype `reactions`.
+### `list_animation_styles` — none. Returns the 6 presets (Position, Scale, Rotation, Size, Opacity, Path) with `{ styleId, name, description, props }`. `props` is a DESCRIPTOR, not the strict `apply_animation_style` input schema.
+### `get_animations` — `{ nodeId }`. Returns `{ animationStyles, animations, manualKeyframeTracks, timelines }`.
+### `apply_animation_style` — `{ nodeId, styleId, props? }`. `props` forwarded verbatim (Figma validates per-preset — start minimal, e.g. `{ duration: 0.5 }`).
+### `remove_animation_style` — `{ nodeId, id }`. `id` = applied-instance id (`animationStyles[].id`), NOT the preset styleId.
+### `apply_manual_keyframe_track` / `remove_manual_keyframe_track` — `{ nodeId, track }`. `track` forwarded verbatim.
+### `set_timeline_duration` — `{ nodeId, timelineId, duration }` (seconds). `timelineId` from `get_animations` `timelines[].id`.
+### `spring_to_normalized` — `{ spring }` → `figma.motion.physicalSpringToNormalized`.
+
+## Figma Draw strokes / transform groups (v0.2.11)
+
+- Dynamic strokes via `set_node_property` (passthrough + serialized): `complexStrokeProperties` (brush/stretch/scatter), `variableWidthStrokeProperties`.
+### `transform_group` — `{ nodeIds, parentId?, index?, transformModifiers? }`. Wraps nodes in a `TRANSFORM_GROUP`; `transformModifiers` is an array (default `[]`).
+
+## New paint / effect variants (v0.2.8)
+
+Applied via `set_node_property` fills/strokes/effects (fully-shaped objects pass through; reads are lossless):
+- Paints: `SHADER` (`{ type:'SHADER', shaderId }`), `VIDEO`, `GRADIENT_DIAMOND`.
+- Effects: `NOISE` (`noiseType: MONOTONE|DUOTONE|MULTITONE`), `TEXTURE`, `GLASS` (`refraction/depth/lightIntensity/lightAngle/dispersion/radius`), progressive blur (`blurType:'PROGRESSIVE'` + `startRadius/startOffset/endOffset`).
