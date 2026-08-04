@@ -83,6 +83,11 @@ up changes.
   saturate/wedge the single-threaded plugin.
 - `GRIP_MAX_QUEUE` — per-plugin queue backstop (default `500`); a deeper
   backlog sheds with a typed `plugin_overloaded` error.
+- `GRIP_PAGE_TIMEOUT_MS` — request timeout (default `60000`) for whole-page
+  ops that are O(page weight) under `dynamic-page`: `set_current_page`,
+  `get_document`, `get_page`, `search_nodes`, and cross-page `get_node`/
+  `get_nodes`. First-loading a heavy page legitimately exceeds the 10s default
+  (the plugin isn't wedged, it's loading) — this stops grip killing a live load.
 - `GRIP_PERSISTENT=1` — disable idle-exit + lifetime ceiling (set by the
   launchd LaunchAgent, which owns the daemon's lifecycle).
 - `GRIP_IPC_PATH` — override the leader's UNIX-socket path

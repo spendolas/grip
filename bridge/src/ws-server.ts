@@ -68,10 +68,24 @@ const EXPORT_TIMEOUT_MS = Number(process.env.GRIP_EXPORT_TIMEOUT_MS ?? 60_000);
 // chunks with yields so it never wedges, but the whole thing can still run
 // tens of seconds on a large file. Same reasoning as export.
 const SCAN_TIMEOUT_MS = Number(process.env.GRIP_SCAN_TIMEOUT_MS ?? 60_000);
+// Whole-page operations under documentAccess:'dynamic-page' are O(page weight):
+// setCurrentPageAsync loads+switches to the page, loadAllPagesAsync loads every
+// page, and serializing a page walks it. On a heavy page these legitimately run
+// far past the 10s fast-fail — the plugin isn't wedged, it's loading. Give them
+// the same generous ceiling as export/scan so grip doesn't kill a live load.
+const PAGE_TIMEOUT_MS = Number(process.env.GRIP_PAGE_TIMEOUT_MS ?? 60_000);
 const SLOW_METHOD_TIMEOUT_MS: Record<string, number> = {
   export_node: EXPORT_TIMEOUT_MS,
   get_library_usage: SCAN_TIMEOUT_MS,
   map_nodes: SCAN_TIMEOUT_MS,   // bulk edit over many nodes; chunks+yields, but the whole run can be long
+  set_current_page: PAGE_TIMEOUT_MS,
+  get_document: PAGE_TIMEOUT_MS,   // loadAllPagesAsync across the file
+  get_page: PAGE_TIMEOUT_MS,       // serialize a whole page tree
+  search_nodes: PAGE_TIMEOUT_MS,   // allPages → loadAllPagesAsync; big page walks
+  // A cross-page get_node/get_nodes forces getNodeByIdAsync to LOAD that page
+  // first — heavy page = slow. (get_selection is current-page only, stays fast.)
+  get_node: PAGE_TIMEOUT_MS,
+  get_nodes: PAGE_TIMEOUT_MS,
 };
 // Fail-fast threshold. The plugin runs on Figma's single main thread; a
 // synchronous run_script loop wedges it and CANNOT be preempted from here.
