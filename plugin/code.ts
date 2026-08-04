@@ -189,6 +189,7 @@ type ToolMethod =
   | 'spring_to_normalized'
   | 'transform_group'
   | 'get_library_usage'
+  | 'map_nodes'
   | 'run_script'
   | 'set_buzz_asset_type'
   | 'get_buzz_asset_type'
@@ -635,6 +636,103 @@ async function getNode(id: string): Promise<BaseNode> {
   const n = await figma.getNodeByIdAsync(id);
   if (!n) throw new Error(`Node not found: ${id}`);
   return n;
+}
+
+// ---------- gentle bulk-iteration helpers ----------
+// The plugin is single-threaded; a synchronous loop over a big node set freezes
+// Figma until the tab reloads. These helpers own the loop so the caller (a
+// run_script body, or the map_nodes tool) can't write the freezer: they resolve
+// a node set via the FAST typed findAllWithCriteria and iterate in chunks that
+// yield the thread between batches. Injected into run_script and reused server-
+// side.
+
+// Let the single thread breathe (process the event loop) between chunks.
+function yieldNow(): Promise<void> {
+  return new Promise((r) => setTimeout(r, 0));
+}
+
+interface NodeQuery {
+  types?: string | string[];
+  name?: string;
+  nameFlags?: string;
+  scope?: string;   // nodeId to search within (bounded subtree)
+  page?: string;    // pageId to search (defaults to current page)
+}
+
+// Resolve a query to a node array WITHOUT an unbounded page walk. Requires
+// `types` (→ findAllWithCriteria, fast + typed) or a `scope` node (bounded
+// subtree); refuses a bare page-wide findAll — that's the freeze we're avoiding.
+async function findNodes(q: NodeQuery): Promise<SceneNode[]> {
+  let root: BaseNode;
+  if (q.scope) root = await getNode(q.scope);
+  else if (q.page) root = await getNode(q.page);
+  else root = figma.currentPage;
+  const types = q.types ? (Array.isArray(q.types) ? q.types : [q.types]) : undefined;
+  let nodes: SceneNode[];
+  if (types) {
+    nodes = (root as any).findAllWithCriteria({ types }) as SceneNode[];
+  } else if (q.scope) {
+    nodes = (root as any).findAll(() => true) as SceneNode[];  // bounded to the given subtree
+  } else {
+    throw new Error(
+      "findNodes needs `types` (uses fast findAllWithCriteria) or a `scope` nodeId — a bare page-wide walk would block Figma's single thread. Add types:['FRAME',...] or scope:<nodeId>.",
+    );
+  }
+  if (q.name) {
+    const re = new RegExp(q.name, q.nameFlags ?? 'i');
+    nodes = nodes.filter((n) => re.test(n.name));
+  }
+  return nodes;
+}
+
+// Iterate a node array (or query) in yielding chunks. fn may be async. Bounded
+// by opts.budget; yields every opts.chunk items so the thread never freezes.
+async function forEachNode(
+  itemsOrQuery: SceneNode[] | NodeQuery,
+  fn: (n: SceneNode, i: number) => unknown | Promise<unknown>,
+  opts: { chunk?: number; budget?: number } = {},
+): Promise<number> {
+  const arr = Array.isArray(itemsOrQuery) ? itemsOrQuery : await findNodes(itemsOrQuery);
+  const chunk = opts.chunk && opts.chunk > 0 ? opts.chunk : 200;
+  const budget = opts.budget && opts.budget > 0 ? opts.budget : Infinity;
+  let count = 0;
+  for (let i = 0; i < arr.length && count < budget; i++) {
+    await fn(arr[i], i);
+    count++;
+    if (count % chunk === 0) await yieldNow();
+  }
+  return count;
+}
+
+// forEachNode that collects (bounded) results.
+async function mapNodes<T>(
+  itemsOrQuery: SceneNode[] | NodeQuery,
+  fn: (n: SceneNode, i: number) => T | Promise<T>,
+  opts: { chunk?: number; budget?: number } = {},
+): Promise<T[]> {
+  const out: T[] = [];
+  await forEachNode(itemsOrQuery, async (n, i) => { out.push(await fn(n, i)); }, opts);
+  return out;
+}
+
+// Inspect a run_script body BEFORE eval and push back on patterns that freeze
+// Figma's single main thread (which the bridge cannot preempt once running).
+// Returns a teaching rejection message, or null to allow. The message names the
+// problem AND the better tool — the point is the agent learns, not just blocks.
+function inspectScript(code: string): string | null {
+  if (/\bwhile\s*\(\s*(?:true|1)\s*\)/.test(code) || /\bfor\s*\(\s*;\s*;\s*\)/.test(code)) {
+    return (
+      "an unbounded loop (while(true)/for(;;)) runs synchronously on Figma's single main thread and freezes the whole window until the tab is reloaded — the bridge cannot interrupt it. " +
+      'Give the loop a hard bound and `await yieldNow()` each iteration, or (better) do bulk node work with the injected `await forEachNode(findNodes({types:[...]}), n => {...})`, which walks in yielding chunks.'
+    );
+  }
+  if (/figma\.(?:currentPage|root)\.findAll\s*\(/.test(code)) {
+    return (
+      'figma.currentPage/root.findAll(...) walks EVERY node in one synchronous, unbounded pass — on a large file that blocks the main thread and wedges Figma. ' +
+      "Use the injected `findNodes({types:[...], scope, name})` (backed by findAllWithCriteria — typed and far faster), or `await forEachNode({types:[...]}, fn)` to iterate in yielding chunks. Pass a `scope` nodeId to bound the search to a subtree."
+    );
+  }
+  return null;
 }
 
 async function handle(method: ToolMethod, params: any): Promise<any> {
@@ -2290,6 +2388,37 @@ async function handle(method: ToolMethod, params: any): Promise<any> {
       (n as any).setGridChildPosition(Number(params.row), Number(params.column));
       return { success: true };
     }
+    case 'map_nodes': {
+      // Grip-owned bulk loop: resolve a bounded node set (findNodes → typed
+      // findAllWithCriteria or a scoped subtree — never a page-wide freeze) and
+      // apply `set`/`delete` in yielding chunks. No agent JS, so it can't wedge.
+      const q = coerce(params.query) as NodeQuery;
+      const setProps = params.set ? (coerce(params.set) as Record<string, any>) : null;
+      const doDelete = params.delete === true;
+      if (!setProps && !doDelete) {
+        throw new Error("map_nodes needs `set` (a property→value map) or `delete:true`.");
+      }
+      const budget = typeof params.budget === 'number' && params.budget > 0 ? params.budget : 10000;
+      const chunk = typeof params.chunk === 'number' && params.chunk > 0 ? params.chunk : 200;
+      const nodes = await findNodes(q);
+      const matched = nodes.length;
+      let applied = 0;
+      await forEachNode(nodes, async (n) => {
+        if (doDelete) { n.remove(); }
+        else if (setProps) {
+          for (const prop of Object.keys(setProps)) await applyProperty(n as SceneNode, prop, setProps[prop]);
+        }
+        applied++;
+      }, { budget, chunk });
+      return {
+        matched,
+        applied,
+        truncated: matched > applied,   // more matched than the budget allowed — re-run or raise budget
+        limitations: matched > applied
+          ? [`Applied to ${applied} of ${matched} matched nodes (budget ${budget}); PARTIAL. Raise budget or narrow query, then re-run.`]
+          : [],
+      };
+    }
     case 'list_shaders': {
       const list = await (figma as any).listAvailableShaders();
       return (list ?? []).map((s: any) => plainData(s));
@@ -2469,6 +2598,12 @@ async function handle(method: ToolMethod, params: any): Promise<any> {
       //   log(...args)        — collected, returned alongside result
       //   getNode(id)         — async lookup helper
       const code = String(params.code ?? '');
+      // Inspect the submitted code and push back on patterns that would freeze
+      // Figma's single main thread — with a message that teaches the better way.
+      const rejection = inspectScript(code);
+      if (rejection) {
+        throw new Error(`run_script_rejected: ${rejection}`);
+      }
       const scriptArgs = coerce(params.args);
       const logs: string[] = [];
       const log = (...a: unknown[]) => {
@@ -2477,11 +2612,18 @@ async function handle(method: ToolMethod, params: any): Promise<any> {
       const t0 = Date.now();
       let result: unknown;
       try {
+        // Injected scope now also carries the gentle bulk-iteration helpers so
+        // the safe path is a one-liner: findNodes / forEachNode / mapNodes /
+        // yieldNow (all chunk + yield so the thread never freezes).
         const fn = new Function(
           'args', 'figma', 'serializeNode', 'coerce', 'asIds', 'log', 'getNode',
+          'findNodes', 'forEachNode', 'mapNodes', 'yieldNow',
           `return (async () => { ${code} })()`,
         );
-        result = await fn(scriptArgs, figma, serializeNode, coerce, asIds, log, getNode);
+        result = await fn(
+          scriptArgs, figma, serializeNode, coerce, asIds, log, getNode,
+          findNodes, forEachNode, mapNodes, yieldNow,
+        );
       } catch (err) {
         throw new Error(`run_script failed: ${(err as Error).message}`);
       }
@@ -3103,7 +3245,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.2.16';
+const PLUGIN_VERSION = '0.2.17';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie

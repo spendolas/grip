@@ -71,6 +71,7 @@ const SCAN_TIMEOUT_MS = Number(process.env.GRIP_SCAN_TIMEOUT_MS ?? 60_000);
 const SLOW_METHOD_TIMEOUT_MS: Record<string, number> = {
   export_node: EXPORT_TIMEOUT_MS,
   get_library_usage: SCAN_TIMEOUT_MS,
+  map_nodes: SCAN_TIMEOUT_MS,   // bulk edit over many nodes; chunks+yields, but the whole run can be long
 };
 // Fail-fast threshold. The plugin runs on Figma's single main thread; a
 // synchronous run_script loop wedges it and CANNOT be preempted from here.

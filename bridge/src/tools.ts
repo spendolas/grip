@@ -976,11 +976,12 @@ export const TOOLS: ToolDef[] = [
   { name: 'remove_manual_keyframe_track', description: 'Remove a manual keyframe track from a node by the same `field` descriptor passed to apply_manual_keyframe_track.', schema: z.object({ nodeId: z.string(), field: z.any() }) },
   { name: 'set_timeline_duration', description: 'Set a Motion timeline\'s duration (seconds). timelineId from get_animations timelines[].id.', schema: z.object({ nodeId: z.string(), timelineId: z.string(), duration: z.number().nonnegative() }) },
   { name: 'spring_to_normalized', description: 'Figma Motion helper: convert physical spring params to a normalized easing curve. `spring` forwarded to figma.motion.physicalSpringToNormalized.', schema: z.object({ spring: z.any() }) },
+  { name: 'map_nodes', description: 'Bulk-edit matched nodes with a Grip-owned, chunked, yielding loop — the SAFE way to do "set X on every matching node" without run_script (no risk of freezing Figma). `query` selects nodes: {types:[...] (uses fast findAllWithCriteria), name, nameFlags, scope:<nodeId subtree>, page}. Then either `set` (a property→value map applied like set_node_property to each) or `delete:true`. `query` must have `types` or `scope` (a bare page-wide match is refused). Bounded by `budget` (default 10000) with `chunk` (default 200); returns {matched, applied, truncated}. Prefer this over run_script for uniform bulk mutations.', schema: z.object({ query: z.object({ types: z.union([z.string(), z.array(z.string())]).optional(), name: z.string().optional(), nameFlags: z.string().optional(), scope: z.string().optional(), page: z.string().optional() }), set: z.record(z.any()).optional(), delete: z.boolean().optional(), budget: z.number().int().positive().optional(), chunk: z.number().int().positive().optional() }) },
   {
     name: 'run_script',
     description:
-      'Execute JS inside the Figma plugin sandbox. Use for bulk ops where N tool calls would be slow (walk thousands of nodes, batch mutations, custom predicates). Scope: `args`, `figma`, `serializeNode(n,opts)`, `coerce(v)`, `asIds(v)`, `log(...)`, `getNode(id)`. Body is wrapped in an async IIFE so `await` works. Return value must be JSON-serializable. Returns `{ result, logs[], ms }`. Same write-trust as any other mutating tool — no sandbox-within-sandbox. ' +
-      'CRITICAL — your code runs on Figma\'s single main thread and CANNOT be interrupted by the bridge: a long synchronous loop FREEZES the whole Figma window and only a tab reload recovers it (the bridge will reject your other calls with plugin_busy meanwhile). Guardrails: (1) NEVER write an unbounded synchronous loop over a large set; chunk it and `await` between chunks (e.g. process 500 nodes, then `await new Promise(r => setTimeout(r, 0))`) so the thread can breathe. (2) Prefer `figma.root.findAllWithCriteria({types:[...]})` or a bounded `serializeNode(n,{depth,maxNodes})` over a raw `findAll(() => true)` on a big page. (3) Keep the returned payload small — return ids/counts, not deep serializations of thousands of nodes. (4) Avoid `while(true)` / recursion without a hard depth cap.',
+      'Execute JS inside the Figma plugin sandbox. Powerful — use for bulk ops / custom logic where N MCP calls would be slow. Scope: `args`, `figma`, `serializeNode(n,opts)`, `coerce(v)`, `asIds(v)`, `log(...)`, `getNode(id)`, and the GENTLE bulk helpers `findNodes(query)`, `forEachNode(itemsOrQuery, fn, {chunk,budget})`, `mapNodes(...)`, `yieldNow()`. Body is wrapped in an async IIFE so `await` works. Return JSON-serializable. Returns `{ result, logs[], ms }`. ' +
+      'CRITICAL — your code runs on Figma\'s single main thread and the bridge CANNOT interrupt it: a synchronous loop FREEZES Figma until the tab is reloaded. Grip INSPECTS submitted code and REJECTS freeze patterns with `run_script_rejected` (while(true)/for(;;); figma.currentPage/root.findAll(...)). Do it the gentle way: `await forEachNode(findNodes({types:[\'TEXT\']}), n => { n.opacity = 0.5 })` walks in yielding chunks; `findNodes({types,scope,name})` is a fast typed query (findAllWithCriteria); `await yieldNow()` breathes inside any hand-written loop. For uniform bulk edits prefer the `map_nodes` tool (no JS). Keep returned payloads small (ids/counts, not deep trees).',
     schema: z.object({
       code: z.string(),
       args: z.any().optional(),
@@ -2028,6 +2029,29 @@ export function toolInputSchema(name: string): Record<string, unknown> {
           cursor: { type: 'string', description: 'nextCursor from the previous page. Omit on the first call. Loop until nextCursor is null.' },
           maxResolve: { type: 'integer', description: 'Per-call instance→component resolve budget (default 1500).' },
         },
+        additionalProperties: false,
+      };
+    case 'map_nodes':
+      return {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'object',
+            description: 'Node selector. Needs `types` or `scope` (a bare page-wide match is refused).',
+            properties: {
+              types: { anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }], description: 'Node types (fast findAllWithCriteria)' },
+              name: { type: 'string', description: 'Regex on node name' },
+              nameFlags: { type: 'string', description: 'Regex flags (default i)' },
+              scope: { type: 'string', description: 'nodeId to search within (bounded subtree)' },
+              page: { type: 'string', description: 'pageId (default current page)' },
+            },
+          },
+          set: { type: 'object', description: 'property→value map, applied to each matched node like set_node_property' },
+          delete: { type: 'boolean', description: 'Delete each matched node instead of setting props' },
+          budget: { type: 'integer', description: 'Max nodes to edit (default 10000); truncated:true if exceeded' },
+          chunk: { type: 'integer', description: 'Nodes per yield batch (default 200)' },
+        },
+        required: ['query'],
         additionalProperties: false,
       };
     case 'create_gif':

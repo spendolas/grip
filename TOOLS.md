@@ -1,6 +1,6 @@
 # Grip MCP Tools
 
-191 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
+192 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
 
 Conventions:
 - `nodeId` — Figma node id (e.g. `"167:290"`).
@@ -520,6 +520,20 @@ Build a shareable `figma.com` URL to a node.
 ### `reset_instance_overrides`
 Reset all overrides on an INSTANCE.
 - Params: `nodeId`. → `{ success: true }`.
+
+---
+
+## Bulk / scripting
+
+### `map_nodes`
+Bulk-edit matched nodes with a **Grip-owned, chunked, yielding loop** — the safe way to "set X on every matching node" without run_script (can't freeze Figma).
+- Params: `query` (req: `{ types, name, nameFlags, scope:<nodeId>, page }` — must have `types` (fast findAllWithCriteria) or `scope`; a bare page-wide match is refused), then `set` (property→value map applied per node like `set_node_property`) OR `delete:true`; `budget` (default 10000), `chunk` (default 200).
+- Returns: `{ matched, applied, truncated, limitations }`. `truncated:true` (applied < matched) means the budget was hit — narrow the query or raise budget and re-run. 60s timeout.
+
+### `run_script`
+Execute JS in the plugin sandbox — powerful, for bulk ops / custom logic. Returns `{ result, logs[], ms }`.
+- Scope injects, besides `figma`/`args`/`serializeNode`/`coerce`/`asIds`/`log`/`getNode`, the **gentle bulk helpers**: `findNodes(query)` (typed, findAllWithCriteria; refuses a bare page walk), `forEachNode(itemsOrQuery, fn, {chunk,budget})` / `mapNodes(...)` (chunk + yield so the thread never freezes), and `yieldNow()`.
+- **The transport inspects your code and pushes back.** Freeze patterns are rejected BEFORE running with a teaching `run_script_rejected: …` error: `while(true)`/`for(;;)`, and page/document-wide `figma.currentPage|root.findAll(...)`. Do bulk work via `await forEachNode(findNodes({types:[...]}), n => {...})`; bound any hand-written loop and `await yieldNow()`. Single-threaded plugin: a synchronous loop cannot be interrupted, so this is enforced up front, not mid-run.
 
 ---
 
