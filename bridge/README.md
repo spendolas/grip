@@ -78,6 +78,11 @@ up changes.
 
 - `GRIP_WS_PORT` — override `7777` (WebSocket to Figma plugins).
 - `GRIP_HTTP_PORT` — override `7778` (HTTP `/mcp` for direct MCP clients).
+- `GRIP_MAX_INFLIGHT` — max requests in flight to one plugin at once (default
+  `8`); excess is queued and drained transparently so a command burst can't
+  saturate/wedge the single-threaded plugin.
+- `GRIP_MAX_QUEUE` — per-plugin queue backstop (default `500`); a deeper
+  backlog sheds with a typed `plugin_overloaded` error.
 - `GRIP_PERSISTENT=1` — disable idle-exit + lifetime ceiling (set by the
   launchd LaunchAgent, which owns the daemon's lifecycle).
 - `GRIP_IPC_PATH` — override the leader's UNIX-socket path

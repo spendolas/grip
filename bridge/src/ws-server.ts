@@ -13,6 +13,17 @@ interface Pending {
   method: string;
 }
 
+// A request accepted by the bridge but not yet sent to the plugin — held in a
+// per-plugin FIFO so a burst of commands is metered onto the single-threaded
+// plugin instead of flooding it. The caller's awaited promise is settled via
+// resolve/reject when the queued request finally dispatches and completes.
+interface QueuedRequest {
+  method: string;
+  params: Record<string, unknown>;
+  resolve: (result: unknown) => void;
+  reject: (err: Error) => void;
+}
+
 interface Session {
   id: string;
   ws: WebSocket;
@@ -69,6 +80,16 @@ const SLOW_METHOD_TIMEOUT_MS: Record<string, number> = {
 // cascade that made the whole agent hang). Fast concurrent calls finish in
 // ms and never cross this, so normal multi-agent use is untouched.
 const BUSY_THRESHOLD_MS = 5_000;
+// Flow control: the plugin runs on Figma's single main thread, so a flood of
+// concurrent commands saturates it and wedges the window (only a panel reload
+// recovers). The bridge meters requests per plugin — at most this many
+// in-flight at once; the rest queue (transparent to the agent) and drain as
+// responses return. This is the VOLUME guard (many fast ops); the plugin_busy
+// check above is the WEDGE guard (one op frozen >5s). Override with env.
+const MAX_INFLIGHT_PER_PLUGIN = Number(process.env.GRIP_MAX_INFLIGHT ?? 8);
+// Hard backstop on the queue so a runaway agent can't build unbounded backlog
+// (memory) — beyond this, shed load with a typed plugin_overloaded error.
+const MAX_QUEUE_PER_PLUGIN = Number(process.env.GRIP_MAX_QUEUE ?? 500);
 const HEARTBEAT_INTERVAL_MS = 5_000;
 const HEARTBEAT_TIMEOUT_MS = 10_000;        // miss two pings → declare plugin dead
 // Reject plugin responses larger than this — a payload this big means an
@@ -81,6 +102,10 @@ export class PluginBridge extends EventEmitter {
   private wss: WebSocketServer;
   private sessions = new Map<string, Session>();
   private pending = new Map<string, Pending>();
+  // Flow control (per plugin sessionId): count of requests sent-and-awaiting,
+  // and the FIFO backlog of requests waiting for an in-flight slot.
+  private inflight = new Map<string, number>();
+  private queues = new Map<string, QueuedRequest[]>();
 
   constructor(port: number) {
     super();
@@ -301,17 +326,67 @@ export class PluginBridge extends EventEmitter {
           `If this persists, the Figma tab must be reloaded to recover.`,
       );
     }
+    // Flow control. If the plugin already has the max requests in flight,
+    // QUEUE this one (transparent to the agent — it just awaits a little
+    // longer) instead of piling onto the single-threaded plugin. The queue
+    // drains as responses return (see pump). A pathologically deep queue is
+    // shed with a typed error so a runaway agent can't OOM the daemon.
+    const sid = session.id;
+    if ((this.inflight.get(sid) ?? 0) >= MAX_INFLIGHT_PER_PLUGIN) {
+      let q = this.queues.get(sid);
+      if (!q) { q = []; this.queues.set(sid, q); }
+      if (q.length >= MAX_QUEUE_PER_PLUGIN) {
+        throw new Error(
+          `plugin_overloaded: ${q.length} requests already queued for this plugin (max ${MAX_QUEUE_PER_PLUGIN}); ` +
+            `shedding '${method}'. The plugin can't keep up — reduce concurrent calls or space them out.`,
+        );
+      }
+      return new Promise((resolve, reject) => { q!.push({ method, params, resolve, reject }); });
+    }
+    return this.dispatch(session, method, params);
+  }
+
+  // Send one request to the plugin now, tracking it as in-flight; on settle
+  // (response / timeout / disconnect) free the slot and pump the queue.
+  private dispatch(session: Session, method: string, params: Record<string, unknown>): Promise<unknown> {
+    const sid = session.id;
     const id = uuid();
     const timeoutMs = SLOW_METHOD_TIMEOUT_MS[method] ?? REQUEST_TIMEOUT_MS;
-    return new Promise((resolve, reject) => {
+    this.inflight.set(sid, (this.inflight.get(sid) ?? 0) + 1);
+    const p = new Promise<unknown>((resolve, reject) => {
       const timeout = setTimeout(() => {
         if (this.pending.delete(id)) {
           reject(new Error(`request_timeout: '${method}' exceeded ${timeoutMs / 1000}s`));
         }
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timeout, sessionId: session.id, startedAt: Date.now(), method });
+      this.pending.set(id, { resolve, reject, timeout, sessionId: sid, startedAt: Date.now(), method });
       session.ws.send(JSON.stringify({ id, method, params }));
     });
+    const release = () => {
+      this.inflight.set(sid, Math.max(0, (this.inflight.get(sid) ?? 1) - 1));
+      this.pump(sid);
+    };
+    p.then(release, release);
+    return p;
+  }
+
+  // Dispatch queued requests for a plugin while it has free in-flight slots.
+  // If the plugin died while requests were queued, reject them (the agent can
+  // retry; route() will re-resolve to a live session).
+  private pump(sid: string): void {
+    const q = this.queues.get(sid);
+    if (!q || q.length === 0) return;
+    while (q.length > 0 && (this.inflight.get(sid) ?? 0) < MAX_INFLIGHT_PER_PLUGIN) {
+      const sess = this.sessions.get(sid);
+      if (!sess || sess.ws.readyState !== WebSocket.OPEN) {
+        for (const item of q) item.reject(new Error('plugin_disconnected: plugin closed while request was queued'));
+        this.queues.delete(sid);
+        return;
+      }
+      const item = q.shift()!;
+      this.dispatch(sess, item.method, item.params).then(item.resolve, item.reject);
+    }
+    if (q.length === 0) this.queues.delete(sid);
   }
 
   // Pick the newest live, helloed session matching a predicate. Newest-wins
@@ -540,6 +615,13 @@ export class PluginBridge extends EventEmitter {
         this.pending.delete(reqId);
       }
     }
+    // Fail anything still queued for that plugin, and clear its flow-control state.
+    const queued = this.queues.get(sessionId);
+    if (queued) {
+      for (const item of queued) item.reject(new Error('plugin_disconnected: Plugin disconnected'));
+      this.queues.delete(sessionId);
+    }
+    this.inflight.delete(sessionId);
 
     // Per-MCP-session pins clean themselves up lazily in resolveActiveId
     // when the pinned plugin is gone.
@@ -552,6 +634,11 @@ export class PluginBridge extends EventEmitter {
       p.reject(new Error('leader_shutdown: Bridge shutting down'));
     }
     this.pending.clear();
+    for (const q of this.queues.values()) {
+      for (const item of q) item.reject(new Error('leader_shutdown: Bridge shutting down'));
+    }
+    this.queues.clear();
+    this.inflight.clear();
     this.wss.close();
   }
 
@@ -570,6 +657,11 @@ export class PluginBridge extends EventEmitter {
         capabilities: s.capabilities ?? [],
         wsReady: s.ws.readyState === WebSocket.OPEN,
         lastPongMsAgo: s.lastPong ? Date.now() - s.lastPong : null,
+        // Flow control: requests currently sent-and-awaiting vs. metered-behind
+        // in the queue. queued > 0 means the plugin is being throttled to keep
+        // it responsive under a command burst.
+        inflight: this.inflight.get(s.id) ?? 0,
+        queued: this.queues.get(s.id)?.length ?? 0,
       })),
     };
   }
