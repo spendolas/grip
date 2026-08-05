@@ -1,6 +1,6 @@
 {
   "name": "grip-bridge",
-  "version": "0.2.20",
+  "version": "0.2.21",
   "private": true,
   "description": "Bridge between Figma plugin and MCP agents for Grip",
   "main": "dist/index.js",
@@ -17,7 +17,8 @@
     "@modelcontextprotocol/sdk": "^1.0.4",
     "uuid": "^9.0.1",
     "ws": "^8.18.0",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
     "@types/node": "^20.12.0",

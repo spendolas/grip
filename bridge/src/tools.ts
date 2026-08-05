@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 
 // Tool definitions. The handler in mcp-server.ts forwards `name` and the
 // validated `params` over WS to the plugin, where the actual Plugin API
@@ -986,7 +987,9 @@ export const TOOLS: ToolDef[] = [
     schema: z.object({
       code: z.string(),
       args: z.any().optional(),
-      timeoutMs: z.number().int().positive().optional(),
+      // coerce: belt-and-braces so a client that still stringifies the scalar
+      // (despite the now-published numeric schema) is accepted, not rejected.
+      timeoutMs: z.coerce.number().int().positive().optional(),
     }),
   },
   { name: 'set_buzz_asset_type', description: 'Buzz only: tag a node\'s buzz asset type.', schema: z.object({ nodeId: z.string(), assetType: z.string() }) },
@@ -2157,7 +2160,22 @@ export function toolInputSchema(name: string): Record<string, unknown> {
         required: ['nodeId', 'start', 'end', 'property', 'value'],
         additionalProperties: false,
       };
-    default:
+    default: {
+      // Systemic fix: instead of publishing a bare {type:'object'} (which left
+      // typed MCP clients guessing param types — e.g. stringifying a numeric
+      // run_script `timeoutMs`), DERIVE the input schema from the tool's own
+      // zod definition. Every tool has one, so no tool can ship a blind schema.
+      const def = TOOLS.find((t) => t.name === name);
+      if (def?.schema) {
+        try {
+          const js = zodToJsonSchema(def.schema, { $refStrategy: 'none', target: 'jsonSchema7' }) as Record<string, unknown>;
+          delete (js as Record<string, unknown>).$schema;
+          return js;
+        } catch {
+          /* fall through to the permissive default */
+        }
+      }
       return { type: 'object' };
+    }
   }
 }
