@@ -366,12 +366,39 @@ export class PluginBridge extends EventEmitter {
   private dispatch(session: Session, method: string, params: Record<string, unknown>): Promise<unknown> {
     const sid = session.id;
     const id = uuid();
-    const timeoutMs = SLOW_METHOD_TIMEOUT_MS[method] ?? REQUEST_TIMEOUT_MS;
+    let timeoutMs = SLOW_METHOD_TIMEOUT_MS[method] ?? REQUEST_TIMEOUT_MS;
+    // run_script may opt into a larger budget for a known-heavy script
+    // (capped). Default stays the fast-fail 10s so a wedge is caught quickly.
+    if (method === 'run_script' && typeof (params as any).timeoutMs === 'number') {
+      timeoutMs = Math.min(Math.max((params as any).timeoutMs, 1000), 120_000);
+    }
     this.inflight.set(sid, (this.inflight.get(sid) ?? 0) + 1);
     const p = new Promise<unknown>((resolve, reject) => {
       const timeout = setTimeout(() => {
         if (this.pending.delete(id)) {
-          reject(new Error(`request_timeout: '${method}' exceeded ${timeoutMs / 1000}s`));
+          // Distinguish reconnect churn from a genuine timeout. If a NEWER live
+          // session now serves this file, the plugin iframe reconnected during
+          // the call (new sessionId) and we were talking to a zombie — that's
+          // RETRYABLE, and the fix is retry/pin, NOT "reload the Figma tab".
+          const fresh = session.fileKey
+            ? this.newestLive((s) => s.fileKey === session.fileKey && s.id !== session.id)
+            : null;
+          if (fresh) {
+            reject(new Error(
+              `plugin_reconnected: the Figma plugin for "${session.fileName}" reconnected during '${method}' ` +
+                `(new session id) — the call was routed to the old one. Retry it. For stability across Figma's ` +
+                `periodic reconnects, pin the file with set_active_file.`,
+            ));
+          } else {
+            // A mutating run_script that times out has almost certainly applied
+            // SOME of its changes before the deadline (the plugin keeps running
+            // after we give up) — warn so the agent re-reads instead of blindly
+            // retrying and double-applying.
+            const partial = method === 'run_script'
+              ? ` — a run_script may have PARTIALLY mutated the document before timing out; re-read state before retrying (a blind retry can double-apply). For a known-heavy script pass a larger timeoutMs (max 120s).`
+              : '';
+            reject(new Error(`request_timeout: '${method}' exceeded ${timeoutMs / 1000}s${partial}`));
+          }
         }
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timeout, sessionId: sid, startedAt: Date.now(), method });

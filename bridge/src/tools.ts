@@ -50,7 +50,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'set_active_file',
     description:
-      "Bind this agent to a Figma file — all subsequent tool calls route there, regardless of how many other files are open, and the binding survives Figma's plugin reconnects. `target` accepts a fileKey, an exact file name, a sessionId, or a figma.com URL. If the file isn't open yet the binding is held (deferred) and resolves when it connects; the result reports `{ bound, resolved }` and, when unresolved, the list of currently-open files (so a typo is obvious). A file name matching >1 open file errors `ambiguous_file_name` — use the fileKey. (Launchers can skip this by starting the agent with env GRIP_FILE=<key|name|url>.)",
+      "Bind this agent to a Figma file — all subsequent tool calls route there, regardless of how many other files are open. The binding persists across Figma's periodic plugin reconnects (it re-resolves to that file's newest live session), so pinning is strongly recommended for any multi-call task. Note: a call issued in the brief instant a reconnect is mid-flight can still return `plugin_reconnected` — that error is RETRYABLE (just call again); it does NOT mean reload Figma. Unbound agents (relying on single-open-file auto-routing) are more exposed to that window — bind to avoid it. `target` accepts a fileKey, an exact file name, a sessionId, or a figma.com URL. If the file isn't open yet the binding is held (deferred) and resolves when it connects; the result reports `{ bound, resolved }` and, when unresolved, the list of currently-open files (so a typo is obvious). A file name matching >1 open file errors `ambiguous_file_name` — use the fileKey. (Launchers can skip this by starting the agent with env GRIP_FILE=<key|name|url>.)",
     schema: z.object({ target: z.string() }),
   },
   {
@@ -981,10 +981,12 @@ export const TOOLS: ToolDef[] = [
     name: 'run_script',
     description:
       'Execute JS inside the Figma plugin sandbox. Powerful — use for bulk ops / custom logic where N MCP calls would be slow. Scope: `args`, `figma`, `serializeNode(n,opts)`, `coerce(v)`, `asIds(v)`, `log(...)`, `getNode(id)`, and the GENTLE bulk helpers `findNodes(query)`, `forEachNode(itemsOrQuery, fn, {chunk,budget})`, `mapNodes(...)`, `yieldNow()`. Body is wrapped in an async IIFE so `await` works. Return JSON-serializable. Returns `{ result, logs[], ms }`. ' +
-      'CRITICAL — your code runs on Figma\'s single main thread and the bridge CANNOT interrupt it: a synchronous loop FREEZES Figma until the tab is reloaded. Grip INSPECTS submitted code and REJECTS freeze patterns with `run_script_rejected` (while(true)/for(;;); figma.currentPage/root.findAll(...)). Do it the gentle way: `await forEachNode(findNodes({types:[\'TEXT\']}), n => { n.opacity = 0.5 })` walks in yielding chunks; `findNodes({types,scope,name})` is a fast typed query (findAllWithCriteria); `await yieldNow()` breathes inside any hand-written loop. For uniform bulk edits prefer the `map_nodes` tool (no JS). Keep returned payloads small (ids/counts, not deep trees).',
+      'CRITICAL — your code runs on Figma\'s single main thread and the bridge CANNOT interrupt it: a synchronous loop FREEZES Figma until the tab is reloaded. Grip INSPECTS submitted code and REJECTS freeze patterns with `run_script_rejected` (while(true)/for(;;); figma.currentPage/root.findAll(...)). Do it the gentle way: `await forEachNode(findNodes({types:[\'TEXT\']}), n => { n.opacity = 0.5 })` walks in yielding chunks; `findNodes({types,scope,name})` is a fast typed query (findAllWithCriteria); `await yieldNow()` breathes inside any hand-written loop. For uniform bulk edits prefer the `map_nodes` tool (no JS). Keep returned payloads small (ids/counts, not deep trees). ' +
+      'The injected `getNode(id)` fast-fails a removed/invalid id (node_not_found) instead of hanging. Default budget is 10s; pass `timeoutMs` (max 120000) for a known-heavy script. If a MUTATING script times out it may have PARTIALLY applied — re-read before retrying, never blind-retry.',
     schema: z.object({
       code: z.string(),
       args: z.any().optional(),
+      timeoutMs: z.number().int().positive().optional(),
     }),
   },
   { name: 'set_buzz_asset_type', description: 'Buzz only: tag a node\'s buzz asset type.', schema: z.object({ nodeId: z.string(), assetType: z.string() }) },

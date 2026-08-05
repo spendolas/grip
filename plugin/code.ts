@@ -552,9 +552,17 @@ async function serializeNode(
   // INSTANCE / COMPONENT / COMPONENT_SET
   if (node.type === 'INSTANCE') {
     const inst = node as InstanceNode;
-    const main = await inst.getMainComponentAsync();
-    out.componentId = main?.id;
-    out.componentName = main?.name;
+    // getMainComponentAsync is expensive per node — only resolve it when the
+    // caller actually wants componentId/componentName (so a lean `properties`
+    // whitelist skips the cost entirely across a big instance tree).
+    if (want('componentId') || want('componentName')) {
+      const main = await inst.getMainComponentAsync();
+      if (want('componentId')) out.componentId = main?.id;
+      if (want('componentName')) out.componentName = main?.name;
+    }
+    // The resolved variant selection (e.g. {Type:'Multi select', Selected:'Off'}).
+    // Previously not serialized at all — agents had to hand-roll it in run_script.
+    if (want('variantProperties')) out.variantProperties = inst.variantProperties ?? null;
     if (want('componentProperties')) out.componentProperties = inst.componentProperties;
     if (want('overrides')) out.overrides = inst.overrides;
     if (want('exposedInstances')) out.exposedInstances = inst.exposedInstances?.map((x) => ({ id: x.id, name: x.name }));
@@ -970,7 +978,22 @@ async function handle(method: ToolMethod, params: any): Promise<any> {
         return true;
       };
       for (const root of scopes) {
-        walk(root, (n) => { if (tryMatch(n)) matches.push(n as SceneNode); });
+        // Fast path: when types are given, use the NATIVE typed index
+        // (findAllWithCriteria) as the candidate set instead of walking every
+        // node in JS — orders of magnitude faster on big pages. Remaining
+        // filters (name / text / fill) apply to that smaller set. Fall back to
+        // the full walk only when no types (name/text/fill across all types) or
+        // if the criteria call rejects a type value.
+        let candidates: SceneNode[] | null = null;
+        if (types && 'findAllWithCriteria' in root) {
+          try { candidates = (root as any).findAllWithCriteria({ types }) as SceneNode[]; }
+          catch { candidates = null; }
+        }
+        if (candidates) {
+          for (const n of candidates) { if (tryMatch(n)) matches.push(n); }
+        } else {
+          walk(root, (n) => { if (tryMatch(n)) matches.push(n as SceneNode); });
+        }
       }
 
       const slice = matches.slice(offset, offset + max);
@@ -2609,19 +2632,37 @@ async function handle(method: ToolMethod, params: any): Promise<any> {
       const log = (...a: unknown[]) => {
         logs.push(a.map((v) => (typeof v === 'string' ? v : JSON.stringify(v))).join(' '));
       };
+      // Fast getNode for scripts: figma.getNodeByIdAsync HANGS (never resolves)
+      // on a removed node id instead of returning null — a lone bad id would
+      // otherwise eat the whole request budget. Race a short timeout so a
+      // removed/invalid id fails fast with a typed, actionable error.
+      const SCRIPT_GETNODE_TIMEOUT_MS = 6000;
+      const scriptGetNode = async (id: string): Promise<BaseNode> => {
+        const raced = await Promise.race([
+          figma.getNodeByIdAsync(id).then((n) => ({ n }) as { n: BaseNode | null }),
+          new Promise<{ timedOut: true }>((r) => setTimeout(() => r({ timedOut: true }), SCRIPT_GETNODE_TIMEOUT_MS)),
+        ]);
+        if ('timedOut' in raced) {
+          throw new Error(
+            `node_not_found: getNodeByIdAsync('${id}') did not resolve in ${SCRIPT_GETNODE_TIMEOUT_MS / 1000}s — the id is almost certainly removed or invalid (Figma's API hangs on removed ids instead of returning null). If the node is valid, its page may be unloaded/heavy — make that page current first, then retry.`,
+          );
+        }
+        if (!raced.n) throw new Error(`Node not found: ${id}`);
+        return raced.n;
+      };
       const t0 = Date.now();
       let result: unknown;
       try {
-        // Injected scope now also carries the gentle bulk-iteration helpers so
-        // the safe path is a one-liner: findNodes / forEachNode / mapNodes /
-        // yieldNow (all chunk + yield so the thread never freezes).
+        // Injected scope carries the gentle bulk-iteration helpers so the safe
+        // path is a one-liner (findNodes / forEachNode / mapNodes / yieldNow),
+        // plus a fast getNode that won't hang on a removed id.
         const fn = new Function(
           'args', 'figma', 'serializeNode', 'coerce', 'asIds', 'log', 'getNode',
           'findNodes', 'forEachNode', 'mapNodes', 'yieldNow',
           `return (async () => { ${code} })()`,
         );
         result = await fn(
-          scriptArgs, figma, serializeNode, coerce, asIds, log, getNode,
+          scriptArgs, figma, serializeNode, coerce, asIds, log, scriptGetNode,
           findNodes, forEachNode, mapNodes, yieldNow,
         );
       } catch (err) {
@@ -3245,7 +3286,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.2.18';
+const PLUGIN_VERSION = '0.2.19';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie

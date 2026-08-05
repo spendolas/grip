@@ -39,7 +39,7 @@ Serialized node tree of a page.
 ### `get_node`
 Single node, fully serialized.
 - Params: `nodeId` (req), all rich-read params (`depth`, `includeChildren`, `includeParent`, `includePluginData`, `pluginDataKeys`, `includeBoundVariables`, `properties`).
-- `properties` is a whitelist — when set, only emits those top-level fields. Useful to cap payload.
+- `properties` is a field whitelist that **recurses to every node in the tree** (not just the root) — pass e.g. `properties:['name','variantProperties']` for a lean recursive read that dodges the token-limit blowup on big subtrees. `id`/`name`/`type` always emit. Requesting `componentId`/`componentName` triggers a per-INSTANCE `getMainComponentAsync`; omit them to skip that cost. `variantProperties` (the resolved variant selection, e.g. `{Type:'Multi select'}`) is available via the whitelist.
 - Returns: `SerializedNode`.
 
 ### `get_nodes`
@@ -68,7 +68,7 @@ All local components + component sets.
 - Returns: `{ components: [...], sets: [...] }` with `id`, `name`, `description`, `key`, `remote`, `documentationLinks`, `componentPropertyDefinitions`.
 
 ### `search_nodes`
-Find nodes by combination of filters. Paginated.
+Find nodes by combination of filters. Paginated. When `type` is given it uses the native typed index (`findAllWithCriteria`) as the candidate set — fast even on huge pages (a name+type query that once timed out at 60s returns in <1s); prefer passing `type` (and `pageId`/`scope` to bound it) rather than a name-only search across all types.
 - Params (any combination):
   - `pageId` — limit to one page (default current).
   - `scope` — limit to subtree under a nodeId.
