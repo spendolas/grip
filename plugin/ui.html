@@ -126,6 +126,10 @@
 
         if (msg.kind === 'response') {
           send({ id: msg.id, result: msg.result, error: msg.error });
+        } else if (msg.kind === 'scriptLog') {
+          // Relay a streamed run_script log line so the bridge can attach it
+          // to a timeout error (partial-mutation forensics).
+          send({ scriptLog: true, id: msg.id, line: msg.line });
         } else if (msg.kind === 'event') {
           send({ event: msg.event, data: msg.data });
         } else if (msg.kind === 'hello') {

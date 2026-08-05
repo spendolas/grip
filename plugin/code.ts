@@ -743,7 +743,7 @@ function inspectScript(code: string): string | null {
   return null;
 }
 
-async function handle(method: ToolMethod, params: any): Promise<any> {
+async function handle(method: ToolMethod, params: any, reqId?: string): Promise<any> {
   switch (method) {
     case 'get_document': {
       await figma.loadAllPagesAsync();
@@ -2630,7 +2630,13 @@ async function handle(method: ToolMethod, params: any): Promise<any> {
       const scriptArgs = coerce(params.args);
       const logs: string[] = [];
       const log = (...a: unknown[]) => {
-        logs.push(a.map((v) => (typeof v === 'string' ? v : JSON.stringify(v))).join(' '));
+        const line = a.map((v) => (typeof v === 'string' ? v : JSON.stringify(v))).join(' ');
+        logs.push(line);
+        // Stream each line so the bridge holds it even if this script later
+        // times out — a timed-out run_script otherwise loses all its logs (the
+        // completing-late response is discarded), leaving the agent blind to
+        // how far a partial mutation got.
+        if (reqId) { try { figma.ui.postMessage({ kind: 'scriptLog', id: reqId, line }); } catch {} }
       };
       // Fast getNode for scripts: figma.getNodeByIdAsync HANGS (never resolves)
       // on a removed node id instead of returning null — a lone bad id would
@@ -3286,7 +3292,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.2.19';
+const PLUGIN_VERSION = '0.2.20';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
@@ -3360,7 +3366,7 @@ figma.ui.onmessage = async (msg: ToolRequest | any) => {
     try { figma.commitUndo(); } catch {}
   }
   try {
-    const result = await handle(msg.method, msg.params ?? {});
+    const result = await handle(msg.method, msg.params ?? {}, msg.id);
     figma.ui.postMessage({ kind: 'response', id: msg.id, result });
   } catch (err) {
     // Only touch err.message. Reading err.stack triggers V8's lazy

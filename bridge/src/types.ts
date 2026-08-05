@@ -2,7 +2,7 @@
 // file / grip_health) and ws-server.ts (welcome frame + plugin-mismatch warning)
 // so they can never drift. Keep in lockstep with bridge/package.json + the
 // plugin's PLUGIN_VERSION on a release bump.
-export const BRIDGE_VERSION = '0.2.19';
+export const BRIDGE_VERSION = '0.2.20';
 
 export interface WSRequest {
   id: string;

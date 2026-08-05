@@ -121,6 +121,10 @@ export class PluginBridge extends EventEmitter {
   // and the FIFO backlog of requests waiting for an in-flight slot.
   private inflight = new Map<string, number>();
   private queues = new Map<string, QueuedRequest[]>();
+  // Streamed run_script log() lines, buffered per request id so a timed-out
+  // script's partial logs can be attached to the error (the completing-late
+  // response is discarded). Cleared when the request settles.
+  private scriptLogs = new Map<string, string[]>();
 
   constructor(port: number) {
     super();
@@ -397,7 +401,13 @@ export class PluginBridge extends EventEmitter {
             const partial = method === 'run_script'
               ? ` — a run_script may have PARTIALLY mutated the document before timing out; re-read state before retrying (a blind retry can double-apply). For a known-heavy script pass a larger timeoutMs (max 120s).`
               : '';
-            reject(new Error(`request_timeout: '${method}' exceeded ${timeoutMs / 1000}s${partial}`));
+            // Surface the script's own log() lines captured before the deadline
+            // — turns "something may have happened" into "here's how far it got".
+            const streamed = this.scriptLogs.get(id);
+            const partialLogs = streamed && streamed.length
+              ? ` Partial logs before timeout (${streamed.length}): ${streamed.slice(-15).join(' | ')}`
+              : '';
+            reject(new Error(`request_timeout: '${method}' exceeded ${timeoutMs / 1000}s${partial}${partialLogs}`));
           }
         }
       }, timeoutMs);
@@ -406,6 +416,7 @@ export class PluginBridge extends EventEmitter {
     });
     const release = () => {
       this.inflight.set(sid, Math.max(0, (this.inflight.get(sid) ?? 1) - 1));
+      this.scriptLogs.delete(id);   // clear buffered logs on any settle
       this.pump(sid);
     };
     p.then(release, release);
@@ -594,6 +605,17 @@ export class PluginBridge extends EventEmitter {
     if ('event' in msg) {
       const sess = this.sessions.get(sessionId);
       this.emit('event', { ...msg, sessionId, fileKey: sess?.fileKey ?? '' } as WSEvent & { sessionId: string; fileKey: string });
+      return;
+    }
+
+    // Streamed run_script log line — buffer it (bounded) against its request id
+    // so a later timeout can surface how far the script got.
+    if ((msg as any).scriptLog && typeof (msg as any).id === 'string') {
+      const { id, line } = msg as unknown as { id: string; line: string };
+      let buf = this.scriptLogs.get(id);
+      if (!buf) { buf = []; this.scriptLogs.set(id, buf); }
+      buf.push(String(line ?? '').slice(0, 300));
+      if (buf.length > 200) buf.shift();   // keep the most recent lines, bound memory
       return;
     }
 
