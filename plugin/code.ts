@@ -655,8 +655,24 @@ async function getNode(id: string): Promise<BaseNode> {
 // side.
 
 // Let the single thread breathe (process the event loop) between chunks.
+//
+// SELF-PACING: a real macrotask yield (setTimeout) is the only way to return to
+// Figma's event loop, but in a BACKGROUNDED plugin (the agent case — Figma not
+// focused) the browser throttles setTimeout to ~1s. So a per-iteration
+// `await yieldNow()` — the pattern the docs recommend — turned a 200ms walk into
+// a >10s timeout (one ~1s yield per iteration). Fix: only pay the real yield
+// when enough REAL work has elapsed since the last one (default ~500ms); every
+// other call is a near-free microtask. Bounded work finishes with zero real
+// yields; long work breathes ~twice a second. `resetYieldClock()` is called at
+// the start of each run_script so the first stretch of work isn't charged a yield.
+let _lastRealYieldAt = 0;
+const YIELD_MIN_INTERVAL_MS = 500;
+function resetYieldClock(): void { _lastRealYieldAt = Date.now(); }
 function yieldNow(): Promise<void> {
-  return new Promise((r) => setTimeout(r, 0));
+  const now = Date.now();
+  if (now - _lastRealYieldAt < YIELD_MIN_INTERVAL_MS) return Promise.resolve();
+  _lastRealYieldAt = now;
+  return new Promise((r) => setTimeout(() => { _lastRealYieldAt = Date.now(); r(); }, 0));
 }
 
 interface NodeQuery {
@@ -2657,6 +2673,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         return raced.n;
       };
       const t0 = Date.now();
+      resetYieldClock();  // don't charge a real (throttled) yield to this script's first work window
       let result: unknown;
       try {
         // Injected scope carries the gentle bulk-iteration helpers so the safe
@@ -3292,7 +3309,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.2.21';
+const PLUGIN_VERSION = '0.2.22';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
