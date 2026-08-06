@@ -640,10 +640,28 @@ async function serializeNode(
 
 // ---------- tool handlers ----------
 
+// Figma's getNodeByIdAsync HANGS (never resolves) on a removed/invalid id
+// instead of returning null — a single bad id would otherwise eat the whole
+// request budget. Race a bounded timeout so it fast-fails with a typed,
+// actionable node_not_found. Every handler resolves ids through here, so all
+// of them (get_node, get_nodes, delete_node, set_node_property, …) get it.
+const GETNODE_TIMEOUT_MS = 8000;
 async function getNode(id: string): Promise<BaseNode> {
-  const n = await figma.getNodeByIdAsync(id);
-  if (!n) throw new Error(`Node not found: ${id}`);
-  return n;
+  let timer: ReturnType<typeof setTimeout>;
+  const raced = await Promise.race([
+    figma.getNodeByIdAsync(id).then((n) => ({ n }) as { n: BaseNode | null }),
+    new Promise<{ timedOut: true }>((r) => { timer = setTimeout(() => r({ timedOut: true }), GETNODE_TIMEOUT_MS); }),
+  ]);
+  clearTimeout(timer!);
+  if ('timedOut' in raced) {
+    throw new Error(
+      `node_not_found: '${id}' did not resolve in ${GETNODE_TIMEOUT_MS / 1000}s — almost certainly removed or invalid ` +
+        `(Figma's getNodeByIdAsync hangs on removed ids instead of returning null). If the node IS valid, its page may be ` +
+        `unloaded/heavy — make that page current with set_current_page first, then retry.`,
+    );
+  }
+  if (!raced.n) throw new Error(`Node not found: ${id}`);
+  return raced.n;
 }
 
 // ---------- gentle bulk-iteration helpers ----------
@@ -2654,24 +2672,6 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         // how far a partial mutation got.
         if (reqId) { try { figma.ui.postMessage({ kind: 'scriptLog', id: reqId, line }); } catch {} }
       };
-      // Fast getNode for scripts: figma.getNodeByIdAsync HANGS (never resolves)
-      // on a removed node id instead of returning null — a lone bad id would
-      // otherwise eat the whole request budget. Race a short timeout so a
-      // removed/invalid id fails fast with a typed, actionable error.
-      const SCRIPT_GETNODE_TIMEOUT_MS = 6000;
-      const scriptGetNode = async (id: string): Promise<BaseNode> => {
-        const raced = await Promise.race([
-          figma.getNodeByIdAsync(id).then((n) => ({ n }) as { n: BaseNode | null }),
-          new Promise<{ timedOut: true }>((r) => setTimeout(() => r({ timedOut: true }), SCRIPT_GETNODE_TIMEOUT_MS)),
-        ]);
-        if ('timedOut' in raced) {
-          throw new Error(
-            `node_not_found: getNodeByIdAsync('${id}') did not resolve in ${SCRIPT_GETNODE_TIMEOUT_MS / 1000}s — the id is almost certainly removed or invalid (Figma's API hangs on removed ids instead of returning null). If the node is valid, its page may be unloaded/heavy — make that page current first, then retry.`,
-          );
-        }
-        if (!raced.n) throw new Error(`Node not found: ${id}`);
-        return raced.n;
-      };
       const t0 = Date.now();
       resetYieldClock();  // don't charge a real (throttled) yield to this script's first work window
       let result: unknown;
@@ -2685,7 +2685,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
           `return (async () => { ${code} })()`,
         );
         result = await fn(
-          scriptArgs, figma, serializeNode, coerce, asIds, log, scriptGetNode,
+          scriptArgs, figma, serializeNode, coerce, asIds, log, getNode,
           findNodes, forEachNode, mapNodes, yieldNow,
         );
       } catch (err) {
@@ -3309,7 +3309,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.2.22';
+const PLUGIN_VERSION = '0.2.23';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
