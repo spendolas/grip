@@ -112,6 +112,15 @@ const HEARTBEAT_TIMEOUT_MS = 10_000;        // miss two pings → declare plugin
 // the agent. 8 MB clears legit PNG/PDF exports while catching runaway
 // node trees. Override with GRIP_RESPONSE_CAP_BYTES.
 const RESPONSE_SOFT_CAP_BYTES = Number(process.env.GRIP_RESPONSE_CAP_BYTES ?? 8 * 1024 * 1024);
+// A far LOWER cap for READ results. The 8MB guard is an OOM backstop; it sails
+// right past the MCP client's result-token budget (a 219KB get_node overflowed
+// a client while being nowhere near 8MB). Worse, an oversized read isn't just
+// an error — it's context the client re-sends every turn, billed for the whole
+// session. So refuse a too-large read EARLY with an actionable, read-specific
+// message (narrow with `properties`/`depth`, or dump to disk). Override with
+// GRIP_READ_CAP_BYTES. Only applies to the read methods below.
+const READ_SOFT_CAP_BYTES = Number(process.env.GRIP_READ_CAP_BYTES ?? 120 * 1024);
+const READ_METHODS = new Set(['get_node', 'get_nodes', 'get_page', 'get_selection', 'get_document']);
 
 export class PluginBridge extends EventEmitter {
   private wss: WebSocketServer;
@@ -629,6 +638,17 @@ export class PluginBridge extends EventEmitter {
       // and parsing it into context is what produces the 120s+ "idle"
       // stall (the plugin answered fast, the client choked). Reject early
       // with an actionable, typed error instead.
+      // Read-specific soft cap (much lower than the 8MB OOM guard, tuned to the
+      // MCP token budget). A too-large read would overflow the client AND poison
+      // context for the rest of the session — refuse early with the remedy.
+      if (READ_METHODS.has(pending.method) && raw.length > READ_SOFT_CAP_BYTES) {
+        pending.reject(new Error(
+          `read_too_large: '${pending.method}' returned ${Math.round(raw.length / 1024)}KB, over the ${Math.round(READ_SOFT_CAP_BYTES / 1024)}KB read cap — ` +
+          `this would overflow the MCP result token budget and re-cost every turn. Narrow it: pass \`properties\` (a field whitelist that recurses to the whole tree, e.g. properties:["name","variantProperties"]) and/or lower \`depth\`/\`maxNodes\`. ` +
+          `For a genuinely-full dump, use export_node format:"JSON" with a \`path\` (writes to disk, no token limit). Raise GRIP_READ_CAP_BYTES only if your client's budget is larger.`,
+        ));
+        return;
+      }
       if (raw.length > RESPONSE_SOFT_CAP_BYTES) {
         pending.reject(new Error(
           `response_too_large: ${Math.round(raw.length / 1024)}KB exceeds ${Math.round(RESPONSE_SOFT_CAP_BYTES / 1024)}KB. ` +
