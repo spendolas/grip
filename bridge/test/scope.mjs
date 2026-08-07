@@ -1,6 +1,6 @@
 import assert from 'node:assert';
 import { TOOLS } from '../dist/tools.js';
-import { resolveToolScope, toolInScope, categoryOf, CORE_TOOL_NAMES, META_TOOL_NAMES, TOOL_CATEGORIES } from '../dist/tools.js';
+import { resolveToolScope, toolInScope, categoryOf, CORE_TOOL_NAMES, META_TOOL_NAMES, TOOL_CATEGORIES, toolCategorySummary } from '../dist/tools.js';
 
 // Every tool has exactly one category; every core/meta name is a real tool.
 const allNames = new Set(TOOLS.map((t) => t.name));
@@ -32,10 +32,6 @@ assert.ok(ro.categories.has('read'));
 assert.ok(!ro.coreNames.has('run_script'), 'read scope must exclude run_script');
 
 // toolInScope: meta always; core name under core; category under its token
-// NOTE: the brief used 'grip_capabilities' here, but that tool does not exist
-// yet in TOOLS (it's added in Task 3). Using 'grip_health' — an existing real
-// meta tool — exercises the identical "meta always present" behavior without
-// referencing a not-yet-real tool. See task-1-report.md for the full note.
 assert.ok(toolInScope('grip_health', resolveToolScope('read')), 'meta always present');
 assert.ok(toolInScope('run_script', resolveToolScope('core')));
 assert.ok(!toolInScope('apply_animation_style', resolveToolScope('core')), 'motion not in core');
@@ -52,15 +48,20 @@ const listFor = (spec) => {
 };
 const core = listFor(null);
 assert.ok(core.length >= 40 && core.length <= 46, `core list size unexpected: ${core.length}`);
-// NOTE: the brief's version of this assertion checks for 'grip_capabilities'
-// instead of 'grip_health'. That tool does not exist in TOOLS yet — it's
-// added in Task 3 (see the NOTE above and task-1-report.md) — so asserting
-// on it here would fail by construction, not because of a real regression.
-// 'grip_health' is an existing real meta tool and exercises the identical
-// "meta always present in core scope" behavior.
 assert.ok(core.includes('grip_health') && core.includes('run_script'));
 assert.ok(!core.includes('apply_animation_style'));
 assert.strictEqual(listFor('all').length, TOOLS.length, 'all must list every tool');
 assert.ok(listFor('read').includes('grip_health') && !listFor('read').includes('run_script'));
+
+// grip_capabilities now exists as a meta tool, present in every scope
+assert.ok(TOOLS.some((t) => t.name === 'grip_capabilities'), 'grip_capabilities TOOLS entry missing');
+assert.ok(toolInScope('grip_capabilities', resolveToolScope('read')), 'grip_capabilities must be meta/always-present');
+// directory: meta excluded, motion visible-but-unloaded under core, loaded under core,motion
+const dirCore = toolCategorySummary(resolveToolScope(null));
+assert.ok(!dirCore.some((c) => c.name === 'meta'), 'directory must exclude meta');
+const motion = dirCore.find((c) => c.name === 'motion');
+assert.ok(motion && motion.loaded === false && motion.toolCount === TOOL_CATEGORIES.motion.length, 'motion should be present, unloaded, count matching TOOL_CATEGORIES.motion');
+const dirMotion = toolCategorySummary(resolveToolScope('core,motion'));
+assert.ok(dirMotion.find((c) => c.name === 'motion').loaded === true, 'motion loaded under core,motion');
 
 console.log('scope.mjs OK');

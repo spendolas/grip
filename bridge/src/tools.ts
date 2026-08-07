@@ -31,11 +31,7 @@ export type ToolCategory =
   | 'library' | 'assets' | 'storage' | 'subscribe' | 'misc';
 
 export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
-  // NOTE: 'grip_capabilities' is NOT listed here — it does not exist as a
-  // TOOLS entry yet (added in phase-1 Task 3). When that task adds the real
-  // tool, it must also add 'grip_capabilities' to this list so it becomes
-  // always-present like the other meta tools.
-  meta: ['grip_health', 'grip_diagnose', 'list_files', 'set_active_file', 'get_page_context'],
+  meta: ['grip_health', 'grip_diagnose', 'list_files', 'set_active_file', 'get_page_context', 'grip_capabilities'],
   read: ['get_document', 'get_page', 'get_node', 'get_nodes', 'get_selection', 'get_styles', 'get_variables',
     'get_components', 'search_nodes', 'find_with_criteria', 'get_plugin_data', 'get_overrides', 'get_instances',
     'get_selection_colors', 'get_top_level_frame', 'get_style_consumers', 'get_publish_status', 'get_relaunch_data'],
@@ -137,6 +133,26 @@ export function toolInScope(name: string, scope: ToolScope): boolean {
   return scope.categories.has(categoryOf(name));
 }
 
+// The "there's more" directory: one row per non-meta category, with whether
+// any of its tools are reachable under the given scope. Powers the
+// grip_capabilities tool (mcp-server.ts) — pure + testable independent of
+// the MCP call plumbing.
+export function toolCategorySummary(
+  scope: ToolScope,
+): Array<{ name: string; toolCount: number; loaded: boolean; sample: string[] }> {
+  return (Object.keys(TOOL_CATEGORIES) as Array<keyof typeof TOOL_CATEGORIES>)
+    .filter((c) => c !== 'meta')
+    .map((c) => {
+      const names = TOOL_CATEGORIES[c];
+      return {
+        name: c,
+        toolCount: names.length,
+        loaded: names.some((n) => toolInScope(n, scope)),
+        sample: names.slice(0, 4),
+      };
+    });
+}
+
 const NodeTypeEnum = z.enum([
   'FRAME', 'TEXT', 'RECTANGLE', 'ELLIPSE', 'COMPONENT', 'INSTANCE',
   'GROUP', 'POLYGON', 'STAR', 'LINE', 'VECTOR', 'BOOLEAN_OPERATION',
@@ -216,6 +232,13 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'get_page_context',
     description: "Cheap 'where am I' probe. Returns { file: {key, name}, page: {id, name}, selectionCount, bind } for the currently-routed plugin session — no node tree, no round-trip cost. `bind` is this agent's file binding ({ target, resolved } or null). Call before page-scoped reads (get_selection, search_nodes) when unsure which file/page is active: an empty result from those means 'nothing here', not 'wrong page', only if this confirms you're on the file/page you intended.",
+    schema: z.object({}),
+  },
+  {
+    name: 'grip_capabilities',
+    category: 'meta',
+    description:
+      "List grip's tool categories and which are loaded in THIS agent's scope. Use it to discover tools that aren't injected: a category shows loaded:false when it's out of scope — reach it now via run_script, or relaunch with GRIP_TOOLS including that category for the typed tools.",
     schema: z.object({}),
   },
   {

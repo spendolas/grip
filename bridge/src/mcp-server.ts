@@ -8,7 +8,7 @@ import { v4 as uuid } from 'uuid';
 import { readFile, writeFile, stat, open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { TOOLS, toolInputSchema, resolveToolScope, toolInScope } from './tools.js';
+import { TOOLS, toolInputSchema, resolveToolScope, toolInScope, toolCategorySummary } from './tools.js';
 import type { PluginBridge } from './ws-server.js';
 import type { McpSession, WSEvent } from './types.js';
 
@@ -285,6 +285,20 @@ export function createSession(bridge: PluginBridge): LiveSession {
       } catch (err) {
         return errorResult((err as Error).message);
       }
+    }
+
+    // grip_capabilities: the "there's more" directory. Bridge-side only —
+    // no plugin round-trip — so it answers even with no Figma window open.
+    // Tells a scoped agent which categories exist and whether THIS session's
+    // scope loaded them, so it can discover tools that weren't injected.
+    if (name === 'grip_capabilities') {
+      const scope = resolveToolScope(session.toolScopeSpec);
+      return okResult({
+        scope: session.toolScopeSpec ?? 'core (default)',
+        howToChange:
+          'Relaunch with env GRIP_TOOLS=core,<category> (stdio) or ?tools=core,<category> (HTTP); or call the API directly via run_script (if run_script is in scope).',
+        categories: toolCategorySummary(scope),
+      });
     }
 
     // ---- chunked image upload (bridge-side state) ----
