@@ -658,3 +658,5 @@ Tokens are comma-separated. `core` (the default when `GRIP_TOOLS` is unset) and 
 `meta` tools (`grip_health`, `grip_diagnose`, `list_files`, `set_active_file`, `get_page_context`, `grip_capabilities`) are always present regardless of scope. Regardless of scope, `run_script` (in `core` and in `write`) can reach any Plugin API surface, including tools your scope doesn't expose typed schemas for.
 
 Call `grip_capabilities` to see every category, its tool count, a sample of its tools, and whether it's currently `loaded` for your session — the way to discover what a narrower scope is hiding, and to know what to add to `GRIP_TOOLS`/`?tools=` to get it back as typed tools instead of reaching it via `run_script`.
+
+Deep per-tool guidance (param recipes, enum shapes, edge cases) is pull-based, not always injected: call `grip_capabilities {tool:'<name>'}` to get that tool's full `detail`; the injected `description` on every tool is kept to a tight what+when line.

@@ -96,7 +96,7 @@ up changes.
   file name, or figma.com URL). The shim forwards it to the daemon so tool
   calls route to that file without the agent calling `set_active_file`.
   Binds even before the file is open (resolves when it connects).
-- `GRIP_TOOLS` — comma list of tool categories/presets this agent loads (default `core` ≈ 43 tools; `all` = every tool). stdio: set as an env var (delivered as an IPC control frame); HTTP: pass `?tools=` on the `/mcp` URL. Cuts a headless agent's per-turn schema weight (~18k → ~6.2k tokens at `core`). Discover out-of-scope tools with `grip_capabilities`; reach anything via `run_script`.
+- `GRIP_TOOLS` — comma list of tool categories/presets this agent loads (default `core` ≈ 43 tools; `all` = every tool). stdio: set as an env var (delivered as an IPC control frame); HTTP: pass `?tools=` on the `/mcp` URL. Cuts a headless agent's per-turn schema weight (~18k → ~6.2k tokens at `core`). Discover out-of-scope tools with `grip_capabilities`; reach anything via `run_script`. Injected tool descriptions are trimmed to what+when; call `grip_capabilities {tool:'<name>'}` for a tool's full guidance (`detail`).
 
 ## Important
 
