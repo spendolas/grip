@@ -71,4 +71,26 @@ assert.ok(rs && rs.tool === 'run_script', 'toolDetail returns the tool');
 assert.ok(typeof rs.description === 'string' && rs.description.length > 0, 'has description');
 assert.ok('detail' in rs && 'category' in rs, 'shape has detail + category');
 
+// Phase 2: the diet — trimmed descriptions + relocated detail, no information loss
+const DIET = {
+  run_script: 'run_script_rejected',
+  set_node_property: 'GLASS',
+  set_active_file: 'plugin_reconnected',
+  export_node: 'GRIP_RESPONSE_CAP_BYTES',
+  map_nodes: 'findAllWithCriteria',
+  get_page_context: 'wrong page',
+};
+for (const [name, kw] of Object.entries(DIET)) {
+  const d = toolDetail(name);
+  assert.ok(d, `${name} exists`);
+  assert.ok(d.description.length <= 620, `${name} description trimmed (was fat), got ${d.description.length}`);
+  assert.ok(d.detail && d.detail.length > 0, `${name} detail populated`);
+  assert.ok(d.detail.includes(kw), `${name} detail retains relocated keyword "${kw}"`);
+  assert.ok(d.description.includes('grip_capabilities'), `${name} description points to grip_capabilities`);
+}
+// aggregate: core description bytes dropped well below the pre-diet 10154
+import { resolveToolScope as _rs, toolInScope as _tis } from '../dist/tools.js';
+const coreDescBytes = TOOLS.filter((t) => _tis(t.name, _rs('core'))).reduce((a, t) => a + (t.description || '').length, 0);
+assert.ok(coreDescBytes < 7000, `core description bytes should drop below 7000, got ${coreDescBytes}`);
+
 console.log('scope.mjs OK');
