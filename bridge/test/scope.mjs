@@ -1,6 +1,6 @@
 import assert from 'node:assert';
 import { TOOLS } from '../dist/tools.js';
-import { resolveToolScope, toolInScope, categoryOf, CORE_TOOL_NAMES, META_TOOL_NAMES, TOOL_CATEGORIES, toolCategorySummary } from '../dist/tools.js';
+import { resolveToolScope, toolInScope, CORE_TOOL_NAMES, META_TOOL_NAMES, TOOL_CATEGORIES, toolCategorySummary } from '../dist/tools.js';
 
 // Every tool has exactly one category; every core/meta name is a real tool.
 const allNames = new Set(TOOLS.map((t) => t.name));

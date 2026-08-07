@@ -12,9 +12,9 @@ export interface ToolDef {
   // True when the tool returns a notification subscription rather than
   // a one-shot response. The MCP server short-circuits these.
   subscription?: boolean;
-  // Tool-scoping category (phase 1 groundwork). Optional here — a later
-  // task tags every TOOLS entry; TOOL_CATEGORIES below is the authoritative
-  // name→category map until then.
+  // Tool-scoping category (phase 1 groundwork). Optional — TOOL_CATEGORIES
+  // below is the authoritative name→category map; this field is currently
+  // set only on the grip_capabilities entry.
   category?: ToolCategory;
 }
 
@@ -113,11 +113,12 @@ export interface ToolScope { all: boolean; coreNames: Set<string>; categories: S
 export function resolveToolScope(spec: string | null | undefined): ToolScope {
   const scope: ToolScope = { all: false, coreNames: new Set(), categories: new Set() };
   const raw = (spec ?? '').trim();
-  const tokens = raw ? raw.split(',').map((t) => t.trim()).filter(Boolean) : ['core'];
+  let tokens = raw ? raw.split(',').map((t) => t.trim()).filter(Boolean) : ['core'];
+  if (tokens.length === 0) tokens = ['core'];
   for (const tok of tokens) {
     if (tok === 'all') scope.all = true;
     else if (tok === 'core') for (const n of CORE_TOOL_NAMES) scope.coreNames.add(n);
-    else if ((TOOL_CATEGORIES as Record<string, string[]>)[tok]) scope.categories.add(tok);
+    else if (Object.prototype.hasOwnProperty.call(TOOL_CATEGORIES, tok)) scope.categories.add(tok);
     // else: unknown token — ignore (caller may log)
   }
   return scope;

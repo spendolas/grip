@@ -77,7 +77,7 @@ plugin/
 
 ## MCP tool surface
 
-192 tools. Per-tool reference lives in [`TOOLS.md`](./TOOLS.md). The default advertised scope is now `core` (~43 tools) rather than all 192; agents widen via `GRIP_TOOLS`/`?tools=` (categories from `grip_capabilities`), and `run_script` reaches any tool regardless of scope. Quick map:
+193 tools. Per-tool reference lives in [`TOOLS.md`](./TOOLS.md). The default advertised scope is now `core` (~43 tools) rather than all 193; agents widen via `GRIP_TOOLS`/`?tools=` (categories from `grip_capabilities`), and `run_script` reaches any tool regardless of scope. Quick map:
 
 **Bridge-side (no plugin round-trip):**
 - `list_files`, `set_active_file` — multi-file session routing.

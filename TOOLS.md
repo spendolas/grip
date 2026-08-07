@@ -1,6 +1,6 @@
 # Grip MCP Tools
 
-192 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
+193 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
 
 Conventions:
 - `nodeId` — Figma node id (e.g. `"167:290"`).
@@ -646,7 +646,7 @@ Applied via `set_node_property` fills/strokes/effects (fully-shaped objects pass
 
 ## Tool scoping (`GRIP_TOOLS`)
 
-By default an agent only sees the `core` scope (~43 always-useful tools), not the full 192 — this keeps per-turn schema weight small. Widen the scope per agent:
+By default an agent only sees the `core` scope (~43 always-useful tools), not the full 193 — this keeps per-turn schema weight small. Widen the scope per agent:
 
 - **stdio:** set env `GRIP_TOOLS=core,motion` on the agent process (delivered to the daemon as an IPC control frame, alongside `GRIP_FILE`).
 - **HTTP:** pass `?tools=core,motion` on the `/mcp` URL.
