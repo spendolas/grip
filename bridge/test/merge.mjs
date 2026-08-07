@@ -25,4 +25,10 @@ assert.deepStrictEqual(g, { method: 'ungroup_node', rest: { nodeId: '4:5' } });
 // 3a core membership
 assert.ok(CORE_TOOL_NAMES.has('bind_to_variable') && CORE_TOOL_NAMES.has('group'), '3a merged tools in core');
 assert.ok(!CORE_TOOL_NAMES.has('bind_property_to_variable') && !CORE_TOOL_NAMES.has('group_nodes'), 'old core names removed');
+
+// 3b: variables-domain clusters
+assert.deepStrictEqual(resolveMerged('variable_mode', { op: 'rename', modeId: 'm1', name: 'Dark' }), { method: 'rename_variable_mode', rest: { modeId: 'm1', name: 'Dark' } });
+assert.deepStrictEqual(resolveMerged('variable', { op: 'create', collectionId: 'c1', name: 'x', resolvedType: 'COLOR' }), { method: 'create_variable', rest: { collectionId: 'c1', name: 'x', resolvedType: 'COLOR' } });
+assert.deepStrictEqual(resolveMerged('variable_collection', { op: 'delete', collectionId: 'c1' }), { method: 'delete_variable_collection', rest: { collectionId: 'c1' } });
+assert.deepStrictEqual(resolveMerged('explicit_variable_mode', { op: 'clear', nodeId: '1:1', collectionId: 'c1' }), { method: 'clear_explicit_variable_mode', rest: { nodeId: '1:1', collectionId: 'c1' } });
 console.log('merge.mjs OK');

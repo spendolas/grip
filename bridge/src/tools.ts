@@ -45,9 +45,8 @@ export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
     'set_relaunch_data', 'run_script'],
   pages: ['create_page', 'set_current_page', 'delete_page'],
   styles: ['set_style', 'apply_style', 'delete_style', 'move_local_style'],
-  variables: ['set_variable_value', 'bind_to_variable', 'create_variable', 'delete_variable', 'create_variable_collection',
-    'delete_variable_collection', 'add_variable_mode', 'remove_variable_mode', 'rename_variable_mode',
-    'set_explicit_variable_mode', 'clear_explicit_variable_mode', 'set_variable_meta',
+  variables: ['set_variable_value', 'bind_to_variable', 'variable', 'variable_collection', 'variable_mode',
+    'explicit_variable_mode', 'set_variable_meta',
     'request_variable_to_be_enabled', 'request_variable_to_be_disabled'],
   components: ['swap_instance', 'detach_instance', 'reset_instance_overrides', 'create_component_from_node',
     'combine_as_variants', 'create_slot', 'add_component_property', 'edit_component_property',
@@ -114,6 +113,14 @@ export const MERGED_TOOLS: Record<string, {
     effect: 'bind_effect_to_variable', layout_grid: 'bind_layout_grid_to_variable' } },
   group: { discriminator: 'op', category: 'write', core: true, map: {
     group: 'group_nodes', ungroup: 'ungroup_node' } },
+  variable_mode: { discriminator: 'op', category: 'variables', map: {
+    add: 'add_variable_mode', remove: 'remove_variable_mode', rename: 'rename_variable_mode' } },
+  variable: { discriminator: 'op', category: 'variables', map: {
+    create: 'create_variable', delete: 'delete_variable' } },
+  variable_collection: { discriminator: 'op', category: 'variables', map: {
+    create: 'create_variable_collection', delete: 'delete_variable_collection' } },
+  explicit_variable_mode: { discriminator: 'op', category: 'variables', map: {
+    set: 'set_explicit_variable_mode', clear: 'clear_explicit_variable_mode' } },
 };
 
 export function mergedToolNames(): string[] { return Object.keys(MERGED_TOOLS); }
@@ -581,49 +588,22 @@ export const TOOLS: ToolDef[] = [
 
   // ---------- variables: lifecycle ----------
   {
-    name: 'create_variable_collection',
-    description: 'Create a new local variable collection with one default mode. Returns { id, defaultModeId }.',
-    schema: z.object({ name: z.string() }),
+    name: 'variable_collection', category: 'variables',
+    description: "Create or delete a variable collection. `op`: create ({name}, returns {id, defaultModeId}) | delete ({collectionId}, deletes all its variables too). Call grip_capabilities {tool:'variable_collection'} for per-op params.",
+    detail: "op=create: create a new local variable collection with one default mode (was create_variable_collection) — {name} → returns {id, defaultModeId}. op=delete: delete a variable collection and all its variables (was delete_variable_collection) — {collectionId}.",
+    schema: z.object({ op: z.enum(['create', 'delete']) }).passthrough(),
   },
   {
-    name: 'delete_variable_collection',
-    description: 'Delete a variable collection (and all its variables).',
-    schema: z.object({ collectionId: z.string() }),
+    name: 'variable', category: 'variables',
+    description: "Create or delete a variable. `op`: create ({name, collectionId, resolvedType, value?/valuesByMode?, ...}) | delete ({variableId}). Call grip_capabilities {tool:'variable'} for per-op params.",
+    detail: "op=create: create a new variable in a collection (was create_variable) — {name, collectionId, resolvedType: COLOR|FLOAT|STRING|BOOLEAN, value?, valuesByMode?, description?, scopes?, codeSyntax?, hiddenFromPublishing?}. op=delete: delete a variable (was delete_variable) — {variableId}.",
+    schema: z.object({ op: z.enum(['create', 'delete']) }).passthrough(),
   },
   {
-    name: 'create_variable',
-    description: 'Create a new variable in a collection. resolvedType: COLOR | FLOAT | STRING | BOOLEAN. Optional initial value(s).',
-    schema: z.object({
-      name: z.string(),
-      collectionId: z.string(),
-      resolvedType: z.enum(['COLOR', 'FLOAT', 'STRING', 'BOOLEAN']),
-      value: z.any().optional(),
-      valuesByMode: z.record(z.any()).optional(),
-      description: z.string().optional(),
-      scopes: z.array(z.string()).optional(),
-      codeSyntax: z.record(z.string()).optional(),
-      hiddenFromPublishing: z.boolean().optional(),
-    }),
-  },
-  {
-    name: 'delete_variable',
-    description: 'Delete a variable.',
-    schema: z.object({ variableId: z.string() }),
-  },
-  {
-    name: 'add_variable_mode',
-    description: 'Add a mode to a collection. Returns the new modeId.',
-    schema: z.object({ collectionId: z.string(), name: z.string() }),
-  },
-  {
-    name: 'remove_variable_mode',
-    description: 'Remove a mode from a collection.',
-    schema: z.object({ collectionId: z.string(), modeId: z.string() }),
-  },
-  {
-    name: 'rename_variable_mode',
-    description: "Rename a collection's mode.",
-    schema: z.object({ collectionId: z.string(), modeId: z.string(), name: z.string() }),
+    name: 'variable_mode', category: 'variables',
+    description: "Add, remove, or rename a mode on a variable collection. `op`: add ({collectionId, name}) | remove ({collectionId, modeId}) | rename ({collectionId, modeId, name}). Call grip_capabilities {tool:'variable_mode'} for per-op params.",
+    detail: "op=add: add a mode to a collection (was add_variable_mode) — {collectionId, name} → returns the new modeId. op=remove: remove a mode from a collection (was remove_variable_mode) — {collectionId, modeId}. op=rename: rename a collection's mode (was rename_variable_mode) — {collectionId, modeId, name}.",
+    schema: z.object({ op: z.enum(['add', 'remove', 'rename']) }).passthrough(),
   },
   {
     name: 'set_variable_meta',
@@ -1084,8 +1064,12 @@ export const TOOLS: ToolDef[] = [
   },
 
   // ---------- tier 6 ----------
-  { name: 'set_explicit_variable_mode', description: 'Override the active mode for a variable collection on a specific node.', schema: z.object({ nodeId: z.string(), collectionId: z.string(), modeId: z.string() }) },
-  { name: 'clear_explicit_variable_mode', description: 'Clear a per-node mode override.', schema: z.object({ nodeId: z.string(), collectionId: z.string() }) },
+  {
+    name: 'explicit_variable_mode', category: 'variables',
+    description: "Set or clear a per-node override of the active mode for a variable collection. `op`: set ({nodeId, collectionId, modeId}) | clear ({nodeId, collectionId}). Call grip_capabilities {tool:'explicit_variable_mode'} for per-op params.",
+    detail: "op=set: override the active mode for a variable collection on a specific node (was set_explicit_variable_mode) — {nodeId, collectionId, modeId}. op=clear: clear a per-node mode override (was clear_explicit_variable_mode) — {nodeId, collectionId}.",
+    schema: z.object({ op: z.enum(['set', 'clear']) }).passthrough(),
+  },
   { name: 'get_instances', description: 'Find every instance of a COMPONENT or COMPONENT_SET.', schema: z.object({ componentId: z.string() }) },
   { name: 'import_component_set_by_key', description: 'Import a component set from team library.', schema: z.object({ key: z.string() }) },
   { name: 'outline_stroke', description: 'Outline a single node\'s stroke into a vector. Returns the new node.', schema: z.object({ nodeId: z.string() }) },
