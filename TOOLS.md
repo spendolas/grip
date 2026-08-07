@@ -659,4 +659,4 @@ Tokens are comma-separated. `core` (the default when `GRIP_TOOLS` is unset) and 
 
 Call `grip_capabilities` to see every category, its tool count, a sample of its tools, and whether it's currently `loaded` for your session — the way to discover what a narrower scope is hiding, and to know what to add to `GRIP_TOOLS`/`?tools=` to get it back as typed tools instead of reaching it via `run_script`.
 
-Deep per-tool guidance (param recipes, enum shapes, edge cases) is pull-based, not always injected: call `grip_capabilities {tool:'<name>'}` to get that tool's full `detail`; the injected `description` on every tool is kept to a tight what+when line.
+Deep per-tool guidance (param recipes, enum shapes, edge cases) is pull-based, not always injected: the fattest always-injected (core/meta) tools carry a tight what+when `description` plus a fuller `detail`; call `grip_capabilities {tool:'<name>'}` to get that detail.
