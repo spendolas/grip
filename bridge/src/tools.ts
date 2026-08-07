@@ -38,7 +38,7 @@ export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
   write: ['set_node_property', 'create_node', 'delete_node', 'clone_node', 'move_node', 'group_nodes',
     'ungroup_node', 'set_selection', 'scroll_to', 'map_nodes', 'set_viewport', 'rescale', 'lock_aspect_ratio',
     'unlock_aspect_ratio', 'create_section', 'set_skip_invisible_instance_children', 'set_grid_child_position',
-    'set_relaunch_data'],
+    'set_relaunch_data', 'run_script'],
   pages: ['create_page', 'set_current_page', 'delete_page'],
   styles: ['set_style', 'apply_style', 'delete_style', 'move_local_style'],
   variables: ['set_variable_value', 'bind_property_to_variable', 'bind_paint_to_variable', 'bind_effect_to_variable',
@@ -77,12 +77,9 @@ export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
   storage: ['client_storage_get', 'client_storage_set', 'client_storage_delete', 'client_storage_keys',
     'set_plugin_data', 'get_shared_plugin_data', 'set_shared_plugin_data'],
   subscribe: ['subscribe_selection', 'subscribe_document', 'subscribe_currentpage'],
-  // 'run_script' lives here: it's a generic escape hatch (arbitrary plugin
-  // API via JS), not tied to any single domain category. It's still always
-  // reachable via CORE_TOOL_NAMES below regardless of this bucket.
   misc: ['notify', 'open_external_url', 'commit_undo', 'trigger_undo', 'save_version', 'ui_show', 'ui_hide',
     'ui_resize', 'ui_reposition', 'create_code_block', 'get_active_users', 'get_current_user',
-    'set_buzz_asset_type', 'get_buzz_asset_type', 'run_script'],
+    'set_buzz_asset_type', 'get_buzz_asset_type'],
 };
 
 export const META_TOOL_NAMES: ReadonlySet<string> = new Set(TOOL_CATEGORIES.meta);

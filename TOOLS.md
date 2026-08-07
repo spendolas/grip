@@ -643,3 +643,18 @@ Native Figma Motion; distinct from prototype `reactions`.
 Applied via `set_node_property` fills/strokes/effects (fully-shaped objects pass through; reads are lossless):
 - Paints: `SHADER` (`{ type:'SHADER', shaderId }`), `VIDEO`, `GRADIENT_DIAMOND`.
 - Effects: `NOISE` (`noiseType: MONOTONE|DUOTONE|MULTITONE`), `TEXTURE`, `GLASS` (`refraction/depth/lightIntensity/lightAngle/dispersion/radius`), progressive blur (`blurType:'PROGRESSIVE'` + `startRadius/startOffset/endOffset`).
+
+## Tool scoping (`GRIP_TOOLS`)
+
+By default an agent only sees the `core` scope (~43 always-useful tools), not the full 192 — this keeps per-turn schema weight small. Widen the scope per agent:
+
+- **stdio:** set env `GRIP_TOOLS=core,motion` on the agent process (delivered to the daemon as an IPC control frame, alongside `GRIP_FILE`).
+- **HTTP:** pass `?tools=core,motion` on the `/mcp` URL.
+
+Tokens are comma-separated. `core` (the default when `GRIP_TOOLS` is unset) and `all` (every tool) are presets; anything else must be one of the category names below (unknown tokens are ignored, never fatal):
+
+`meta`, `read`, `write`, `pages`, `styles`, `variables`, `components`, `text`, `export`, `vector`, `motion`, `figjam`, `slides`, `devmode`, `library`, `assets`, `storage`, `subscribe`, `misc`.
+
+`meta` tools (`grip_health`, `grip_diagnose`, `list_files`, `set_active_file`, `get_page_context`, `grip_capabilities`) are always present regardless of scope. Regardless of scope, `run_script` (in `core` and in `write`) can reach any Plugin API surface, including tools your scope doesn't expose typed schemas for.
+
+Call `grip_capabilities` to see every category, its tool count, a sample of its tools, and whether it's currently `loaded` for your session — the way to discover what a narrower scope is hiding, and to know what to add to `GRIP_TOOLS`/`?tools=` to get it back as typed tools instead of reaching it via `run_script`.
