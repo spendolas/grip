@@ -72,6 +72,13 @@ export class HttpServer {
     // server.connect(), so teardown is driven off onsessionclosed (DELETE)
     // + a chained onclose + the idle sweep, mirroring ipc-server's pattern.
     const live = createSession(this.bridge);
+    // Tool scoping over HTTP: no shim-over-HTTP exists to forward GRIP_TOOLS
+    // env per-agent, so a direct HTTP client picks its scope via a `?tools=`
+    // query param on the initialize request itself (e.g. "?tools=core,motion").
+    // Read only here — session creation — never on a reused mcp-session-id,
+    // so a later POST on an already-initialized session can't clobber it.
+    const tools = new URL(req.url ?? '/', 'http://localhost').searchParams.get('tools');
+    if (tools) live.session.toolScopeSpec = tools;
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => uuid(),
       onsessioninitialized: (id) => {
