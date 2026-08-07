@@ -24,6 +24,9 @@ export class IpcServer {
       transport.onControl = (msg) => {
         if (msg.grip === 'bind' && typeof msg.target === 'string') {
           this.bridge.bindFromLaunch(msg.target, live.session);
+        } else if (msg.grip === 'tools' && typeof msg.value === 'string') {
+          live.session.toolScopeSpec = msg.value;
+          process.stderr.write(`[grip] mcp ${live.session.id.slice(0, 8)} tool scope -> ${msg.value}\n`);
         }
       };
       let cleaned = false;

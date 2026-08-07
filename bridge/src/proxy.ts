@@ -78,6 +78,16 @@ export async function runProxy(ipcPath: string): Promise<boolean> {
     process.stderr.write(`[grip] proxy sent launch bind GRIP_FILE=${gripFile}\n`);
   }
 
+  // Launch-time tool scoping. If this agent was started with GRIP_TOOLS,
+  // hand the daemon its scope spec as a control frame BEFORE any MCP
+  // traffic, same channel/framing as the GRIP_FILE bind frame above.
+  // Re-sent on every reconnect (runProxy re-runs), same as the bind frame.
+  const toolsSpec = process.env.GRIP_TOOLS?.trim();
+  if (toolsSpec) {
+    sock.write(JSON.stringify({ grip: 'tools', value: toolsSpec }) + '\n');
+    process.stderr.write(`[grip] proxy sent launch tool scope GRIP_TOOLS=${toolsSpec}\n`);
+  }
+
   hookStdin();
 
   // Track in-flight request ids. On close we emit a typed error response
