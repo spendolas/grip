@@ -8,7 +8,10 @@ import { v4 as uuid } from 'uuid';
 import { readFile, writeFile, stat, open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { TOOLS, toolInputSchema, resolveToolScope, toolInScope, toolCategorySummary, toolDetail } from './tools.js';
+import {
+  TOOLS, toolInputSchema, resolveToolScope, toolInScope, toolCategorySummary, toolDetail,
+  MERGED_TOOLS, resolveMerged,
+} from './tools.js';
 import type { PluginBridge } from './ws-server.js';
 import type { McpSession, WSEvent } from './types.js';
 
@@ -385,6 +388,36 @@ export function createSession(bridge: PluginBridge): LiveSession {
         return okResult({ path: outPath, format: result.format, bytes: buf.length });
       } catch (err) {
         return errorResult(`export_node to '${outPath}' failed: ${(err as Error).message}`);
+      }
+    }
+
+    // Phase 3: merged tools ({op}/{target}-dispatched clusters). Translate
+    // back to the underlying (former) tool name + args before it hits the
+    // generic forward below — the plugin never sees the merged name, only
+    // ever the real method, exactly as the old individual tool sent it.
+    const merged = resolveMerged(name, args);
+    if (merged) {
+      if ('error' in merged) return errorResult(merged.error);
+      const spec = MERGED_TOOLS[name];
+      if (spec.bridgeSide) {
+        // TODO(phase3 task6): no bridgeSide cluster exists yet (3a's two
+        // merges — bind_to_variable, group — are both plugin-forward). A
+        // later task (subscribe) lands here — verify the
+        // recursive handleCall(merged.method, ...) below still finds a
+        // TOOLS entry for merged.method (bridgeSide dispatch such as
+        // subscribe_selection is branched on `name === '<tool>'` further
+        // up in this function, not via a TOOLS lookup, so this recursion
+        // is expected to reach that branch rather than the `Unknown tool`
+        // guard at the top — confirm when wiring that cluster).
+        return await handleCall(merged.method, merged.rest);
+      }
+      try {
+        const result = await bridge.request(merged.method, merged.rest, session);
+        return okResult(result);
+      } catch (err) {
+        const message = (err as Error)?.message ?? String(err);
+        process.stderr.write(`[grip] handler error in ${name} (merged→${merged.method}): ${message}\n`);
+        return errorResult(message);
       }
     }
 

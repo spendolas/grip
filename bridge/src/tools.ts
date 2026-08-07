@@ -39,14 +39,13 @@ export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
   read: ['get_document', 'get_page', 'get_node', 'get_nodes', 'get_selection', 'get_styles', 'get_variables',
     'get_components', 'search_nodes', 'find_with_criteria', 'get_plugin_data', 'get_overrides', 'get_instances',
     'get_selection_colors', 'get_top_level_frame', 'get_style_consumers', 'get_publish_status', 'get_relaunch_data'],
-  write: ['set_node_property', 'create_node', 'delete_node', 'clone_node', 'move_node', 'group_nodes',
-    'ungroup_node', 'set_selection', 'scroll_to', 'map_nodes', 'set_viewport', 'rescale', 'lock_aspect_ratio',
+  write: ['set_node_property', 'create_node', 'delete_node', 'clone_node', 'move_node', 'group',
+    'set_selection', 'scroll_to', 'map_nodes', 'set_viewport', 'rescale', 'lock_aspect_ratio',
     'unlock_aspect_ratio', 'create_section', 'set_skip_invisible_instance_children', 'set_grid_child_position',
     'set_relaunch_data', 'run_script'],
   pages: ['create_page', 'set_current_page', 'delete_page'],
   styles: ['set_style', 'apply_style', 'delete_style', 'move_local_style'],
-  variables: ['set_variable_value', 'bind_property_to_variable', 'bind_paint_to_variable', 'bind_effect_to_variable',
-    'bind_layout_grid_to_variable', 'create_variable', 'delete_variable', 'create_variable_collection',
+  variables: ['set_variable_value', 'bind_to_variable', 'create_variable', 'delete_variable', 'create_variable_collection',
     'delete_variable_collection', 'add_variable_mode', 'remove_variable_mode', 'rename_variable_mode',
     'set_explicit_variable_mode', 'clear_explicit_variable_mode', 'set_variable_meta',
     'request_variable_to_be_enabled', 'request_variable_to_be_disabled'],
@@ -91,12 +90,46 @@ export const META_TOOL_NAMES: ReadonlySet<string> = new Set(TOOL_CATEGORIES.meta
 export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
   'get_document', 'get_page', 'get_node', 'get_nodes', 'get_selection', 'search_nodes', 'find_with_criteria',
   'get_styles', 'get_variables', 'get_components', 'get_plugin_data', 'get_overrides',
-  'set_node_property', 'create_node', 'delete_node', 'clone_node', 'move_node', 'group_nodes', 'ungroup_node',
+  'set_node_property', 'create_node', 'delete_node', 'clone_node', 'move_node', 'group',
   'set_selection', 'scroll_to', 'map_nodes', 'create_page', 'set_current_page', 'delete_page',
-  'apply_style', 'set_style', 'set_variable_value', 'bind_property_to_variable', 'bind_paint_to_variable',
+  'apply_style', 'set_style', 'set_variable_value', 'bind_to_variable',
   'swap_instance', 'detach_instance', 'reset_instance_overrides', 'set_text_range_property', 'load_font',
   'export_node', 'run_script',
 ]);
+
+// --- Tool merging (phase 3): collapse "N verbs on one object" clusters into
+// a single {op}/{target}-dispatched tool at the bridge surface only. The
+// plugin keeps every former handler (plugin/code.ts is untouched) — this
+// table + resolveMerged() just translate a merged call back into the
+// underlying (former) tool name + args before it hits the generic forward.
+export const MERGED_TOOLS: Record<string, {
+  discriminator: 'op' | 'target';
+  category: ToolCategory;
+  core?: boolean;
+  bridgeSide?: boolean;
+  map: Record<string, string>;
+}> = {
+  bind_to_variable: { discriminator: 'target', category: 'variables', core: true, map: {
+    property: 'bind_property_to_variable', paint: 'bind_paint_to_variable',
+    effect: 'bind_effect_to_variable', layout_grid: 'bind_layout_grid_to_variable' } },
+  group: { discriminator: 'op', category: 'write', core: true, map: {
+    group: 'group_nodes', ungroup: 'ungroup_node' } },
+};
+
+export function mergedToolNames(): string[] { return Object.keys(MERGED_TOOLS); }
+
+export function resolveMerged(name: string, args: any):
+  { method: string; rest: Record<string, unknown> } | { error: string } | null {
+  const spec = MERGED_TOOLS[name];
+  if (!spec) return null;
+  const d = spec.discriminator;
+  const val = args?.[d];
+  if (typeof val !== 'string') return { error: `${name} requires '${d}' (one of: ${Object.keys(spec.map).join(', ')})` };
+  const method = spec.map[val];
+  if (!method) return { error: `${name}: unknown ${d} '${val}' (one of: ${Object.keys(spec.map).join(', ')})` };
+  const rest = { ...(args ?? {}) }; delete rest[d];
+  return { method, rest };
+}
 
 const _CAT_OF: Map<string, ToolCategory> = (() => {
   const m = new Map<string, ToolCategory>();
@@ -430,19 +463,9 @@ export const TOOLS: ToolDef[] = [
     }),
   },
   {
-    name: 'group_nodes',
-    description: 'Group nodes. Default creates a GROUP. asFrame:true creates a FRAME wrapping their bounding box.',
-    schema: z.object({
-      nodeIds: z.array(z.string()).min(1),
-      parentId: z.string().optional(),
-      asFrame: z.boolean().optional(),
-      name: z.string().optional(),
-    }),
-  },
-  {
-    name: 'ungroup_node',
-    description: 'Ungroup a GROUP or FRAME, releasing children to its parent.',
-    schema: z.object({ nodeId: z.string() }),
+    name: 'group', category: 'write',
+    description: "Group or ungroup nodes. `op`: group (was group_nodes — {nodeIds, name?}) | ungroup (was ungroup_node — {nodeId}).",
+    schema: z.object({ op: z.enum(['group', 'ungroup']) }).passthrough(),
   },
 
   // ---------- pages ----------
@@ -519,13 +542,10 @@ export const TOOLS: ToolDef[] = [
     }),
   },
   {
-    name: 'bind_property_to_variable',
-    description: 'Bind a node field (e.g. fills, strokes, opacity, cornerRadius, paddingTop, characters, height, width) to a variable.',
-    schema: z.object({
-      nodeId: z.string(),
-      field: z.string(),
-      variableId: z.string(),
-    }),
+    name: 'bind_to_variable', category: 'variables',
+    description: "Bind a node field to a variable. `target`: property | paint | effect | layout_grid (which kind of field). Plus that field's params (e.g. nodeId, variableId/variableAlias, field/index). Call grip_capabilities {tool:'bind_to_variable'} for the per-target params.",
+    detail: "target=property: bind a plain property (was bind_property_to_variable) — {nodeId, field, variableId}. target=paint: bind a fill/stroke paint (was bind_paint_to_variable) — {nodeId, field:'fills'|'strokes', index, variableId}. target=effect: bind an effect field (was bind_effect_to_variable). target=layout_grid: bind a layout-grid field (was bind_layout_grid_to_variable).",
+    schema: z.object({ target: z.enum(['property', 'paint', 'effect', 'layout_grid']) }).passthrough(),
   },
 
   // ---------- assets ----------
@@ -1064,8 +1084,6 @@ export const TOOLS: ToolDef[] = [
   },
 
   // ---------- tier 6 ----------
-  { name: 'bind_effect_to_variable', description: 'Bind an Effect property to a variable. Default effectIndex 0.', schema: z.object({ nodeId: z.string(), variableId: z.string(), field: z.string(), effectIndex: z.number().int().nonnegative().optional() }) },
-  { name: 'bind_layout_grid_to_variable', description: 'Bind a LayoutGrid property to a variable. Default gridIndex 0.', schema: z.object({ nodeId: z.string(), variableId: z.string(), field: z.string(), gridIndex: z.number().int().nonnegative().optional() }) },
   { name: 'set_explicit_variable_mode', description: 'Override the active mode for a variable collection on a specific node.', schema: z.object({ nodeId: z.string(), collectionId: z.string(), modeId: z.string() }) },
   { name: 'clear_explicit_variable_mode', description: 'Clear a per-node mode override.', schema: z.object({ nodeId: z.string(), collectionId: z.string() }) },
   { name: 'get_instances', description: 'Find every instance of a COMPONENT or COMPONENT_SET.', schema: z.object({ componentId: z.string() }) },
@@ -1170,18 +1188,6 @@ export const TOOLS: ToolDef[] = [
       name: z.string().optional(),
     }),
   },
-  {
-    name: 'bind_paint_to_variable',
-    description: "Bind a single paint's color to a COLOR variable (per-paint, unlike bind_property_to_variable which binds whole-property). Defaults to fills[0].color.",
-    schema: z.object({
-      nodeId: z.string(),
-      variableId: z.string(),
-      paintField: z.enum(['fills', 'strokes']).optional(),
-      paintIndex: z.number().int().nonnegative().optional(),
-      field: z.string().optional(),
-    }),
-  },
-
   // ---------- text range ----------
   {
     name: 'set_text_range_property',
