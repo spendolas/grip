@@ -12,6 +12,129 @@ export interface ToolDef {
   // True when the tool returns a notification subscription rather than
   // a one-shot response. The MCP server short-circuits these.
   subscription?: boolean;
+  // Tool-scoping category (phase 1 groundwork). Optional here — a later
+  // task tags every TOOLS entry; TOOL_CATEGORIES below is the authoritative
+  // name→category map until then.
+  category?: ToolCategory;
+}
+
+// --- Tool scoping (phase 1): category taxonomy + scope resolver ---------
+//
+// Lets an agent request a subset of grip's tool surface (GRIP_TOOLS env /
+// ?tools= query, wired in a later task) instead of always injecting all
+// 192 schemas. `core` is the always-safe default; `meta` tools are always
+// present regardless of scope; `all` restores everything.
+
+export type ToolCategory =
+  | 'meta' | 'read' | 'write' | 'pages' | 'styles' | 'variables' | 'components'
+  | 'text' | 'export' | 'vector' | 'motion' | 'figjam' | 'slides' | 'devmode'
+  | 'library' | 'assets' | 'storage' | 'subscribe' | 'misc';
+
+export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
+  // NOTE: 'grip_capabilities' is NOT listed here — it does not exist as a
+  // TOOLS entry yet (added in phase-1 Task 3). When that task adds the real
+  // tool, it must also add 'grip_capabilities' to this list so it becomes
+  // always-present like the other meta tools.
+  meta: ['grip_health', 'grip_diagnose', 'list_files', 'set_active_file', 'get_page_context'],
+  read: ['get_document', 'get_page', 'get_node', 'get_nodes', 'get_selection', 'get_styles', 'get_variables',
+    'get_components', 'search_nodes', 'find_with_criteria', 'get_plugin_data', 'get_overrides', 'get_instances',
+    'get_selection_colors', 'get_top_level_frame', 'get_style_consumers', 'get_publish_status', 'get_relaunch_data'],
+  write: ['set_node_property', 'create_node', 'delete_node', 'clone_node', 'move_node', 'group_nodes',
+    'ungroup_node', 'set_selection', 'scroll_to', 'map_nodes', 'set_viewport', 'rescale', 'lock_aspect_ratio',
+    'unlock_aspect_ratio', 'create_section', 'set_skip_invisible_instance_children', 'set_grid_child_position',
+    'set_relaunch_data'],
+  pages: ['create_page', 'set_current_page', 'delete_page'],
+  styles: ['set_style', 'apply_style', 'delete_style', 'move_local_style'],
+  variables: ['set_variable_value', 'bind_property_to_variable', 'bind_paint_to_variable', 'bind_effect_to_variable',
+    'bind_layout_grid_to_variable', 'create_variable', 'delete_variable', 'create_variable_collection',
+    'delete_variable_collection', 'add_variable_mode', 'remove_variable_mode', 'rename_variable_mode',
+    'set_explicit_variable_mode', 'clear_explicit_variable_mode', 'set_variable_meta',
+    'request_variable_to_be_enabled', 'request_variable_to_be_disabled'],
+  components: ['swap_instance', 'detach_instance', 'reset_instance_overrides', 'create_component_from_node',
+    'combine_as_variants', 'create_slot', 'add_component_property', 'edit_component_property',
+    'delete_component_property'],
+  text: ['set_text_range_property', 'insert_characters', 'delete_characters', 'load_font', 'list_fonts',
+    'get_styled_text_segments', 'get_text_content', 'create_text_path', 'get_text_range_bound_variable',
+    'set_text_range_bound_variable'],
+  export: ['export_node'],
+  vector: ['flatten_nodes', 'boolean_operation', 'outline_stroke', 'set_vector_network', 'create_node_from_svg',
+    'transform_group', 'load_brushes'],
+  motion: ['apply_animation_style', 'remove_animation_style', 'apply_manual_keyframe_track',
+    'remove_manual_keyframe_track', 'set_timeline_duration', 'spring_to_normalized', 'list_animation_styles',
+    'get_animations'],
+  figjam: ['create_sticky', 'create_connector', 'create_shape_with_text', 'create_table', 'table_cell_at',
+    'table_insert_column', 'table_insert_row', 'table_move_column', 'table_move_row', 'table_remove_column',
+    'table_remove_row', 'table_resize_column', 'table_resize_row', 'timer_start', 'timer_stop', 'timer_pause',
+    'timer_resume', 'get_attached_connectors', 'get_stamp_author'],
+  slides: ['create_slide', 'create_slide_row', 'set_slide_transition', 'get_slide_transition',
+    'slides_create_canvas_row', 'slides_get_canvas_grid', 'slides_set_canvas_grid', 'slides_move_nodes_to_coord',
+    'create_page_divider'],
+  devmode: ['add_dev_resource', 'edit_dev_resource', 'delete_dev_resource', 'get_dev_resources', 'set_annotation',
+    'get_annotations', 'add_annotation_category', 'edit_annotation_category', 'delete_annotation_category',
+    'get_annotation_category', 'get_annotation_categories', 'add_measurement', 'edit_measurement',
+    'delete_measurement', 'get_measurements', 'get_measurements_for_node', 'get_deep_link', 'set_reactions'],
+  library: ['import_component_by_key', 'import_component_set_by_key', 'import_style_by_key', 'import_variable_by_key',
+    'import_shader', 'list_shaders', 'get_library_usage', 'extend_library_collection_by_key'],
+  assets: ['upload_image', 'upload_image_from_path', 'upload_image_begin', 'upload_image_chunk',
+    'upload_image_finish', 'create_image_from_url', 'get_image_by_hash', 'create_gif', 'create_video',
+    'create_link_preview', 'create_slice', 'set_file_thumbnail', 'get_file_thumbnail_node'],
+  storage: ['client_storage_get', 'client_storage_set', 'client_storage_delete', 'client_storage_keys',
+    'set_plugin_data', 'get_shared_plugin_data', 'set_shared_plugin_data'],
+  subscribe: ['subscribe_selection', 'subscribe_document', 'subscribe_currentpage'],
+  // 'run_script' lives here: it's a generic escape hatch (arbitrary plugin
+  // API via JS), not tied to any single domain category. It's still always
+  // reachable via CORE_TOOL_NAMES below regardless of this bucket.
+  misc: ['notify', 'open_external_url', 'commit_undo', 'trigger_undo', 'save_version', 'ui_show', 'ui_hide',
+    'ui_resize', 'ui_reposition', 'create_code_block', 'get_active_users', 'get_current_user',
+    'set_buzz_asset_type', 'get_buzz_asset_type', 'run_script'],
+};
+
+export const META_TOOL_NAMES: ReadonlySet<string> = new Set(TOOL_CATEGORIES.meta);
+
+export const CORE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'get_document', 'get_page', 'get_node', 'get_nodes', 'get_selection', 'search_nodes', 'find_with_criteria',
+  'get_styles', 'get_variables', 'get_components', 'get_plugin_data', 'get_overrides',
+  'set_node_property', 'create_node', 'delete_node', 'clone_node', 'move_node', 'group_nodes', 'ungroup_node',
+  'set_selection', 'scroll_to', 'map_nodes', 'create_page', 'set_current_page', 'delete_page',
+  'apply_style', 'set_style', 'set_variable_value', 'bind_property_to_variable', 'bind_paint_to_variable',
+  'swap_instance', 'detach_instance', 'reset_instance_overrides', 'set_text_range_property', 'load_font',
+  'export_node', 'run_script',
+]);
+
+const _CAT_OF: Map<string, ToolCategory> = (() => {
+  const m = new Map<string, ToolCategory>();
+  for (const cat of Object.keys(TOOL_CATEGORIES) as ToolCategory[]) {
+    for (const name of TOOL_CATEGORIES[cat]) m.set(name, cat);
+  }
+  return m;
+})();
+
+export function categoryOf(name: string): ToolCategory {
+  return _CAT_OF.get(name) ?? 'misc';
+}
+
+export interface ToolScope { all: boolean; coreNames: Set<string>; categories: Set<string>; }
+
+// Parse a GRIP_TOOLS spec. Unset/empty → 'core'. Tokens: 'all', 'core',
+// or a category name. Unknown tokens are ignored (never fatal).
+export function resolveToolScope(spec: string | null | undefined): ToolScope {
+  const scope: ToolScope = { all: false, coreNames: new Set(), categories: new Set() };
+  const raw = (spec ?? '').trim();
+  const tokens = raw ? raw.split(',').map((t) => t.trim()).filter(Boolean) : ['core'];
+  for (const tok of tokens) {
+    if (tok === 'all') scope.all = true;
+    else if (tok === 'core') for (const n of CORE_TOOL_NAMES) scope.coreNames.add(n);
+    else if ((TOOL_CATEGORIES as Record<string, string[]>)[tok]) scope.categories.add(tok);
+    // else: unknown token — ignore (caller may log)
+  }
+  return scope;
+}
+
+export function toolInScope(name: string, scope: ToolScope): boolean {
+  if (META_TOOL_NAMES.has(name)) return true;      // meta: always
+  if (scope.all) return true;
+  if (scope.coreNames.has(name)) return true;
+  return scope.categories.has(categoryOf(name));
 }
 
 const NodeTypeEnum = z.enum([
