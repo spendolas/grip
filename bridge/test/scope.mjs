@@ -1,6 +1,6 @@
 import assert from 'node:assert';
 import { TOOLS } from '../dist/tools.js';
-import { resolveToolScope, toolInScope, CORE_TOOL_NAMES, META_TOOL_NAMES, TOOL_CATEGORIES, toolCategorySummary } from '../dist/tools.js';
+import { resolveToolScope, toolInScope, CORE_TOOL_NAMES, META_TOOL_NAMES, TOOL_CATEGORIES, toolCategorySummary, toolDetail } from '../dist/tools.js';
 
 // Every tool has exactly one category; every core/meta name is a real tool.
 const allNames = new Set(TOOLS.map((t) => t.name));
@@ -63,5 +63,12 @@ const motion = dirCore.find((c) => c.name === 'motion');
 assert.ok(motion && motion.loaded === false && motion.toolCount === TOOL_CATEGORIES.motion.length, 'motion should be present, unloaded, count matching TOOL_CATEGORIES.motion');
 const dirMotion = toolCategorySummary(resolveToolScope('core,motion'));
 assert.ok(dirMotion.find((c) => c.name === 'motion').loaded === true, 'motion loaded under core,motion');
+
+// Phase 2: per-tool detail pull
+assert.strictEqual(toolDetail('does_not_exist'), null, 'unknown tool → null');
+const rs = toolDetail('run_script');
+assert.ok(rs && rs.tool === 'run_script', 'toolDetail returns the tool');
+assert.ok(typeof rs.description === 'string' && rs.description.length > 0, 'has description');
+assert.ok('detail' in rs && 'category' in rs, 'shape has detail + category');
 
 console.log('scope.mjs OK');

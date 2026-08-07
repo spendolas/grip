@@ -16,6 +16,10 @@ export interface ToolDef {
   // below is the authoritative name→category map; this field is currently
   // set only on the grip_capabilities entry.
   category?: ToolCategory;
+  // Phase 2: deep guidance relocated out of `description` (which stays
+  // short for the ListTools payload); surfaced on demand via
+  // `grip_capabilities {tool}`.
+  detail?: string;
 }
 
 // --- Tool scoping (phase 1): category taxonomy + scope resolver ---------
@@ -151,6 +155,18 @@ export function toolCategorySummary(
     });
 }
 
+// Phase 2: pull path for a single tool's full guidance. `description` stays
+// short (ListTools payload); `detail` (optional, may be absent) carries the
+// deep guidance that Phase 1's grip_capabilities directory can't show per-
+// tool. Powers `grip_capabilities {tool: '<name>'}` in mcp-server.ts.
+export function toolDetail(
+  name: string,
+): { tool: string; description: string; detail: string | null; category: string } | null {
+  const t = TOOLS.find((x) => x.name === name);
+  if (!t) return null;
+  return { tool: t.name, description: t.description ?? '', detail: t.detail ?? null, category: categoryOf(t.name) };
+}
+
 const NodeTypeEnum = z.enum([
   'FRAME', 'TEXT', 'RECTANGLE', 'ELLIPSE', 'COMPONENT', 'INSTANCE',
   'GROUP', 'POLYGON', 'STAR', 'LINE', 'VECTOR', 'BOOLEAN_OPERATION',
@@ -237,7 +253,7 @@ export const TOOLS: ToolDef[] = [
     category: 'meta',
     description:
       "List grip's tool categories and which are loaded in THIS agent's scope. Use it to discover tools that aren't injected: a category shows loaded:false when it's out of scope — reach it now via run_script, or relaunch with GRIP_TOOLS including that category for the typed tools.",
-    schema: z.object({}),
+    schema: z.object({ tool: z.string().optional() }),
   },
   {
     name: 'get_deep_link',

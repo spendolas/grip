@@ -8,7 +8,7 @@ import { v4 as uuid } from 'uuid';
 import { readFile, writeFile, stat, open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { TOOLS, toolInputSchema, resolveToolScope, toolInScope, toolCategorySummary } from './tools.js';
+import { TOOLS, toolInputSchema, resolveToolScope, toolInScope, toolCategorySummary, toolDetail } from './tools.js';
 import type { PluginBridge } from './ws-server.js';
 import type { McpSession, WSEvent } from './types.js';
 
@@ -291,12 +291,20 @@ export function createSession(bridge: PluginBridge): LiveSession {
     // no plugin round-trip — so it answers even with no Figma window open.
     // Tells a scoped agent which categories exist and whether THIS session's
     // scope loaded them, so it can discover tools that weren't injected.
+    // Phase 2: with {tool: '<name>'} it instead pulls that one tool's full
+    // detail (description relocated out of the trimmed ListTools payload).
     if (name === 'grip_capabilities') {
       const scope = resolveToolScope(session.toolScopeSpec);
+      const wanted = (args && typeof args.tool === 'string') ? args.tool : null;
+      if (wanted) {
+        const d = toolDetail(wanted);
+        if (!d) return okResult({ scope: session.toolScopeSpec ?? 'core (default)', error: `no such tool: ${wanted}` });
+        return okResult({ scope: session.toolScopeSpec ?? 'core (default)', ...d, inScope: toolInScope(wanted, scope) });
+      }
       return okResult({
         scope: session.toolScopeSpec ?? 'core (default)',
         howToChange:
-          'Relaunch with env GRIP_TOOLS=core,<category> (stdio) or ?tools=core,<category> (HTTP); or call the API directly via run_script (if run_script is in scope).',
+          "Relaunch with env GRIP_TOOLS=core,<category> (stdio) or ?tools=core,<category> (HTTP); or call the API directly via run_script (if run_script is in scope). Call grip_capabilities {tool:'<name>'} for a tool's full detail.",
         categories: toolCategorySummary(scope),
       });
     }
