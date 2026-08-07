@@ -8,7 +8,7 @@ import { v4 as uuid } from 'uuid';
 import { readFile, writeFile, stat, open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { TOOLS, toolInputSchema } from './tools.js';
+import { TOOLS, toolInputSchema, resolveToolScope, toolInScope } from './tools.js';
 import type { PluginBridge } from './ws-server.js';
 import type { McpSession, WSEvent } from './types.js';
 
@@ -140,19 +140,23 @@ export function createSession(bridge: PluginBridge): LiveSession {
     bind: null,
     subscriptions: { selection: false, document: false, currentPage: false },
     rateBucket: { tokens: RATE_LIMIT_BURST, lastRefillMs: Date.now() },
+    toolScopeSpec: null,
   };
   const server = new Server(
     { name: 'grip', version: '0.1.0' },
     { capabilities: { tools: {}, logging: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOLS.map((t) => ({
-      name: t.name,
-      description: t.description,
-      inputSchema: toolInputSchema(t.name),
-    })),
-  }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const scope = resolveToolScope(session.toolScopeSpec);
+    return {
+      tools: TOOLS.filter((t) => toolInScope(t.name, scope)).map((t) => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: toolInputSchema(t.name),
+      })),
+    };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const name = req.params.name;

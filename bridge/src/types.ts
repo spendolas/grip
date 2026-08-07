@@ -2,7 +2,7 @@
 // file / grip_health) and ws-server.ts (welcome frame + plugin-mismatch warning)
 // so they can never drift. Keep in lockstep with bridge/package.json + the
 // plugin's PLUGIN_VERSION on a release bump.
-export const BRIDGE_VERSION = '0.2.24';
+export const BRIDGE_VERSION = '0.3.0';
 
 export interface WSRequest {
   id: string;
@@ -62,6 +62,11 @@ export interface McpSession {
   // RATE_LIMIT_BURST. Tool calls cost 1 token. Stops an agent runaway
   // from saturating the single-threaded plugin.
   rateBucket: { tokens: number; lastRefillMs: number };
+  // GRIP_TOOLS spec for this session (tool-scoping phase 1) — resolved via
+  // resolveToolScope() in tools.ts. null = unset, which resolves to the
+  // 'core' default. Set by later tasks (launch-time env / runtime tool);
+  // this task only carries the field and defaults it on session creation.
+  toolScopeSpec: string | null;
 }
 
 export interface SerializedPaint {

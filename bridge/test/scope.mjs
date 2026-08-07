@@ -45,4 +45,22 @@ assert.ok(toolInScope('set_node_property', resolveToolScope('all')));
 // unknown token ignored, not fatal
 assert.doesNotThrow(() => resolveToolScope('core,bogus'));
 
+// Simulate ListTools filtering exactly as mcp-server will.
+const listFor = (spec) => {
+  const scope = resolveToolScope(spec);
+  return TOOLS.map((t) => t.name).filter((n) => toolInScope(n, scope));
+};
+const core = listFor(null);
+assert.ok(core.length >= 40 && core.length <= 46, `core list size unexpected: ${core.length}`);
+// NOTE: the brief's version of this assertion checks for 'grip_capabilities'
+// instead of 'grip_health'. That tool does not exist in TOOLS yet — it's
+// added in Task 3 (see the NOTE above and task-1-report.md) — so asserting
+// on it here would fail by construction, not because of a real regression.
+// 'grip_health' is an existing real meta tool and exercises the identical
+// "meta always present in core scope" behavior.
+assert.ok(core.includes('grip_health') && core.includes('run_script'));
+assert.ok(!core.includes('apply_animation_style'));
+assert.strictEqual(listFor('all').length, TOOLS.length, 'all must list every tool');
+assert.ok(listFor('read').includes('grip_health') && !listFor('read').includes('run_script'));
+
 console.log('scope.mjs OK');
