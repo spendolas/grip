@@ -67,10 +67,8 @@ export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
   slides: ['create_slide', 'create_slide_row', 'set_slide_transition', 'get_slide_transition',
     'slides_create_canvas_row', 'slides_get_canvas_grid', 'slides_set_canvas_grid', 'slides_move_nodes_to_coord',
     'create_page_divider'],
-  devmode: ['add_dev_resource', 'edit_dev_resource', 'delete_dev_resource', 'get_dev_resources', 'set_annotation',
-    'get_annotations', 'add_annotation_category', 'edit_annotation_category', 'delete_annotation_category',
-    'get_annotation_category', 'get_annotation_categories', 'add_measurement', 'edit_measurement',
-    'delete_measurement', 'get_measurements', 'get_measurements_for_node', 'get_deep_link', 'set_reactions'],
+  devmode: ['dev_resource', 'set_annotation', 'get_annotations', 'annotation_category', 'measurement',
+    'get_deep_link', 'set_reactions'],
   library: ['import_component_by_key', 'import_component_set_by_key', 'import_style_by_key', 'import_variable_by_key',
     'import_shader', 'list_shaders', 'get_library_usage', 'extend_library_collection_by_key'],
   assets: ['upload_image', 'upload_image_from_path', 'upload_image_begin', 'upload_image_chunk',
@@ -121,6 +119,14 @@ export const MERGED_TOOLS: Record<string, {
     create: 'create_variable_collection', delete: 'delete_variable_collection' } },
   explicit_variable_mode: { discriminator: 'op', category: 'variables', map: {
     set: 'set_explicit_variable_mode', clear: 'clear_explicit_variable_mode' } },
+  annotation_category: { discriminator: 'op', category: 'devmode', map: {
+    add: 'add_annotation_category', edit: 'edit_annotation_category', delete: 'delete_annotation_category',
+    get: 'get_annotation_category', list: 'get_annotation_categories' } },
+  measurement: { discriminator: 'op', category: 'devmode', map: {
+    add: 'add_measurement', edit: 'edit_measurement', delete: 'delete_measurement',
+    list: 'get_measurements', for_node: 'get_measurements_for_node' } },
+  dev_resource: { discriminator: 'op', category: 'devmode', map: {
+    add: 'add_dev_resource', edit: 'edit_dev_resource', delete: 'delete_dev_resource', get: 'get_dev_resources' } },
 };
 
 export function mergedToolNames(): string[] { return Object.keys(MERGED_TOOLS); }
@@ -701,23 +707,22 @@ export const TOOLS: ToolDef[] = [
     }),
   },
   {
-    name: 'add_dev_resource',
-    description: 'Attach a Dev Mode resource (URL + label) to a node.',
-    schema: z.object({
-      nodeId: z.string(),
-      url: z.string(),
-      name: z.string().optional(),
-    }),
+    name: 'dev_resource', category: 'devmode',
+    description: "Add, edit, delete, or read Dev Mode resources (URL + label) attached to a node. `op`: add ({nodeId, url, name?}) | edit ({nodeId, currentUrl, name?, url?}) | delete ({nodeId, url}) | get ({nodeId}). Call grip_capabilities {tool:'dev_resource'} for per-op params.",
+    detail: "op=add: attach a Dev Mode resource to a node (was add_dev_resource) — {nodeId, url, name?}. op=edit: rename or change URL of an existing resource (was edit_dev_resource) — {nodeId, currentUrl, name?, url?}. op=delete: remove a Dev Mode resource by URL (was delete_dev_resource) — {nodeId, url}. op=get: read all Dev Mode resources on a node (was get_dev_resources) — {nodeId}.",
+    schema: z.object({ op: z.enum(['add', 'edit', 'delete', 'get']) }).passthrough(),
   },
   {
-    name: 'delete_dev_resource',
-    description: 'Remove a Dev Mode resource by URL.',
-    schema: z.object({ nodeId: z.string(), url: z.string() }),
+    name: 'annotation_category', category: 'devmode',
+    description: "Add, edit, delete, get, or list Dev Mode annotation categories. `op`: add ({label, color?}) | edit ({categoryId, label?, color?}) | delete ({categoryId}) | get ({categoryId}) | list ({}). Call grip_capabilities {tool:'annotation_category'} for per-op params.",
+    detail: "op=add: create a Dev Mode annotation category (was add_annotation_category) — {label, color?}. op=edit: rename or recolor an annotation category (was edit_annotation_category) — {categoryId, label?, color?}. op=delete: delete an annotation category (was delete_annotation_category) — {categoryId}. op=get: get one annotation category by id (was get_annotation_category) — {categoryId}. op=list: list all annotation categories in the file (was get_annotation_categories) — {}.",
+    schema: z.object({ op: z.enum(['add', 'edit', 'delete', 'get', 'list']) }).passthrough(),
   },
   {
-    name: 'get_dev_resources',
-    description: 'Read all Dev Mode resources on a node.',
-    schema: z.object({ nodeId: z.string() }),
+    name: 'measurement', category: 'devmode',
+    description: "Add, edit, delete, list, or read Dev Mode measurements. `op`: add ({startNodeId, endNodeId, startSide?, endSide?, offset?, freeText?}) | edit ({measurementId, offset?, freeText?}) | delete ({measurementId}) | list ({}) | for_node ({nodeId}). Call grip_capabilities {tool:'measurement'} for per-op params.",
+    detail: "op=add: add a Dev Mode measurement between two node sides (was add_measurement) — {startNodeId, endNodeId, startSide?, endSide?, offset?, freeText?}. op=edit: edit an existing measurement's offset/freeText (was edit_measurement) — {measurementId, offset?, freeText?}. op=delete: delete a measurement by id (was delete_measurement) — {measurementId}. op=list: list all measurements in the file (was get_measurements) — {}. op=for_node: list measurements anchored on a node (was get_measurements_for_node) — {nodeId}.",
+    schema: z.object({ op: z.enum(['add', 'edit', 'delete', 'list', 'for_node']) }).passthrough(),
   },
   {
     name: 'import_component_by_key',
@@ -1076,17 +1081,6 @@ export const TOOLS: ToolDef[] = [
   { name: 'rescale', description: 'Proportional resize by a factor.', schema: z.object({ nodeId: z.string(), factor: z.number().positive() }) },
   { name: 'lock_aspect_ratio', description: 'Lock node aspect ratio.', schema: z.object({ nodeId: z.string() }) },
   { name: 'unlock_aspect_ratio', description: 'Unlock node aspect ratio.', schema: z.object({ nodeId: z.string() }) },
-  { name: 'edit_dev_resource', description: 'Edit a Dev Mode resource (rename or change URL).', schema: z.object({ nodeId: z.string(), currentUrl: z.string(), name: z.string().optional(), url: z.string().optional() }) },
-  { name: 'add_measurement', description: 'Add a Dev Mode measurement between two node sides.', schema: z.object({ startNodeId: z.string(), endNodeId: z.string(), startSide: z.string().optional(), endSide: z.string().optional(), offset: z.any().optional(), freeText: z.string().optional() }) },
-  { name: 'edit_measurement', description: 'Edit an existing measurement (offset / freeText).', schema: z.object({ measurementId: z.string(), offset: z.any().optional(), freeText: z.string().optional() }) },
-  { name: 'delete_measurement', description: 'Delete a measurement by id.', schema: z.object({ measurementId: z.string() }) },
-  { name: 'get_measurements', description: 'List all measurements in the file.', schema: z.object({}) },
-  { name: 'get_measurements_for_node', description: 'List measurements anchored on a node.', schema: z.object({ nodeId: z.string() }) },
-  { name: 'add_annotation_category', description: 'Create a Dev Mode annotation category (label + color).', schema: z.object({ label: z.string(), color: z.any().optional() }) },
-  { name: 'get_annotation_categories', description: 'List all annotation categories in the file.', schema: z.object({}) },
-  { name: 'get_annotation_category', description: 'Get one annotation category by id.', schema: z.object({ categoryId: z.string() }) },
-  { name: 'edit_annotation_category', description: 'Rename or recolor an annotation category. Pass label and/or color.', schema: z.object({ categoryId: z.string(), label: z.string().optional(), color: z.any().optional() }) },
-  { name: 'delete_annotation_category', description: 'Delete an annotation category.', schema: z.object({ categoryId: z.string() }) },
   { name: 'table_insert_row', description: 'Insert a row into a TABLE. index defaults to end.', schema: z.object({ nodeId: z.string(), index: z.number().int().nonnegative().optional() }) },
   { name: 'table_insert_column', description: 'Insert a column into a TABLE.', schema: z.object({ nodeId: z.string(), index: z.number().int().nonnegative().optional() }) },
   { name: 'table_remove_row', description: 'Remove a row.', schema: z.object({ nodeId: z.string(), index: z.number().int().nonnegative() }) },

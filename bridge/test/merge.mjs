@@ -31,4 +31,9 @@ assert.deepStrictEqual(resolveMerged('variable_mode', { op: 'rename', modeId: 'm
 assert.deepStrictEqual(resolveMerged('variable', { op: 'create', collectionId: 'c1', name: 'x', resolvedType: 'COLOR' }), { method: 'create_variable', rest: { collectionId: 'c1', name: 'x', resolvedType: 'COLOR' } });
 assert.deepStrictEqual(resolveMerged('variable_collection', { op: 'delete', collectionId: 'c1' }), { method: 'delete_variable_collection', rest: { collectionId: 'c1' } });
 assert.deepStrictEqual(resolveMerged('explicit_variable_mode', { op: 'clear', nodeId: '1:1', collectionId: 'c1' }), { method: 'clear_explicit_variable_mode', rest: { nodeId: '1:1', collectionId: 'c1' } });
+
+// 3b: devmode clusters
+assert.deepStrictEqual(resolveMerged('measurement', { op: 'for_node', nodeId: '1:1' }), { method: 'get_measurements_for_node', rest: { nodeId: '1:1' } });
+assert.deepStrictEqual(resolveMerged('annotation_category', { op: 'list' }), { method: 'get_annotation_categories', rest: {} });
+assert.deepStrictEqual(resolveMerged('dev_resource', { op: 'get', nodeId: '1:1' }), { method: 'get_dev_resources', rest: { nodeId: '1:1' } });
 console.log('merge.mjs OK');
