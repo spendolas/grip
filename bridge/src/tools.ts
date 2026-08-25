@@ -1340,32 +1340,6 @@ export function toolInputSchema(name: string): Record<string, unknown> {
       };
     case 'get_animations':
       return { type: 'object', properties: { nodeId: { type: 'string' } }, required: ['nodeId'], additionalProperties: false };
-    case 'apply_animation_style':
-      return {
-        type: 'object',
-        properties: {
-          nodeId: { type: 'string' },
-          styleId: { type: 'string', description: 'Preset id from list_animation_styles (Position/Scale/Rotation/Size/Opacity/Path)' },
-          props: { type: 'object', description: 'Preset data, forwarded verbatim to Figma (validated per-preset). Start minimal, e.g. {duration:0.5}.' },
-        },
-        required: ['nodeId', 'styleId'],
-        additionalProperties: false,
-      };
-    case 'remove_animation_style':
-      return { type: 'object', properties: { nodeId: { type: 'string' }, id: { type: 'string', description: 'Applied-instance id (animationStyles[].id)' } }, required: ['nodeId', 'id'], additionalProperties: false };
-    case 'apply_manual_keyframe_track':
-      return {
-        type: 'object',
-        properties: {
-          nodeId: { type: 'string' },
-          field: { type: 'object', description: 'What to animate: {type:"PROPERTY",name} or {type:"INDEXED_ITEM",collection:"effects",index,field:"RADIUS"|"COLOR"|...}' },
-          track: { type: 'object', description: '{keyframes:[{timelinePosition, value:{type:"FLOAT",value}, easing?}]}' },
-        },
-        required: ['nodeId', 'field', 'track'],
-        additionalProperties: false,
-      };
-    case 'remove_manual_keyframe_track':
-      return { type: 'object', properties: { nodeId: { type: 'string' }, field: { type: 'object', description: 'Same field descriptor passed to apply' } }, required: ['nodeId', 'field'], additionalProperties: false };
     case 'set_timeline_duration':
       return { type: 'object', properties: { nodeId: { type: 'string' }, timelineId: { type: 'string', description: 'timelines[].id from get_animations' }, duration: { type: 'number', description: 'Seconds' } }, required: ['nodeId', 'timelineId', 'duration'], additionalProperties: false };
     case 'spring_to_normalized':
@@ -2021,42 +1995,6 @@ export function toolInputSchema(name: string): Record<string, unknown> {
         type: 'object',
         properties: { nodeId: { type: ['string', 'null'] } },
         required: ['nodeId'],
-        additionalProperties: false,
-      };
-    case 'add_component_property':
-      return {
-        type: 'object',
-        properties: {
-          componentId: { type: 'string' },
-          name: { type: 'string' },
-          type: { type: 'string', enum: ['VARIANT', 'TEXT', 'BOOLEAN', 'INSTANCE_SWAP'] },
-          defaultValue: {},
-          preferredValues: { type: 'array' },
-        },
-        required: ['componentId', 'name', 'type', 'defaultValue'],
-        additionalProperties: false,
-      };
-    case 'edit_component_property':
-      return {
-        type: 'object',
-        properties: {
-          componentId: { type: 'string' },
-          propertyName: { type: 'string' },
-          newName: { type: 'string' },
-          defaultValue: {},
-          preferredValues: { type: 'array' },
-        },
-        required: ['componentId', 'propertyName'],
-        additionalProperties: false,
-      };
-    case 'delete_component_property':
-      return {
-        type: 'object',
-        properties: {
-          componentId: { type: 'string' },
-          propertyName: { type: 'string' },
-        },
-        required: ['componentId', 'propertyName'],
         additionalProperties: false,
       };
     case 'reset_instance_overrides':
