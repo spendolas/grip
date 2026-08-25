@@ -77,7 +77,7 @@ plugin/
 
 ## MCP tool surface
 
-193 tools. Per-tool reference lives in [`TOOLS.md`](./TOOLS.md). The default advertised scope is now `core` (~43 tools) rather than all 193; agents widen via `GRIP_TOOLS`/`?tools=` (categories from `grip_capabilities`), and `run_script` reaches any tool regardless of scope. `grip_capabilities` also takes `{tool:'<name>'}` to return that single tool's relocated `detail` (the deep guidance trimmed out of the always-injected `description`). Quick map:
+146 tools. Per-tool reference lives in [`TOOLS.md`](./TOOLS.md). The default advertised scope is now `core` (~35 tools) rather than all 146; agents widen via `GRIP_TOOLS`/`?tools=` (categories from `grip_capabilities`), and `run_script` reaches any tool regardless of scope. `grip_capabilities` also takes `{tool:'<name>'}` to return that single tool's relocated `detail` (the deep guidance trimmed out of the always-injected `description`). Phase 3 merged 19 clusters of "N verbs on one object" into single op-enum-dispatched tools (e.g. `table_op {op}`, `bind_to_variable {target}`, `timer {op}`) — the former per-verb tools (`table_insert_row`, `group_nodes`, `bind_paint_to_variable`, …) no longer exist as standalone TOOLS entries; call them via the merged tool's `op`/`target` discriminator. Per-op params are in `grip_capabilities {tool:'<name>'}`. Quick map:
 
 **Bridge-side (no plugin round-trip):**
 - `list_files`, `set_active_file` — multi-file session routing.
@@ -86,7 +86,7 @@ plugin/
 
 **Export:** `export_node` (SVG, PNG, JPG, PDF, CSS, JSON).
 
-**Write — node-level:** `set_node_property` (one dispatcher across ~60 props — numeric/bool/passthrough buckets), `create_node` (10 types incl. GROUP/LINE/POLYGON/STAR/VECTOR; `props` payload applied at creation), `delete_node`, `clone_node`, `move_node`, `group_nodes`, `ungroup_node`.
+**Write — node-level:** `set_node_property` (one dispatcher across ~60 props — numeric/bool/passthrough buckets), `create_node` (10 types incl. GROUP/LINE/POLYGON/STAR/VECTOR; `props` payload applied at creation), `delete_node`, `clone_node`, `move_node`, `group` (merged; `op:'group'|'ungroup'`).
 
 **Write — selection / viewport:** `set_selection`, `scroll_to`.
 
@@ -94,17 +94,17 @@ plugin/
 
 **Write — components / instances:** `detach_instance`, `swap_instance`, `create_component_from_node`, `combine_as_variants`.
 
-**Write — styles & variables:** `set_style` (PAINT/TEXT/EFFECT/GRID), `apply_style`, `set_variable_value`, `bind_property_to_variable`, `bind_paint_to_variable`, `create_variable_collection`, `delete_variable_collection`, `create_variable`, `delete_variable`, `add_variable_mode`, `remove_variable_mode`, `rename_variable_mode`, `set_variable_meta`.
+**Write — styles & variables:** `set_style` (PAINT/TEXT/EFFECT/GRID), `apply_style`, `set_variable_value`, `bind_to_variable` (merged; `target:'property'|'paint'|'effect'|'layout_grid'`), `variable_collection` (merged; `op:'create'|'delete'`), `variable` (merged; `op:'create'|'delete'`), `variable_mode` (merged; `op:'add'|'remove'|'rename'`), `explicit_variable_mode` (merged; `op:'set'|'clear'`), `set_variable_meta`.
 
 **Write — text range:** `set_text_range_property` (per-range styling on TEXT nodes).
 
 **Write — assets / metadata:** `upload_image` (small inline base64), `upload_image_from_path` (bridge reads from disk — bypasses MCP stdio truncation), `upload_image_begin`/`upload_image_chunk`/`upload_image_finish` (chunked, when only bytes available), `set_plugin_data`.
 
-**Subscribe (notifications, no round-trip):** `subscribe_selection`, `subscribe_document` (debounced 500ms), `subscribe_currentpage`.
+**Subscribe (notifications, no round-trip):** `subscribe` (merged; `target:'selection'|'document'|'currentpage'`; document is debounced 500ms).
 
 **Vector / boolean / SVG:** `flatten_nodes`, `boolean_operation` (UNION/SUBTRACT/INTERSECT/EXCLUDE), `create_node_from_svg`, `set_vector_network`.
 
-**Hand-off / dev mode:** `add_dev_resource`, `delete_dev_resource`, `get_dev_resources`, `set_annotation`, `get_annotations`, `set_file_thumbnail`.
+**Hand-off / dev mode:** `dev_resource` (merged; `op:'add'|'edit'|'delete'|'get'`), `set_annotation`, `get_annotations`, `annotation_category` (merged; `op:'add'|'edit'|'delete'|'get'|'list'`), `measurement` (merged; `op:'add'|'edit'|'delete'|'list'|'for_node'`), `set_file_thumbnail`.
 
 **Library imports (remote):** `import_component_by_key`, `import_style_by_key`, `import_variable_by_key`.
 
@@ -114,13 +114,13 @@ plugin/
 
 **Prototype:** `set_reactions`.
 
-**FigJam-only:** `create_sticky`, `create_connector`, `create_shape_with_text`, `create_table`.
+**FigJam-only:** `create_sticky`, `create_connector`, `create_shape_with_text`, `create_table`, `table_op` (merged; `op:'insert_row'|'insert_column'|'remove_row'|'remove_column'|'move_row'|'move_column'|'resize_row'|'resize_column'|'cell_at'`).
 
 **Cross-plugin metadata:** `set_shared_plugin_data`, `get_shared_plugin_data`.
 
 **Misc:** `notify` (toast), `create_image_from_url`, `get_selection_colors`, `get_deep_link` (figma.com URL to a node; kind=design/dev/proto; needs real `figma.fileKey` — works because manifest sets `enablePrivatePluginApi` + grip runs in an org; returns `available:false` if fileKey is `0:0`).
 
-**Component property definitions:** `add_component_property`, `edit_component_property`, `delete_component_property`. Plus `reset_instance_overrides`.
+**Component property definitions:** `component_property` (merged; `op:'add'|'edit'|'delete'`). Plus `reset_instance_overrides`.
 
 **Search variants:** `find_with_criteria` (typed subtree walker, faster than `search_nodes` for plain type filters).
 
@@ -128,15 +128,15 @@ plugin/
 
 **Undo / external:** `trigger_undo` (companion to `commit_undo`), `open_external_url`.
 
-**Per-user persistent storage:** `client_storage_get`, `client_storage_set`, `client_storage_delete`, `client_storage_keys`.
+**Per-user persistent storage:** `client_storage` (merged; `op:'get'|'set'|'delete'|'keys'`).
 
 **Niche node creation:** `create_slice`, `create_text_path`, `create_gif`, `create_video`, `create_link_preview`, `create_page_divider`, `create_slide`, `create_slide_row`, `create_code_block`.
 
-**FigJam timer:** `timer_start`, `timer_stop`, `timer_pause`, `timer_resume`.
+**FigJam timer:** `timer` (merged; `op:'start'|'stop'|'pause'|'resume'`).
 
 **Multiplayer / identity:** `get_active_users`, `get_current_user`. Both require manifest `permissions: ["activeusers", "currentuser"]` (added).
 
-**Post-2025 Figma API (v0.2.6–0.2.12):** CSS-grid auto-layout (`layoutMode:'GRID'` + `grid*` props on `set_node_property`, `set_grid_child_position`); video export (`export_node` MP4/GIF/WEBM, path-required); new paint/effect variants (SHADER/VIDEO/GRADIENT_DIAMOND paints; NOISE/TEXTURE/GLASS/progressive-blur effects — ride the generic `effects`/`fills` passthrough + serializers); shaders (`list_shaders`/`import_shader`); **Motion** keyframe/timeline (`list_animation_styles`, `get_animations`, `apply`/`remove_animation_style`, `apply`/`remove_manual_keyframe_track`, `set_timeline_duration`, `spring_to_normalized`); Figma Draw (`complexStrokeProperties`/`variableWidthStrokeProperties` passthrough, `transform_group`, `create_text_path` new signature).
+**Post-2025 Figma API (v0.2.6–0.2.12):** CSS-grid auto-layout (`layoutMode:'GRID'` + `grid*` props on `set_node_property`, `set_grid_child_position`); video export (`export_node` MP4/GIF/WEBM, path-required); new paint/effect variants (SHADER/VIDEO/GRADIENT_DIAMOND paints; NOISE/TEXTURE/GLASS/progressive-blur effects — ride the generic `effects`/`fills` passthrough + serializers); shaders (`list_shaders`/`import_shader`); **Motion** keyframe/timeline (`list_animation_styles`, `get_animations`, `animation_style` merged `op:'apply'|'remove'`, `manual_keyframe_track` merged `op:'apply'|'remove'`, `set_timeline_duration`, `spring_to_normalized`); Figma Draw (`complexStrokeProperties`/`variableWidthStrokeProperties` passthrough, `transform_group`, `create_text_path` new signature).
 
 Highlights worth knowing while editing:
 

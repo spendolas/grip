@@ -96,7 +96,7 @@ up changes.
   file name, or figma.com URL). The shim forwards it to the daemon so tool
   calls route to that file without the agent calling `set_active_file`.
   Binds even before the file is open (resolves when it connects).
-- `GRIP_TOOLS` — comma list of tool categories/presets this agent loads (default `core` ≈ 43 tools; `all` = every tool). stdio: set as an env var (delivered as an IPC control frame); HTTP: pass `?tools=` on the `/mcp` URL. Cuts a headless agent's per-turn schema weight (~17k tokens (all) → ~5.5k (core)). Discover out-of-scope tools with `grip_capabilities`; reach anything via `run_script`. The fattest core/meta tool descriptions are trimmed to what+when, with full guidance available via `grip_capabilities {tool:'<name>'}` (`detail`).
+- `GRIP_TOOLS` — comma list of tool categories/presets this agent loads (default `core` ≈ 35 tools; `all` = every tool). stdio: set as an env var (delivered as an IPC control frame); HTTP: pass `?tools=` on the `/mcp` URL. Cuts a headless agent's per-turn schema weight (~17k tokens (all) → ~5.5k (core)). Discover out-of-scope tools with `grip_capabilities`; reach anything via `run_script`. The fattest core/meta tool descriptions are trimmed to what+when, with full guidance available via `grip_capabilities {tool:'<name>'}` (`detail`).
 
 ## Important
 
@@ -113,6 +113,6 @@ up changes.
   `sessionId`; each MCP client (stdio leader or IPC proxy) gets its own
   `activeFileId` and subscription set. Use `list_files` /
   `set_active_file` to target.
-- 178 tools today. Per-tool reference in [`../TOOLS.md`](../TOOLS.md).
+- 146 tools today (19 clusters of "N verbs on one object" — e.g. `table_op`, `bind_to_variable`, `timer` — are merged into single `op`/`target`-dispatched tools; former per-verb names like `table_insert_row`/`group_nodes` no longer exist as standalone tools). Per-tool reference in [`../TOOLS.md`](../TOOLS.md).
 - Leader exits 30s after the last MCP session detaches; sockets
   cleaned up automatically.

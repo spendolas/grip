@@ -53,4 +53,12 @@ assert.deepStrictEqual(resolveMerged('client_storage', { op: 'set', key: 'k', va
 assert.deepStrictEqual(resolveMerged('ui', { op: 'resize', width: 400, height: 300 }), { method: 'ui_resize', rest: { width: 400, height: 300 } });
 assert.deepStrictEqual(resolveMerged('slides_canvas', { op: 'get_grid' }), { method: 'slides_get_canvas_grid', rest: {} });
 assert.deepStrictEqual(resolveMerged('subscribe', { target: 'selection' }), { method: 'subscribe_selection', rest: {} });
+
+// Final reconcile (phase 3 complete): exact tool count + full category bijection.
+assert.strictEqual(TOOLS.length, 146, `expected 146 tools, got ${TOOLS.length}`);
+const catNames = Object.values(TOOL_CATEGORIES).flat();
+assert.strictEqual(catNames.length, TOOLS.length, 'category flatten count != TOOLS.length');
+assert.strictEqual(new Set(catNames).size, catNames.length, 'category flatten has duplicate tool names');
+assert.deepStrictEqual(new Set(catNames), new Set(toolNames), 'category names and TOOLS names are not the same set');
+
 console.log('merge.mjs OK');

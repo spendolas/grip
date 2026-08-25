@@ -1,6 +1,8 @@
 # Grip MCP Tools
 
-193 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
+146 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
+
+Phase 3 merged 19 clusters of "N verbs on one object" into single op-enum-dispatched tools — the former per-verb tools no longer exist as standalone entries below; call them via the merged tool's `op`/`target` discriminator (e.g. `group {op:'group'|'ungroup', nodeId(s)}`, `bind_to_variable {target:'property'|'paint'|'effect'|'layout_grid', ...}`, `timer {op:'start'|'stop'|'pause'|'resume'}`). Per-op params are in `grip_capabilities {tool:'<name>'}`.
 
 Conventions:
 - `nodeId` — Figma node id (e.g. `"167:290"`).
@@ -153,15 +155,10 @@ Reparent + reorder.
 - Params: `nodeId`, `parentId` (req), `index`.
 - Returns: `{ id, parentId }`.
 
-### `group_nodes`
-Group multiple nodes.
-- Params: `nodeIds[]` (req), `parentId` (default first node's parent), `asFrame` (default false → GROUP; true → FRAME wrapping their bbox), `name`.
-- Returns: `{ id, name, type }`.
-
-### `ungroup_node`
-Release a GROUP or FRAME's children to its parent.
-- Params: `nodeId`.
-- Returns: `{ released: [id] }`.
+### `group`
+Merged: group/ungroup, dispatched on `op`.
+- `op: 'group'` — `{ op, nodeIds[] (req), parentId (default first node's parent), asFrame (default false → GROUP; true → FRAME wrapping their bbox), name }` → `{ id, name, type }`.
+- `op: 'ungroup'` — `{ op, nodeId (req) }` → `{ released: [id] }` (release a GROUP or FRAME's children to its parent).
 
 ---
 
@@ -231,42 +228,33 @@ Set a variable's value for a mode.
 - Params: `variableId`, `modeId`, `value`. COLOR accepts `'#hex'` or `{ hex, opacity }`. FLOAT/BOOLEAN/STRING coerced.
 - Returns: `{ success: true }`.
 
-### `bind_property_to_variable`
-Bind a node-level field to a variable (whole-property binding).
-- Params: `nodeId`, `field` (e.g. `'cornerRadius'`, `'paddingTop'`, `'characters'`, `'height'`), `variableId`.
-- Returns: `{ success: true }`.
-- For per-paint color binding (the common "fill = my-color-variable" case), use `bind_paint_to_variable` instead.
+### `bind_to_variable`
+Merged: bind a node field/paint/effect/layout-grid to a variable, dispatched on `target`.
+- `target: 'property'` — `{ target, nodeId, field (e.g. 'cornerRadius', 'paddingTop', 'characters', 'height'), variableId }` → `{ success: true }`. Whole-property binding. For per-paint color binding (the common "fill = my-color-variable" case), use `target: 'paint'` instead.
+- `target: 'paint'` — `{ target, nodeId, variableId, paintField ('fills'|'strokes', default 'fills'), paintIndex (default 0), field (default 'color') }` → `{ success: true, paintIndex, field }`. Binds a single paint's color (or other bindable paint field) to a COLOR variable; the node's `fills`/`strokes` array gets a new paint at the same index with the binding applied.
+- `target: 'effect'` — bind a bindable effect field to a variable.
+- `target: 'layout_grid'` — bind a bindable layout-grid field to a variable.
 
-### `bind_paint_to_variable`
-Bind a single paint's color (or other bindable paint field) to a COLOR variable. The node's `fills`/`strokes` array gets a new paint at the same index with the binding applied.
-- Params: `nodeId`, `variableId`, `paintField` (`'fills' | 'strokes'`, default `fills`), `paintIndex` (default 0), `field` (default `'color'`).
-- Returns: `{ success: true, paintIndex, field }`.
+### `variable_collection`
+Merged: create/delete a local variable collection, dispatched on `op`.
+- `op: 'create'` — `{ op, name }` → `{ id, name, defaultModeId, modes: [{ modeId, name }] }`. Comes with one default mode.
+- `op: 'delete'` — `{ op, collectionId }` → `{ success: true }`. Deletes the collection and all its variables.
 
-### `create_variable_collection`
-Create a new local variable collection. Comes with one default mode.
-- Params: `name`.
-- Returns: `{ id, name, defaultModeId, modes: [{ modeId, name }] }`.
+### `variable`
+Merged: create/delete a variable, dispatched on `op`.
+- `op: 'create'` — `{ op, name, collectionId, resolvedType ('COLOR'|'FLOAT'|'STRING'|'BOOLEAN'), value? (sets default mode) or valuesByMode: { [modeId]: value }, description?, scopes?, codeSyntax?: { web, iOS, androidstudio }, hiddenFromPublishing? }` → `{ id, name, resolvedType }`.
+- `op: 'delete'` — `{ op, variableId }` → `{ success: true }`.
 
-### `delete_variable_collection`
-Delete a collection (and all its variables).
-- Params: `collectionId` → `{ success: true }`.
+### `variable_mode`
+Merged: add/remove/rename a variable collection's modes, dispatched on `op`.
+- `op: 'add'` — `{ op, collectionId, name }` → `{ modeId, name }`.
+- `op: 'remove'` — `{ op, collectionId, modeId }` → `{ success: true }`.
+- `op: 'rename'` — `{ op, collectionId, modeId, name }` → `{ success: true }`.
 
-### `create_variable`
-Create a variable inside a collection.
-- Params: `name`, `collectionId`, `resolvedType` (`COLOR | FLOAT | STRING | BOOLEAN`), optional `value` (sets default mode) or `valuesByMode: { [modeId]: value }`, plus optional `description`, `scopes`, `codeSyntax: { web, iOS, androidstudio }`, `hiddenFromPublishing`.
-- Returns: `{ id, name, resolvedType }`.
-
-### `delete_variable`
-- Params: `variableId` → `{ success: true }`.
-
-### `add_variable_mode`
-- Params: `collectionId`, `name` → `{ modeId, name }`.
-
-### `remove_variable_mode`
-- Params: `collectionId`, `modeId` → `{ success: true }`.
-
-### `rename_variable_mode`
-- Params: `collectionId`, `modeId`, `name` → `{ success: true }`.
+### `explicit_variable_mode`
+Merged: set/clear a node's explicit mode override for a collection, dispatched on `op`.
+- `op: 'set'` — `{ op, nodeId, collectionId, modeId }` → `{ success: true }`.
+- `op: 'clear'` — `{ op, nodeId, collectionId }` → `{ success: true }`.
 
 ### `set_variable_meta`
 Update a variable's metadata. Values not touched — use `set_variable_value` for those.
@@ -283,6 +271,11 @@ Apply a per-range property to part of a TEXT node.
 - `property` matches Figma's `setRange<Property>` suffix (`fills`, `fontName`, `fontSize`, `lineHeight`, `letterSpacing`, `textCase`, `textDecoration`, `hyperlink`, `listOptions`, `paragraphSpacing`, `paragraphIndent`).
 - Auto-loads the fonts present in the range first.
 - Returns: `{ success: true }`.
+
+### `edit_characters`
+Merged: insert/delete characters on a TEXT node's `characters` string, dispatched on `op`.
+- `op: 'insert'` — `{ op, nodeId, start, characters, behavior? }` (was `insert_characters`).
+- `op: 'delete'` — `{ op, nodeId, start, end }` (was `delete_characters`, half-open `[start, end)`).
 
 ---
 
@@ -317,14 +310,11 @@ Write `pluginData` on a node. Use empty/null to clear.
 
 These don't round-trip the plugin per call — they flip a flag on the calling MCP session. The bridge fans `selectionchange` / `documentchange` / `currentpagechange` events from the active plugin out to subscribed sessions as MCP `notifications/message` with `data: { event, payload }`.
 
-### `subscribe_selection`
-Stream `selectionchange` events. Payload: `[{ id, name, type }]`.
-
-### `subscribe_document`
-Stream `documentchange` events (debounced 500ms). Payload: `{ changes: <count> }`.
-
-### `subscribe_currentpage`
-Stream `currentpagechange` events. Payload: `{ pageId, pageName }`.
+### `subscribe`
+Merged (bridge-side): subscribe to a live event stream, dispatched on `target`.
+- `target: 'selection'` — stream `selectionchange` events. Payload: `[{ id, name, type }]`.
+- `target: 'document'` — stream `documentchange` events (debounced 500ms). Payload: `{ changes: <count> }`.
+- `target: 'currentpage'` — stream `currentpagechange` events. Payload: `{ pageId, pageName }`.
 
 ---
 
@@ -379,16 +369,12 @@ Replace a VECTOR's vector network (raw point/segment editing).
 
 ## Hand-off / Dev Mode
 
-### `add_dev_resource`
-Attach a Dev Mode resource to a node.
-- Params: `nodeId`, `url`, `name` (defaults to url).
-- Returns: `{ success: true }`.
-
-### `delete_dev_resource`
-- Params: `nodeId`, `url`. → `{ success: true }`.
-
-### `get_dev_resources`
-- Params: `nodeId`. → `{ resources: [...] }`.
+### `dev_resource`
+Merged: manage Dev Mode resources on a node, dispatched on `op`.
+- `op: 'add'` — `{ op, nodeId, url, name? }` (defaults to url) → `{ success: true }`.
+- `op: 'edit'` — `{ op, nodeId, currentUrl, name?, url? }` → `{ success: true }`.
+- `op: 'delete'` — `{ op, nodeId, url }` → `{ success: true }`.
+- `op: 'get'` — `{ op, nodeId }` → `{ resources: [...] }`.
 
 ### `set_annotation`
 Set annotations on a node. Pass `{ label, properties? }` or `annotations: [...]`.
@@ -397,6 +383,22 @@ Set annotations on a node. Pass `{ label, properties? }` or `annotations: [...]`
 
 ### `get_annotations`
 - Params: `nodeId`. → `{ annotations: [...] }`.
+
+### `annotation_category`
+Merged: manage Dev Mode annotation categories, dispatched on `op`.
+- `op: 'add'` — `{ op, label, color? }` → new category.
+- `op: 'edit'` — `{ op, categoryId, label?, color? }` → `{ success: true }`.
+- `op: 'delete'` — `{ op, categoryId }` → `{ success: true }`.
+- `op: 'get'` — `{ op, categoryId }` → one category.
+- `op: 'list'` — `{ op }` → all categories in the file.
+
+### `measurement`
+Merged: manage Dev Mode measurements, dispatched on `op`.
+- `op: 'add'` — `{ op, startNodeId, endNodeId, startSide?, endSide?, offset?, freeText? }`.
+- `op: 'edit'` — `{ op, measurementId, offset?, freeText? }` → `{ success: true }`.
+- `op: 'delete'` — `{ op, measurementId }` → `{ success: true }`.
+- `op: 'list'` — `{ op }` → all measurements in the file.
+- `op: 'for_node'` — `{ op, nodeId }` → measurements anchored on that node.
 
 ### `set_file_thumbnail`
 Set the file thumbnail node (must be FRAME/COMPONENT/COMPONENT_SET/SECTION). `nodeId: null` clears.
@@ -470,6 +472,14 @@ Replace a node's prototype reactions.
 ### `create_sticky` / `create_connector` / `create_shape_with_text` / `create_table`
 FigJam node creation. Params follow each Figma `createX` shape; check Plugin API docs for legal values. All return `{ id, type }`.
 
+### `table_op`
+Merged: insert/remove/move/resize/read rows and columns of a FigJam TABLE, dispatched on `op`.
+- `op: 'insert_row'` / `'insert_column'` — `{ op, nodeId, index? }` (defaults to end).
+- `op: 'remove_row'` / `'remove_column'` — `{ op, nodeId, index }`.
+- `op: 'move_row'` / `'move_column'` — `{ op, nodeId, fromIndex, toIndex }`.
+- `op: 'resize_row'` — `{ op, nodeId, index, height }`. `op: 'resize_column'` — `{ op, nodeId, index, width }`.
+- `op: 'cell_at'` — `{ op, nodeId, row, column }` → the cell at that position.
+
 ---
 
 ## Cross-plugin metadata
@@ -483,6 +493,12 @@ FigJam node creation. Params follow each Figma `createX` shape; check Plugin API
 ---
 
 ## Misc
+
+### `ui`
+Merged: show/hide/resize/reposition the plugin window, dispatched on `op`.
+- `op: 'show'` / `op: 'hide'` — `{ op }` (was `ui_show`/`ui_hide`).
+- `op: 'resize'` — `{ op, width, height }` (was `ui_resize`).
+- `op: 'reposition'` — `{ op, x, y }` (was `ui_reposition`).
 
 ### `notify`
 Show a Figma toast.
@@ -506,16 +522,11 @@ Build a shareable `figma.com` URL to a node.
 
 ## Component property definitions
 
-### `add_component_property`
-- Params: `componentId`, `name`, `type` (`VARIANT | TEXT | BOOLEAN | INSTANCE_SWAP`), `defaultValue`, `preferredValues?`.
-- Returns: `{ propertyName }` — Figma appends `#<hash>` to the name.
-
-### `edit_component_property`
-- Params: `componentId`, `propertyName`, optional `newName`, `defaultValue`, `preferredValues`.
-- Returns: `{ propertyName }`.
-
-### `delete_component_property`
-- Params: `componentId`, `propertyName`. → `{ success: true }`.
+### `component_property`
+Merged: manage component property definitions, dispatched on `op`.
+- `op: 'add'` — `{ op, componentId, name, type ('VARIANT'|'TEXT'|'BOOLEAN'|'INSTANCE_SWAP'), defaultValue, preferredValues? }` → `{ propertyName }` — Figma appends `#<hash>` to the name.
+- `op: 'edit'` — `{ op, componentId, propertyName, newName?, defaultValue?, preferredValues? }` → `{ propertyName }`.
+- `op: 'delete'` — `{ op, componentId, propertyName }` → `{ success: true }`.
 
 ### `reset_instance_overrides`
 Reset all overrides on an INSTANCE.
@@ -567,10 +578,12 @@ Open URL in a new browser tab.
 
 `figma.clientStorage` is per-user, per-plugin, per-machine; survives reloads. Useful for agent memory tied to the human user.
 
-### `client_storage_get` — `{ key }` → `{ key, value }`.
-### `client_storage_set` — `{ key, value }` → `{ success: true }`.
-### `client_storage_delete` — `{ key }` → `{ success: true }`.
-### `client_storage_keys` — none → `{ keys }`.
+### `client_storage`
+Merged: read/write per-user client storage, dispatched on `op`.
+- `op: 'get'` — `{ op, key }` → `{ key, value }`.
+- `op: 'set'` — `{ op, key, value }` → `{ success: true }`.
+- `op: 'delete'` — `{ op, key }` → `{ success: true }`.
+- `op: 'keys'` — `{ op }` → `{ keys }`.
 
 ---
 
@@ -587,12 +600,21 @@ Open URL in a new browser tab.
 
 All return `{ id, type, ... }` with editor-specific extras.
 
+### `slides_canvas`
+Merged, Slides editor only: manage the canvas row grid, dispatched on `op`.
+- `op: 'create_row'` — `{ op }` (was `slides_create_canvas_row`).
+- `op: 'get_grid'` — `{ op }` → the current canvas grid (was `slides_get_canvas_grid`).
+- `op: 'set_grid'` — `{ op, grid }` (was `slides_set_canvas_grid`).
+- `op: 'move_nodes'` — `{ op, nodeIds, row, column }` (was `slides_move_nodes_to_coord`).
+
 ---
 
 ## FigJam timer
 
-### `timer_start` — `{ seconds }`.
-### `timer_stop` / `timer_pause` / `timer_resume` — none.
+### `timer`
+Merged: control the FigJam timer, dispatched on `op`.
+- `op: 'start'` — `{ op, seconds }`.
+- `op: 'stop'` / `op: 'pause'` / `op: 'resume'` — `{ op }`.
 
 ---
 
@@ -624,12 +646,17 @@ Set `layoutMode="GRID"` via `set_node_property`, then configure with more `set_n
 ## Motion — keyframe/timeline animation (v0.2.10)
 
 Native Figma Motion; distinct from prototype `reactions`.
-### `list_animation_styles` — none. Returns the 6 presets (Position, Scale, Rotation, Size, Opacity, Path) with `{ styleId, name, description, props }`. `props` is a DESCRIPTOR, not the strict `apply_animation_style` input schema.
+### `list_animation_styles` — none. Returns the 6 presets (Position, Scale, Rotation, Size, Opacity, Path) with `{ styleId, name, description, props }`. `props` is a DESCRIPTOR, not the strict `animation_style` (`op: 'apply'`) input schema.
 ### `get_animations` — `{ nodeId }`. Returns `{ animationStyles, animations, manualKeyframeTracks, timelines }`.
-### `apply_animation_style` — `{ nodeId, styleId, props? }`. `props` forwarded verbatim (Figma validates per-preset — start minimal, e.g. `{ duration: 0.5 }`).
-### `remove_animation_style` — `{ nodeId, id }`. `id` = applied-instance id (`animationStyles[].id`), NOT the preset styleId.
-### `apply_manual_keyframe_track` — `{ nodeId, field, track }`. `field` = `{type:'PROPERTY', name}` or `{type:'INDEXED_ITEM', collection:'effects', index, field:'RADIUS'|'COLOR'|'SPREAD'|…}`; `track` = `{ keyframes:[{ timelinePosition, value:{type:'FLOAT', value}, easing? }] }`. Node needs a timeline (apply a preset first) and the referenced item must exist.
-### `remove_manual_keyframe_track` — `{ nodeId, field }` (same `field` descriptor).
+### `animation_style`
+Merged: apply/remove a Motion animation-style preset instance, dispatched on `op`.
+- `op: 'apply'` — `{ op, nodeId, styleId, props? }`. `props` forwarded verbatim (Figma validates per-preset — start minimal, e.g. `{ duration: 0.5 }`).
+- `op: 'remove'` — `{ op, nodeId, id }`. `id` = applied-instance id (`animationStyles[].id`), NOT the preset styleId.
+
+### `manual_keyframe_track`
+Merged: apply/remove a manual keyframe track, dispatched on `op`.
+- `op: 'apply'` — `{ op, nodeId, field, track }`. `field` = `{type:'PROPERTY', name}` or `{type:'INDEXED_ITEM', collection:'effects', index, field:'RADIUS'|'COLOR'|'SPREAD'|…}`; `track` = `{ keyframes:[{ timelinePosition, value:{type:'FLOAT', value}, easing? }] }`. Node needs a timeline (apply a preset first) and the referenced item must exist.
+- `op: 'remove'` — `{ op, nodeId, field }` (same `field` descriptor).
 ### `set_timeline_duration` — `{ nodeId, timelineId, duration }` (seconds). `timelineId` from `get_animations` `timelines[].id`.
 ### `spring_to_normalized` — `{ spring }` → `figma.motion.physicalSpringToNormalized`.
 
@@ -646,7 +673,7 @@ Applied via `set_node_property` fills/strokes/effects (fully-shaped objects pass
 
 ## Tool scoping (`GRIP_TOOLS`)
 
-By default an agent only sees the `core` scope (~43 always-useful tools), not the full 193 — this keeps per-turn schema weight small. Widen the scope per agent:
+By default an agent only sees the `core` scope (~35 always-useful tools), not the full 146 — this keeps per-turn schema weight small. Widen the scope per agent:
 
 - **stdio:** set env `GRIP_TOOLS=core,motion` on the agent process (delivered to the daemon as an IPC control frame, alongside `GRIP_FILE`).
 - **HTTP:** pass `?tools=core,motion` on the `/mcp` URL.
