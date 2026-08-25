@@ -970,6 +970,9 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         : null;
       const needle = !nameRx && params.name ? String(params.name).toLowerCase() : null;
       const fillHex = params.fillHex ? String(params.fillHex).toUpperCase() : null;
+      const fillType = params.fillType ? String(params.fillType).toUpperCase() : null;
+      const wantStyle = params.hasStyle === true;
+      const wantBoundVar = params.hasBoundVariable === true;
       const textContains = params.textContains ? String(params.textContains).toLowerCase() : null;
 
       const scopes: BaseNode[] = [];
@@ -1008,6 +1011,27 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
           if (!has) return false;
         } else if (fillHex) {
           return false;
+        }
+        if (fillType) {
+          if (!hasFills(n)) return false;
+          const f = (n as any).fills;
+          if (f === figma.mixed) return false;
+          const match = (f as Paint[]).some((p) =>
+            fillType === 'GRADIENT' ? p.type.indexOf('GRADIENT_') === 0 : p.type === fillType,
+          );
+          if (!match) return false;
+        }
+        if (wantStyle) {
+          const styleKeys = ['fillStyleId', 'strokeStyleId', 'textStyleId', 'effectStyleId', 'gridStyleId'];
+          const anyStyle = styleKeys.some((k) => {
+            const v = (n as any)[k];
+            return typeof v === 'string' && v.length > 0;
+          });
+          if (!anyStyle) return false;
+        }
+        if (wantBoundVar) {
+          const bv = (n as any).boundVariables;
+          if (!bv || Object.keys(bv).length === 0) return false;
         }
         return true;
       };
@@ -3309,7 +3333,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.4.0';
+const PLUGIN_VERSION = '0.4.1';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie

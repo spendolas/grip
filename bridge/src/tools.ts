@@ -351,7 +351,9 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'search_nodes',
     description:
-      'Find nodes by combination of: type(s), name (substring or regex via nameRegex), text content, fill hex. Scope: page, subtree (scope nodeId), or all pages. Paginated.',
+      'Find nodes by type(s), name (substring/regex), text, fill hex, or audit predicates (fillType/hasStyle/hasBoundVariable). Scope: page/subtree/all pages. Paginated. grip_capabilities {tool:\'search_nodes\'} has predicate shapes.',
+    detail:
+      "Predicates AND together and filter during the plugin's walk (only matches returned), riding the findAllWithCriteria fast path when `type` is set. fillType: match if any fill paint is SOLID|IMAGE|VIDEO|SHADER|GRADIENT_LINEAR|GRADIENT_RADIAL|GRADIENT_ANGULAR|GRADIENT_DIAMOND, or GRADIENT for any gradient subtype (guards figma.mixed). hasStyle:true → nodes with any bound style (fill/stroke/text/effect/grid StyleId). hasBoundVariable:true → nodes with >=1 boundVariables entry. fillHex matches any SOLID fill (#RRGGBB). Scope via scope=<nodeId subtree>, pageId, or allPages.",
     schema: z.object({
       pageId: z.string().optional(),
       scope: z.string().optional(),
@@ -362,6 +364,9 @@ export const TOOLS: ToolDef[] = [
       type: z.union([NodeTypeEnum, z.array(NodeTypeEnum)]).optional(),
       textContains: z.string().optional(),
       fillHex: z.string().optional(),
+      fillType: z.enum(['SOLID', 'IMAGE', 'VIDEO', 'SHADER', 'GRADIENT', 'GRADIENT_LINEAR', 'GRADIENT_RADIAL', 'GRADIENT_ANGULAR', 'GRADIENT_DIAMOND']).optional(),
+      hasStyle: z.boolean().optional(),
+      hasBoundVariable: z.boolean().optional(),
       maxResults: z.number().int().positive().optional(),
       offset: z.number().int().nonnegative().optional(),
     }),
@@ -1266,7 +1271,10 @@ export function toolInputSchema(name: string): Record<string, unknown> {
             ],
           },
           textContains: { type: 'string', description: 'TEXT-only character match' },
-          fillHex: { type: 'string', description: '#RRGGBB; matches first SOLID fill' },
+          fillHex: { type: 'string', description: '#RRGGBB; matches any SOLID fill' },
+          fillType: { type: 'string', enum: ['SOLID', 'IMAGE', 'VIDEO', 'SHADER', 'GRADIENT', 'GRADIENT_LINEAR', 'GRADIENT_RADIAL', 'GRADIENT_ANGULAR', 'GRADIENT_DIAMOND'], description: 'Match if any fill paint is this type; GRADIENT = any gradient subtype' },
+          hasStyle: { type: 'boolean', description: 'Match nodes with any bound style (fill/stroke/text/effect/grid)' },
+          hasBoundVariable: { type: 'boolean', description: 'Match nodes with >=1 bound variable' },
           maxResults: { type: 'integer' },
           offset: { type: 'integer' },
         },
