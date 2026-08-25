@@ -2,6 +2,9 @@ import assert from 'node:assert';
 import { TOOLS } from '../dist/tools.js';
 import { resolveToolScope, toolInScope, CORE_TOOL_NAMES, META_TOOL_NAMES, TOOL_CATEGORIES, toolCategorySummary, toolDetail } from '../dist/tools.js';
 
+// Phase 3 task 5 (3b): motion/text/components cluster merge landed 162 -> 157.
+assert.strictEqual(TOOLS.length, 157, `TOOLS.length should be 157, got ${TOOLS.length}`);
+
 // Every tool has exactly one category; every core/meta name is a real tool.
 const allNames = new Set(TOOLS.map((t) => t.name));
 const catNames = Object.values(TOOL_CATEGORIES).flat();
@@ -34,8 +37,8 @@ assert.ok(!ro.coreNames.has('run_script'), 'read scope must exclude run_script')
 // toolInScope: meta always; core name under core; category under its token
 assert.ok(toolInScope('grip_health', resolveToolScope('read')), 'meta always present');
 assert.ok(toolInScope('run_script', resolveToolScope('core')));
-assert.ok(!toolInScope('apply_animation_style', resolveToolScope('core')), 'motion not in core');
-assert.ok(toolInScope('apply_animation_style', resolveToolScope('core,motion')));
+assert.ok(!toolInScope('animation_style', resolveToolScope('core')), 'motion not in core');
+assert.ok(toolInScope('animation_style', resolveToolScope('core,motion')));
 assert.ok(toolInScope('set_node_property', resolveToolScope('all')));
 
 // unknown token ignored, not fatal
@@ -49,7 +52,7 @@ const listFor = (spec) => {
 const core = listFor(null);
 assert.ok(core.length >= 40 && core.length <= 46, `core list size unexpected: ${core.length}`);
 assert.ok(core.includes('grip_health') && core.includes('run_script'));
-assert.ok(!core.includes('apply_animation_style'));
+assert.ok(!core.includes('animation_style'));
 assert.strictEqual(listFor('all').length, TOOLS.length, 'all must list every tool');
 assert.ok(listFor('read').includes('grip_health') && !listFor('read').includes('run_script'));
 

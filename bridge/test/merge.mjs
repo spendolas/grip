@@ -41,4 +41,10 @@ assert.deepStrictEqual(resolveMerged('dev_resource', { op: 'get', nodeId: '1:1' 
 assert.deepStrictEqual(resolveMerged('table_op', { op: 'insert_row', nodeId: 't1', index: 2 }), { method: 'table_insert_row', rest: { nodeId: 't1', index: 2 } });
 assert.deepStrictEqual(resolveMerged('table_op', { op: 'cell_at', nodeId: 't1', row: 0, column: 1 }), { method: 'table_cell_at', rest: { nodeId: 't1', row: 0, column: 1 } });
 assert.deepStrictEqual(resolveMerged('timer', { op: 'start', seconds: 60 }), { method: 'timer_start', rest: { seconds: 60 } });
+
+// 3b: motion/text/components clusters
+assert.deepStrictEqual(resolveMerged('animation_style', { op: 'apply', nodeId: '1:1', styleId: 's', props: {} }), { method: 'apply_animation_style', rest: { nodeId: '1:1', styleId: 's', props: {} } });
+assert.deepStrictEqual(resolveMerged('manual_keyframe_track', { op: 'remove', nodeId: '1:1', trackId: 'k' }), { method: 'remove_manual_keyframe_track', rest: { nodeId: '1:1', trackId: 'k' } });
+assert.deepStrictEqual(resolveMerged('edit_characters', { op: 'insert', nodeId: '1:1', index: 0, characters: 'hi' }), { method: 'insert_characters', rest: { nodeId: '1:1', index: 0, characters: 'hi' } });
+assert.deepStrictEqual(resolveMerged('component_property', { op: 'delete', nodeId: '1:1', propertyName: 'p' }), { method: 'delete_component_property', rest: { nodeId: '1:1', propertyName: 'p' } });
 console.log('merge.mjs OK');

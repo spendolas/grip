@@ -49,17 +49,15 @@ export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
     'explicit_variable_mode', 'set_variable_meta',
     'request_variable_to_be_enabled', 'request_variable_to_be_disabled'],
   components: ['swap_instance', 'detach_instance', 'reset_instance_overrides', 'create_component_from_node',
-    'combine_as_variants', 'create_slot', 'add_component_property', 'edit_component_property',
-    'delete_component_property'],
-  text: ['set_text_range_property', 'insert_characters', 'delete_characters', 'load_font', 'list_fonts',
+    'combine_as_variants', 'create_slot', 'component_property'],
+  text: ['set_text_range_property', 'edit_characters', 'load_font', 'list_fonts',
     'get_styled_text_segments', 'get_text_content', 'create_text_path', 'get_text_range_bound_variable',
     'set_text_range_bound_variable'],
   export: ['export_node'],
   vector: ['flatten_nodes', 'boolean_operation', 'outline_stroke', 'set_vector_network', 'create_node_from_svg',
     'transform_group', 'load_brushes'],
-  motion: ['apply_animation_style', 'remove_animation_style', 'apply_manual_keyframe_track',
-    'remove_manual_keyframe_track', 'set_timeline_duration', 'spring_to_normalized', 'list_animation_styles',
-    'get_animations'],
+  motion: ['animation_style', 'manual_keyframe_track', 'set_timeline_duration', 'spring_to_normalized',
+    'list_animation_styles', 'get_animations'],
   figjam: ['create_sticky', 'create_connector', 'create_shape_with_text', 'create_table', 'table_op',
     'timer', 'get_attached_connectors', 'get_stamp_author'],
   slides: ['create_slide', 'create_slide_row', 'set_slide_transition', 'get_slide_transition',
@@ -133,6 +131,14 @@ export const MERGED_TOOLS: Record<string, {
     cell_at: 'table_cell_at' } },
   timer: { discriminator: 'op', category: 'figjam', map: {
     start: 'timer_start', stop: 'timer_stop', pause: 'timer_pause', resume: 'timer_resume' } },
+  animation_style: { discriminator: 'op', category: 'motion', map: {
+    apply: 'apply_animation_style', remove: 'remove_animation_style' } },
+  manual_keyframe_track: { discriminator: 'op', category: 'motion', map: {
+    apply: 'apply_manual_keyframe_track', remove: 'remove_manual_keyframe_track' } },
+  edit_characters: { discriminator: 'op', category: 'text', map: {
+    insert: 'insert_characters', delete: 'delete_characters' } },
+  component_property: { discriminator: 'op', category: 'components', map: {
+    add: 'add_component_property', edit: 'edit_component_property', delete: 'delete_component_property' } },
 };
 
 export function mergedToolNames(): string[] { return Object.keys(MERGED_TOOLS); }
@@ -892,34 +898,10 @@ export const TOOLS: ToolDef[] = [
 
   // ---------- tier 4 ----------
   {
-    name: 'add_component_property',
-    description: 'Add a property to a COMPONENT or COMPONENT_SET. type: VARIANT | TEXT | BOOLEAN | INSTANCE_SWAP. preferredValues optional.',
-    schema: z.object({
-      componentId: z.string(),
-      name: z.string(),
-      type: z.enum(['VARIANT', 'TEXT', 'BOOLEAN', 'INSTANCE_SWAP']),
-      defaultValue: z.any(),
-      preferredValues: z.array(z.any()).optional(),
-    }),
-  },
-  {
-    name: 'edit_component_property',
-    description: "Rename or change defaults on a component's property. propertyName matches Figma's `name#hash`.",
-    schema: z.object({
-      componentId: z.string(),
-      propertyName: z.string(),
-      newName: z.string().optional(),
-      defaultValue: z.any().optional(),
-      preferredValues: z.array(z.any()).optional(),
-    }),
-  },
-  {
-    name: 'delete_component_property',
-    description: 'Remove a property from a component / component set.',
-    schema: z.object({
-      componentId: z.string(),
-      propertyName: z.string(),
-    }),
+    name: 'component_property', category: 'components',
+    description: "Add, edit, or delete a COMPONENT/COMPONENT_SET property definition. `op`: add ({componentId, name, type, defaultValue, preferredValues?}) | edit ({componentId, propertyName, newName?, defaultValue?, preferredValues?}) | delete ({componentId, propertyName}). Call grip_capabilities {tool:'component_property'} for per-op params.",
+    detail: "op=add: add a property to a COMPONENT or COMPONENT_SET (was add_component_property) — {componentId, name, type: VARIANT|TEXT|BOOLEAN|INSTANCE_SWAP, defaultValue, preferredValues?}. op=edit: rename or change defaults on a component's property; propertyName matches Figma's `name#hash` (was edit_component_property) — {componentId, propertyName, newName?, defaultValue?, preferredValues?}. op=delete: remove a property from a component / component set (was delete_component_property) — {componentId, propertyName}.",
+    schema: z.object({ op: z.enum(['add', 'edit', 'delete']) }).passthrough(),
   },
   {
     name: 'reset_instance_overrides',
@@ -1099,8 +1081,12 @@ export const TOOLS: ToolDef[] = [
   { name: 'get_publish_status', description: 'Read publish status for a style, variable, or variable collection.', schema: z.object({ id: z.string() }) },
   { name: 'set_text_range_bound_variable', description: 'Bind a variable to a text range field. variableId=null clears.', schema: z.object({ nodeId: z.string(), start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), field: z.string(), variableId: z.union([z.string(), z.null()]).optional() }) },
   { name: 'get_text_range_bound_variable', description: 'Read variable bound to a text range field.', schema: z.object({ nodeId: z.string(), start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), field: z.string() }) },
-  { name: 'insert_characters', description: 'Insert characters into a TEXT at offset.', schema: z.object({ nodeId: z.string(), start: z.number().int().nonnegative(), characters: z.string(), behavior: z.string().optional() }) },
-  { name: 'delete_characters', description: 'Delete characters from a TEXT [start, end).', schema: z.object({ nodeId: z.string(), start: z.number().int().nonnegative(), end: z.number().int().nonnegative() }) },
+  {
+    name: 'edit_characters', category: 'text',
+    description: "Insert or delete characters on a TEXT node. `op`: insert ({nodeId, start, characters, behavior?}) | delete ({nodeId, start, end}). Call grip_capabilities {tool:'edit_characters'} for per-op params.",
+    detail: 'op=insert: insert characters into a TEXT at offset (was insert_characters) — {nodeId, start, characters, behavior?}. op=delete: delete characters from a TEXT [start, end) (was delete_characters) — {nodeId, start, end}.',
+    schema: z.object({ op: z.enum(['insert', 'delete']) }).passthrough(),
+  },
   { name: 'get_attached_connectors', description: 'List FigJam connectors attached to a node.', schema: z.object({ nodeId: z.string() }) },
   { name: 'set_skip_invisible_instance_children', description: "Toggle figma.skipInvisibleInstanceChildren perf flag.", schema: z.object({ value: z.boolean() }) },
   { name: 'get_file_thumbnail_node', description: 'Read which node is the file thumbnail.', schema: z.object({}) },
@@ -1118,10 +1104,18 @@ export const TOOLS: ToolDef[] = [
   // ---------- Motion (native keyframe/timeline animation, distinct from prototype reactions) ----------
   { name: 'list_animation_styles', description: 'List Figma Motion built-in animation presets (Position, Scale, Rotation, Size, Opacity, Path). Each returns {styleId, name, description, props}. NOTE: `props` is a human/type DESCRIPTOR of the preset, not the exact applyAnimationStyle input schema (which is stricter and validated by Figma) — start minimal (e.g. {duration}) and read Figma\'s error to refine.', schema: z.object({}) },
   { name: 'get_animations', description: 'Read a node\'s Motion data: {animationStyles, animations, manualKeyframeTracks, timelines}. Dedicated read tool (not part of get_node) to avoid bloating every node read.', schema: z.object({ nodeId: z.string() }) },
-  { name: 'apply_animation_style', description: 'Apply a Figma Motion preset to a node. styleId from list_animation_styles; props is the preset data (forwarded verbatim to node.applyAnimationStyle — Figma validates per-preset). Mutating.', schema: z.object({ nodeId: z.string(), styleId: z.string(), props: z.record(z.any()).optional() }) },
-  { name: 'remove_animation_style', description: 'Remove an applied Motion preset from a node. `id` is the applied-instance id (animationStyles[].id from get_animations), NOT the preset styleId.', schema: z.object({ nodeId: z.string(), id: z.string() }) },
-  { name: 'apply_manual_keyframe_track', description: 'Add/replace a manual keyframe track on a node (Figma Motion). `field` identifies what to animate: {type:"PROPERTY", name} for a node property, or {type:"INDEXED_ITEM", collection:"effects", index, field:"RADIUS"|"COLOR"|"SPREAD"|...} for an item in a collection. `track` is {keyframes:[{timelinePosition:<sec>, value:{type:"FLOAT", value:<n>}, easing?}]}. Node must have a timeline (apply a preset first) and the referenced item must exist.', schema: z.object({ nodeId: z.string(), field: z.any(), track: z.any() }) },
-  { name: 'remove_manual_keyframe_track', description: 'Remove a manual keyframe track from a node by the same `field` descriptor passed to apply_manual_keyframe_track.', schema: z.object({ nodeId: z.string(), field: z.any() }) },
+  {
+    name: 'animation_style', category: 'motion',
+    description: "Apply or remove a Figma Motion built-in preset on a node. `op`: apply ({nodeId, styleId, props?}) | remove ({nodeId, id}). Call grip_capabilities {tool:'animation_style'} for per-op params.",
+    detail: 'op=apply: apply a Figma Motion preset to a node; styleId from list_animation_styles, props is the preset data forwarded verbatim to node.applyAnimationStyle (Figma validates per-preset) — was apply_animation_style — {nodeId, styleId, props?}. op=remove: remove an applied Motion preset from a node; `id` is the applied-instance id (animationStyles[].id from get_animations), NOT the preset styleId — was remove_animation_style — {nodeId, id}.',
+    schema: z.object({ op: z.enum(['apply', 'remove']) }).passthrough(),
+  },
+  {
+    name: 'manual_keyframe_track', category: 'motion',
+    description: "Add/replace or remove a manual keyframe track on a node (Figma Motion). `op`: apply ({nodeId, field, track}) | remove ({nodeId, field}). Call grip_capabilities {tool:'manual_keyframe_track'} for per-op params.",
+    detail: 'op=apply: add/replace a manual keyframe track on a node; `field` identifies what to animate: {type:"PROPERTY", name} for a node property, or {type:"INDEXED_ITEM", collection:"effects", index, field:"RADIUS"|"COLOR"|"SPREAD"|...} for an item in a collection; `track` is {keyframes:[{timelinePosition:<sec>, value:{type:"FLOAT", value:<n>}, easing?}]}; node must have a timeline (apply a preset first) and the referenced item must exist (was apply_manual_keyframe_track) — {nodeId, field, track}. op=remove: remove a manual keyframe track from a node by the same `field` descriptor used to apply it (was remove_manual_keyframe_track) — {nodeId, field}.',
+    schema: z.object({ op: z.enum(['apply', 'remove']) }).passthrough(),
+  },
   { name: 'set_timeline_duration', description: 'Set a Motion timeline\'s duration (seconds). timelineId from get_animations timelines[].id.', schema: z.object({ nodeId: z.string(), timelineId: z.string(), duration: z.number().nonnegative() }) },
   { name: 'spring_to_normalized', description: 'Figma Motion helper: convert physical spring params to a normalized easing curve. `spring` forwarded to figma.motion.physicalSpringToNormalized.', schema: z.object({ spring: z.any() }) },
   { name: 'map_nodes', description: "Bulk-edit matched nodes with a Grip-owned, chunked, yielding loop — the SAFE way to set X on every matching node without freezing Figma. `query` must have `types` or `scope`; then `set` (property→value map, like set_node_property) or `delete:true`. Returns {matched, applied, truncated}. Call grip_capabilities {tool:'map_nodes'} for query fields and budget/chunk tuning.", detail: "`query`: {types:[...] (uses fast findAllWithCriteria), name, nameFlags, scope:<nodeId subtree>, page}. `query` must have `types` or `scope` (a bare page-wide match is refused). Bounded by `budget` (default 10000) with `chunk` (default 200). Prefer this over run_script for uniform bulk mutations.", schema: z.object({ query: z.object({ types: z.union([z.string(), z.array(z.string())]).optional(), name: z.string().optional(), nameFlags: z.string().optional(), scope: z.string().optional(), page: z.string().optional() }), set: z.record(z.any()).optional(), delete: z.boolean().optional(), budget: z.number().int().positive().optional(), chunk: z.number().int().positive().optional() }) },
