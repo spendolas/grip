@@ -36,4 +36,9 @@ assert.deepStrictEqual(resolveMerged('explicit_variable_mode', { op: 'clear', no
 assert.deepStrictEqual(resolveMerged('measurement', { op: 'for_node', nodeId: '1:1' }), { method: 'get_measurements_for_node', rest: { nodeId: '1:1' } });
 assert.deepStrictEqual(resolveMerged('annotation_category', { op: 'list' }), { method: 'get_annotation_categories', rest: {} });
 assert.deepStrictEqual(resolveMerged('dev_resource', { op: 'get', nodeId: '1:1' }), { method: 'get_dev_resources', rest: { nodeId: '1:1' } });
+
+// 3b: figjam clusters
+assert.deepStrictEqual(resolveMerged('table_op', { op: 'insert_row', nodeId: 't1', index: 2 }), { method: 'table_insert_row', rest: { nodeId: 't1', index: 2 } });
+assert.deepStrictEqual(resolveMerged('table_op', { op: 'cell_at', nodeId: 't1', row: 0, column: 1 }), { method: 'table_cell_at', rest: { nodeId: 't1', row: 0, column: 1 } });
+assert.deepStrictEqual(resolveMerged('timer', { op: 'start', seconds: 60 }), { method: 'timer_start', rest: { seconds: 60 } });
 console.log('merge.mjs OK');

@@ -60,10 +60,8 @@ export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
   motion: ['apply_animation_style', 'remove_animation_style', 'apply_manual_keyframe_track',
     'remove_manual_keyframe_track', 'set_timeline_duration', 'spring_to_normalized', 'list_animation_styles',
     'get_animations'],
-  figjam: ['create_sticky', 'create_connector', 'create_shape_with_text', 'create_table', 'table_cell_at',
-    'table_insert_column', 'table_insert_row', 'table_move_column', 'table_move_row', 'table_remove_column',
-    'table_remove_row', 'table_resize_column', 'table_resize_row', 'timer_start', 'timer_stop', 'timer_pause',
-    'timer_resume', 'get_attached_connectors', 'get_stamp_author'],
+  figjam: ['create_sticky', 'create_connector', 'create_shape_with_text', 'create_table', 'table_op',
+    'timer', 'get_attached_connectors', 'get_stamp_author'],
   slides: ['create_slide', 'create_slide_row', 'set_slide_transition', 'get_slide_transition',
     'slides_create_canvas_row', 'slides_get_canvas_grid', 'slides_set_canvas_grid', 'slides_move_nodes_to_coord',
     'create_page_divider'],
@@ -127,6 +125,14 @@ export const MERGED_TOOLS: Record<string, {
     list: 'get_measurements', for_node: 'get_measurements_for_node' } },
   dev_resource: { discriminator: 'op', category: 'devmode', map: {
     add: 'add_dev_resource', edit: 'edit_dev_resource', delete: 'delete_dev_resource', get: 'get_dev_resources' } },
+  table_op: { discriminator: 'op', category: 'figjam', map: {
+    insert_row: 'table_insert_row', insert_column: 'table_insert_column',
+    remove_row: 'table_remove_row', remove_column: 'table_remove_column',
+    move_row: 'table_move_row', move_column: 'table_move_column',
+    resize_row: 'table_resize_row', resize_column: 'table_resize_column',
+    cell_at: 'table_cell_at' } },
+  timer: { discriminator: 'op', category: 'figjam', map: {
+    start: 'timer_start', stop: 'timer_stop', pause: 'timer_pause', resume: 'timer_resume' } },
 };
 
 export function mergedToolNames(): string[] { return Object.keys(MERGED_TOOLS); }
@@ -725,6 +731,12 @@ export const TOOLS: ToolDef[] = [
     schema: z.object({ op: z.enum(['add', 'edit', 'delete', 'list', 'for_node']) }).passthrough(),
   },
   {
+    name: 'table_op', category: 'figjam',
+    description: "Insert, remove, move, resize, or read rows/columns of a FigJam TABLE. `op`: insert_row ({nodeId, index?}) | insert_column ({nodeId, index?}) | remove_row ({nodeId, index}) | remove_column ({nodeId, index}) | move_row ({nodeId, fromIndex, toIndex}) | move_column ({nodeId, fromIndex, toIndex}) | resize_row ({nodeId, index, height}) | resize_column ({nodeId, index, width}) | cell_at ({nodeId, row, column}). Call grip_capabilities {tool:'table_op'} for per-op params.",
+    detail: "op=insert_row: insert a row into a TABLE, index defaults to end (was table_insert_row) — {nodeId, index?}. op=insert_column: insert a column into a TABLE (was table_insert_column) — {nodeId, index?}. op=remove_row: remove a row (was table_remove_row) — {nodeId, index}. op=remove_column: remove a column (was table_remove_column) — {nodeId, index}. op=move_row: move a row (was table_move_row) — {nodeId, fromIndex, toIndex}. op=move_column: move a column (was table_move_column) — {nodeId, fromIndex, toIndex}. op=resize_row: set a TABLE row's height (was table_resize_row) — {nodeId, index, height}. op=resize_column: set a TABLE column's width (was table_resize_column) — {nodeId, index, width}. op=cell_at: read the table cell at (row, column) (was table_cell_at) — {nodeId, row, column}.",
+    schema: z.object({ op: z.enum(['insert_row', 'insert_column', 'remove_row', 'remove_column', 'move_row', 'move_column', 'resize_row', 'resize_column', 'cell_at']) }).passthrough(),
+  },
+  {
     name: 'import_component_by_key',
     description: 'Import a component from a team library by its key. Returns the local-handle component.',
     schema: z.object({ key: z.string() }),
@@ -1038,24 +1050,10 @@ export const TOOLS: ToolDef[] = [
     }),
   },
   {
-    name: 'timer_start',
-    description: 'FigJam: start the file timer for N seconds.',
-    schema: z.object({ seconds: z.number().int().positive() }),
-  },
-  {
-    name: 'timer_stop',
-    description: 'FigJam: stop the timer.',
-    schema: z.object({}),
-  },
-  {
-    name: 'timer_pause',
-    description: 'FigJam: pause the timer.',
-    schema: z.object({}),
-  },
-  {
-    name: 'timer_resume',
-    description: 'FigJam: resume the timer.',
-    schema: z.object({}),
+    name: 'timer', category: 'figjam',
+    description: "FigJam: start, stop, pause, or resume the file timer. `op`: start ({seconds}) | stop ({}) | pause ({}) | resume ({}). Call grip_capabilities {tool:'timer'} for per-op params.",
+    detail: 'op=start: start the file timer for N seconds (was timer_start) — {seconds}. op=stop: stop the timer (was timer_stop) — {}. op=pause: pause the timer (was timer_pause) — {}. op=resume: resume the timer (was timer_resume) — {}.',
+    schema: z.object({ op: z.enum(['start', 'stop', 'pause', 'resume']) }).passthrough(),
   },
   {
     name: 'get_active_users',
@@ -1081,13 +1079,6 @@ export const TOOLS: ToolDef[] = [
   { name: 'rescale', description: 'Proportional resize by a factor.', schema: z.object({ nodeId: z.string(), factor: z.number().positive() }) },
   { name: 'lock_aspect_ratio', description: 'Lock node aspect ratio.', schema: z.object({ nodeId: z.string() }) },
   { name: 'unlock_aspect_ratio', description: 'Unlock node aspect ratio.', schema: z.object({ nodeId: z.string() }) },
-  { name: 'table_insert_row', description: 'Insert a row into a TABLE. index defaults to end.', schema: z.object({ nodeId: z.string(), index: z.number().int().nonnegative().optional() }) },
-  { name: 'table_insert_column', description: 'Insert a column into a TABLE.', schema: z.object({ nodeId: z.string(), index: z.number().int().nonnegative().optional() }) },
-  { name: 'table_remove_row', description: 'Remove a row.', schema: z.object({ nodeId: z.string(), index: z.number().int().nonnegative() }) },
-  { name: 'table_remove_column', description: 'Remove a column.', schema: z.object({ nodeId: z.string(), index: z.number().int().nonnegative() }) },
-  { name: 'table_move_row', description: 'Move a row.', schema: z.object({ nodeId: z.string(), fromIndex: z.number().int().nonnegative(), toIndex: z.number().int().nonnegative() }) },
-  { name: 'table_move_column', description: 'Move a column.', schema: z.object({ nodeId: z.string(), fromIndex: z.number().int().nonnegative(), toIndex: z.number().int().nonnegative() }) },
-  { name: 'table_cell_at', description: 'Read the table cell at (row, column).', schema: z.object({ nodeId: z.string(), row: z.number().int().nonnegative(), column: z.number().int().nonnegative() }) },
   { name: 'slides_get_canvas_grid', description: 'Slides editor: get current canvas grid.', schema: z.object({}) },
   { name: 'slides_set_canvas_grid', description: 'Slides editor: set the canvas grid.', schema: z.object({ grid: z.any() }) },
   { name: 'slides_create_canvas_row', description: 'Slides editor: create a new canvas row.', schema: z.object({}) },
@@ -1119,8 +1110,6 @@ export const TOOLS: ToolDef[] = [
   { name: 'extend_library_collection_by_key', description: 'Extend a remote variable collection (from team library) into this file by its key.', schema: z.object({ key: z.string() }) },
   { name: 'request_variable_to_be_enabled', description: 'Request that a library variable be enabled in this file.', schema: z.object({ variableId: z.string() }) },
   { name: 'request_variable_to_be_disabled', description: 'Request that a library variable be disabled in this file.', schema: z.object({ variableId: z.string() }) },
-  { name: 'table_resize_row', description: 'Set a TABLE row\'s height.', schema: z.object({ nodeId: z.string(), index: z.number().int().nonnegative(), height: z.number().positive() }) },
-  { name: 'table_resize_column', description: 'Set a TABLE column\'s width.', schema: z.object({ nodeId: z.string(), index: z.number().int().nonnegative(), width: z.number().positive() }) },
   { name: 'create_slot', description: 'Create a SLOT inside a COMPONENT (used for slot-based variant authoring).', schema: z.object({ componentId: z.string(), name: z.string().optional() }) },
   { name: 'set_grid_child_position', description: 'Place a direct child of a GRID auto-layout frame at a 0-based (row, column) cell. Configure the grid container first via set_node_property (layoutMode="GRID", gridRowCount/gridColumnCount, gridRowGap/gridColumnGap, gridColumnSizes/gridRowSizes).', schema: z.object({ nodeId: z.string(), row: z.number().int().nonnegative(), column: z.number().int().nonnegative() }) },
   { name: 'list_shaders', description: 'List shaders available to this file (Figma shader subsystem). Returns an array of shader descriptors (empty if the file has none). Use a returned id with import_shader, then apply via set_node_property fills/effects with {type:"SHADER", shaderId}.', schema: z.object({}) },
@@ -2255,16 +2244,6 @@ export function toolInputSchema(name: string): Record<string, unknown> {
         },
         additionalProperties: false,
       };
-    case 'timer_start':
-      return {
-        type: 'object',
-        properties: { seconds: { type: 'integer' } },
-        required: ['seconds'],
-        additionalProperties: false,
-      };
-    case 'timer_stop':
-    case 'timer_pause':
-    case 'timer_resume':
     case 'get_active_users':
     case 'get_current_user':
       return { type: 'object', properties: {}, additionalProperties: false };
