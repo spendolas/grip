@@ -61,8 +61,7 @@ export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
   figjam: ['create_sticky', 'create_connector', 'create_shape_with_text', 'create_table', 'table_op',
     'timer', 'get_attached_connectors', 'get_stamp_author'],
   slides: ['create_slide', 'create_slide_row', 'set_slide_transition', 'get_slide_transition',
-    'slides_create_canvas_row', 'slides_get_canvas_grid', 'slides_set_canvas_grid', 'slides_move_nodes_to_coord',
-    'create_page_divider'],
+    'slides_canvas', 'create_page_divider'],
   devmode: ['dev_resource', 'set_annotation', 'get_annotations', 'annotation_category', 'measurement',
     'get_deep_link', 'set_reactions'],
   library: ['import_component_by_key', 'import_component_set_by_key', 'import_style_by_key', 'import_variable_by_key',
@@ -70,11 +69,10 @@ export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
   assets: ['upload_image', 'upload_image_from_path', 'upload_image_begin', 'upload_image_chunk',
     'upload_image_finish', 'create_image_from_url', 'get_image_by_hash', 'create_gif', 'create_video',
     'create_link_preview', 'create_slice', 'set_file_thumbnail', 'get_file_thumbnail_node'],
-  storage: ['client_storage_get', 'client_storage_set', 'client_storage_delete', 'client_storage_keys',
-    'set_plugin_data', 'get_shared_plugin_data', 'set_shared_plugin_data'],
-  subscribe: ['subscribe_selection', 'subscribe_document', 'subscribe_currentpage'],
-  misc: ['notify', 'open_external_url', 'commit_undo', 'trigger_undo', 'save_version', 'ui_show', 'ui_hide',
-    'ui_resize', 'ui_reposition', 'create_code_block', 'get_active_users', 'get_current_user',
+  storage: ['client_storage', 'set_plugin_data', 'get_shared_plugin_data', 'set_shared_plugin_data'],
+  subscribe: ['subscribe'],
+  misc: ['notify', 'open_external_url', 'commit_undo', 'trigger_undo', 'save_version', 'ui',
+    'create_code_block', 'get_active_users', 'get_current_user',
     'set_buzz_asset_type', 'get_buzz_asset_type'],
 };
 
@@ -139,6 +137,15 @@ export const MERGED_TOOLS: Record<string, {
     insert: 'insert_characters', delete: 'delete_characters' } },
   component_property: { discriminator: 'op', category: 'components', map: {
     add: 'add_component_property', edit: 'edit_component_property', delete: 'delete_component_property' } },
+  client_storage: { discriminator: 'op', category: 'storage', map: {
+    get: 'client_storage_get', set: 'client_storage_set', delete: 'client_storage_delete', keys: 'client_storage_keys' } },
+  ui: { discriminator: 'op', category: 'misc', map: {
+    show: 'ui_show', hide: 'ui_hide', resize: 'ui_resize', reposition: 'ui_reposition' } },
+  slides_canvas: { discriminator: 'op', category: 'slides', map: {
+    create_row: 'slides_create_canvas_row', get_grid: 'slides_get_canvas_grid',
+    set_grid: 'slides_set_canvas_grid', move_nodes: 'slides_move_nodes_to_coord' } },
+  subscribe: { discriminator: 'target', category: 'subscribe', bridgeSide: true, map: {
+    selection: 'subscribe_selection', document: 'subscribe_document', currentpage: 'subscribe_currentpage' } },
 };
 
 export function mergedToolNames(): string[] { return Object.keys(MERGED_TOOLS); }
@@ -935,24 +942,10 @@ export const TOOLS: ToolDef[] = [
     schema: z.object({ url: z.string() }),
   },
   {
-    name: 'client_storage_get',
-    description: 'Read a value from per-user persistent storage (figma.clientStorage). Survives reloads.',
-    schema: z.object({ key: z.string() }),
-  },
-  {
-    name: 'client_storage_set',
-    description: 'Write a value to per-user persistent storage.',
-    schema: z.object({ key: z.string(), value: z.any() }),
-  },
-  {
-    name: 'client_storage_delete',
-    description: 'Delete a key from per-user persistent storage.',
-    schema: z.object({ key: z.string() }),
-  },
-  {
-    name: 'client_storage_keys',
-    description: 'List all keys in per-user persistent storage.',
-    schema: z.object({}),
+    name: 'client_storage', category: 'storage',
+    description: "Read, write, delete, or list keys in per-user persistent storage (figma.clientStorage). Survives reloads. `op`: get ({key}) | set ({key, value}) | delete ({key}) | keys ({}). Call grip_capabilities {tool:'client_storage'} for per-op params.",
+    detail: "op=get: read a value by key (was client_storage_get) — {key}. op=set: write a value (was client_storage_set) — {key, value}. op=delete: delete a key (was client_storage_delete) — {key}. op=keys: list all keys (was client_storage_keys) — {}.",
+    schema: z.object({ op: z.enum(['get', 'set', 'delete', 'keys']) }).passthrough(),
   },
 
   // ---------- tier 5 (niche) ----------
@@ -1061,16 +1054,20 @@ export const TOOLS: ToolDef[] = [
   { name: 'rescale', description: 'Proportional resize by a factor.', schema: z.object({ nodeId: z.string(), factor: z.number().positive() }) },
   { name: 'lock_aspect_ratio', description: 'Lock node aspect ratio.', schema: z.object({ nodeId: z.string() }) },
   { name: 'unlock_aspect_ratio', description: 'Unlock node aspect ratio.', schema: z.object({ nodeId: z.string() }) },
-  { name: 'slides_get_canvas_grid', description: 'Slides editor: get current canvas grid.', schema: z.object({}) },
-  { name: 'slides_set_canvas_grid', description: 'Slides editor: set the canvas grid.', schema: z.object({ grid: z.any() }) },
-  { name: 'slides_create_canvas_row', description: 'Slides editor: create a new canvas row.', schema: z.object({}) },
-  { name: 'slides_move_nodes_to_coord', description: 'Slides editor: move nodes to a (row, column) coordinate.', schema: z.object({ nodeIds: z.array(z.string()).min(1), row: z.number().int().nonnegative(), column: z.number().int().nonnegative() }) },
+  {
+    name: 'slides_canvas', category: 'slides',
+    description: "Slides editor only. Create/read/write the canvas row grid, or move nodes to a grid coordinate. `op`: create_row ({}) | get_grid ({}) | set_grid ({grid}) | move_nodes ({nodeIds, row, column}). Call grip_capabilities {tool:'slides_canvas'} for per-op params.",
+    detail: "op=create_row: create a new canvas row (was slides_create_canvas_row) — {}. op=get_grid: read the current canvas grid (was slides_get_canvas_grid) — {}. op=set_grid: set the canvas grid (was slides_set_canvas_grid) — {grid}. op=move_nodes: move nodes to a (row, column) coordinate (was slides_move_nodes_to_coord) — {nodeIds, row, column}.",
+    schema: z.object({ op: z.enum(['create_row', 'get_grid', 'set_grid', 'move_nodes']) }).passthrough(),
+  },
   { name: 'set_slide_transition', description: 'Slides editor: set transition on a SLIDE node.', schema: z.object({ nodeId: z.string(), transition: z.any() }) },
   { name: 'get_slide_transition', description: 'Slides editor: read a SLIDE node\'s transition.', schema: z.object({ nodeId: z.string() }) },
-  { name: 'ui_show', description: 'Show the plugin window.', schema: z.object({}) },
-  { name: 'ui_hide', description: 'Hide the plugin window.', schema: z.object({}) },
-  { name: 'ui_resize', description: 'Resize the plugin window.', schema: z.object({ width: z.number().int().positive(), height: z.number().int().positive() }) },
-  { name: 'ui_reposition', description: 'Reposition the plugin window.', schema: z.object({ x: z.number(), y: z.number() }) },
+  {
+    name: 'ui', category: 'misc',
+    description: "Show, hide, resize, or reposition the plugin window. `op`: show ({}) | hide ({}) | resize ({width, height}) | reposition ({x, y}). Call grip_capabilities {tool:'ui'} for per-op params.",
+    detail: "op=show: show the plugin window (was ui_show) — {}. op=hide: hide the plugin window (was ui_hide) — {}. op=resize: resize the plugin window (was ui_resize) — {width, height}. op=reposition: reposition the plugin window (was ui_reposition) — {x, y}.",
+    schema: z.object({ op: z.enum(['show', 'hide', 'resize', 'reposition']) }).passthrough(),
+  },
   { name: 'set_relaunch_data', description: "Attach plugin re-entry buttons to a node. data: { command: tooltip }.", schema: z.object({ nodeId: z.string(), data: z.record(z.string()) }) },
   { name: 'get_relaunch_data', description: 'Read relaunch data on a node.', schema: z.object({ nodeId: z.string() }) },
   { name: 'get_top_level_frame', description: 'Find the top-level FRAME ancestor of a node.', schema: z.object({ nodeId: z.string() }) },
@@ -1163,21 +1160,10 @@ export const TOOLS: ToolDef[] = [
   },
 
   {
-    name: 'subscribe_selection',
-    description: 'Start receiving selectionchange notifications.',
-    schema: z.object({}),
-    subscription: true,
-  },
-  {
-    name: 'subscribe_document',
-    description: 'Start receiving documentchange notifications (debounced 500ms).',
-    schema: z.object({}),
-    subscription: true,
-  },
-  {
-    name: 'subscribe_currentpage',
-    description: 'Start receiving currentpagechange notifications when the user switches pages.',
-    schema: z.object({}),
+    name: 'subscribe', category: 'subscribe',
+    description: "Start receiving notifications for selection, document, or current-page changes. Bridge-side (no plugin round-trip); free of the rate limit. `target`: selection ({}) | document ({}, debounced 500ms) | currentpage ({}). Call grip_capabilities {tool:'subscribe'} for per-target detail.",
+    detail: "target=selection: start receiving selectionchange notifications (was subscribe_selection) — {}. target=document: start receiving documentchange notifications, debounced 500ms (was subscribe_document) — {}. target=currentpage: start receiving currentpagechange notifications when the user switches pages (was subscribe_currentpage) — {}.",
+    schema: z.object({ target: z.enum(['selection', 'document', 'currentpage']) }).passthrough(),
     subscription: true,
   },
 ];
@@ -1206,9 +1192,6 @@ export function toolInputSchema(name: string): Record<string, unknown> {
     case 'get_document':
     case 'get_styles':
     case 'get_variables':
-    case 'subscribe_selection':
-    case 'subscribe_document':
-    case 'subscribe_currentpage':
       return { type: 'object', properties: {}, additionalProperties: false };
     case 'set_active_file':
       return {
@@ -2032,29 +2015,6 @@ export function toolInputSchema(name: string): Record<string, unknown> {
         required: ['url'],
         additionalProperties: false,
       };
-    case 'client_storage_get':
-      return {
-        type: 'object',
-        properties: { key: { type: 'string' } },
-        required: ['key'],
-        additionalProperties: false,
-      };
-    case 'client_storage_set':
-      return {
-        type: 'object',
-        properties: { key: { type: 'string' }, value: {} },
-        required: ['key', 'value'],
-        additionalProperties: false,
-      };
-    case 'client_storage_delete':
-      return {
-        type: 'object',
-        properties: { key: { type: 'string' } },
-        required: ['key'],
-        additionalProperties: false,
-      };
-    case 'client_storage_keys':
-      return { type: 'object', properties: {}, additionalProperties: false };
     case 'create_slice':
       return {
         type: 'object',

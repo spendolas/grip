@@ -2,8 +2,8 @@ import assert from 'node:assert';
 import { TOOLS } from '../dist/tools.js';
 import { resolveToolScope, toolInScope, CORE_TOOL_NAMES, META_TOOL_NAMES, TOOL_CATEGORIES, toolCategorySummary, toolDetail } from '../dist/tools.js';
 
-// Phase 3 task 5 (3b): motion/text/components cluster merge landed 162 -> 157.
-assert.strictEqual(TOOLS.length, 157, `TOOLS.length should be 157, got ${TOOLS.length}`);
+// Phase 3 task 6 (3b): storage/ui/slides/subscribe cluster merge landed 157 -> 146.
+assert.strictEqual(TOOLS.length, 146, `TOOLS.length should be 146, got ${TOOLS.length}`);
 
 // Every tool has exactly one category; every core/meta name is a real tool.
 const allNames = new Set(TOOLS.map((t) => t.name));

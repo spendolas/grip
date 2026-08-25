@@ -47,4 +47,10 @@ assert.deepStrictEqual(resolveMerged('animation_style', { op: 'apply', nodeId: '
 assert.deepStrictEqual(resolveMerged('manual_keyframe_track', { op: 'remove', nodeId: '1:1', trackId: 'k' }), { method: 'remove_manual_keyframe_track', rest: { nodeId: '1:1', trackId: 'k' } });
 assert.deepStrictEqual(resolveMerged('edit_characters', { op: 'insert', nodeId: '1:1', index: 0, characters: 'hi' }), { method: 'insert_characters', rest: { nodeId: '1:1', index: 0, characters: 'hi' } });
 assert.deepStrictEqual(resolveMerged('component_property', { op: 'delete', nodeId: '1:1', propertyName: 'p' }), { method: 'delete_component_property', rest: { nodeId: '1:1', propertyName: 'p' } });
+
+// 3b: storage/ui/slides/subscribe clusters
+assert.deepStrictEqual(resolveMerged('client_storage', { op: 'set', key: 'k', value: 1 }), { method: 'client_storage_set', rest: { key: 'k', value: 1 } });
+assert.deepStrictEqual(resolveMerged('ui', { op: 'resize', width: 400, height: 300 }), { method: 'ui_resize', rest: { width: 400, height: 300 } });
+assert.deepStrictEqual(resolveMerged('slides_canvas', { op: 'get_grid' }), { method: 'slides_get_canvas_grid', rest: {} });
+assert.deepStrictEqual(resolveMerged('subscribe', { target: 'selection' }), { method: 'subscribe_selection', rest: {} });
 console.log('merge.mjs OK');

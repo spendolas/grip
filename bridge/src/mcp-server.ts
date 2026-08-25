@@ -87,6 +87,21 @@ export interface LiveSession {
   session: McpSession;
 }
 
+// Bridge-side subscription registration, shared by the merged `subscribe`
+// tool. Sets the session flag the event fan-out in wireBridgeEvents() reads
+// (no plugin round-trip — the plugin already always emits these events;
+// this just decides which sessions receive them as MCP notifications).
+// `channel` is the former standalone tool name (e.g. 'subscribe_selection'),
+// echoed back in the result for continuity with pre-merge behavior.
+function applySubscription(
+  session: McpSession,
+  kind: 'selection' | 'document' | 'currentPage',
+  channel: string,
+) {
+  session.subscriptions[kind] = true;
+  return okResult({ subscribed: true, channel });
+}
+
 // Token bucket: refills RATE_LIMIT_REFILL/sec, caps at RATE_LIMIT_BURST.
 // Tool calls cost 1; over-cap returns rate_limited error.
 const RATE_LIMIT_REFILL = 30;    // tokens per second
@@ -202,13 +217,6 @@ export function createSession(bridge: PluginBridge): LiveSession {
       return errorResult(
         `rate_limited: token bucket empty (cap ${RATE_LIMIT_BURST}, refill ${RATE_LIMIT_REFILL}/s). Wait or batch via run_script.`,
       );
-    }
-
-    if (def.subscription) {
-      if (name === 'subscribe_selection') session.subscriptions.selection = true;
-      if (name === 'subscribe_document') session.subscriptions.document = true;
-      if (name === 'subscribe_currentpage') session.subscriptions.currentPage = true;
-      return okResult({ subscribed: true, channel: name });
     }
 
     if (name === 'grip_health') {
@@ -400,16 +408,27 @@ export function createSession(bridge: PluginBridge): LiveSession {
       if ('error' in merged) return errorResult(merged.error);
       const spec = MERGED_TOOLS[name];
       if (spec.bridgeSide) {
-        // TODO(phase3 task6): no bridgeSide cluster exists yet (3a's two
-        // merges — bind_to_variable, group — are both plugin-forward). A
-        // later task (subscribe) lands here — verify the
-        // recursive handleCall(merged.method, ...) below still finds a
-        // TOOLS entry for merged.method (bridgeSide dispatch such as
-        // subscribe_selection is branched on `name === '<tool>'` further
-        // up in this function, not via a TOOLS lookup, so this recursion
-        // is expected to reach that branch rather than the `Unknown tool`
-        // guard at the top — confirm when wiring that cluster).
-        return await handleCall(merged.method, merged.rest);
+        // Bridge-side clusters set session state directly instead of
+        // routing to the plugin — there is no plugin round-trip and no
+        // TOOLS entry for the underlying method, so we must NOT recurse
+        // into handleCall(merged.method, ...) (that used to be reachable
+        // via a `def.subscription` branch keyed on the now-removed
+        // subscribe_selection/document/currentpage TOOLS entries; removing
+        // those entries would make the recursion hit the `Unknown tool`
+        // guard at the top of handleCall). `subscribe` is currently the
+        // only bridgeSide cluster: map its resolved method name straight
+        // to the session subscription flag it used to set.
+        if (name === 'subscribe') {
+          const kindByMethod: Record<string, 'selection' | 'document' | 'currentPage'> = {
+            subscribe_selection: 'selection',
+            subscribe_document: 'document',
+            subscribe_currentpage: 'currentPage',
+          };
+          const kind = kindByMethod[merged.method];
+          if (!kind) return errorResult(`${name}: no bridge-side handler for '${merged.method}'`);
+          return applySubscription(session, kind, merged.method);
+        }
+        return errorResult(`${name}: bridgeSide merged tool has no dispatcher`);
       }
       try {
         const result = await bridge.request(merged.method, merged.rest, session);
