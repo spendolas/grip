@@ -39,7 +39,7 @@ export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
   read: ['get_document', 'get_page', 'get_node', 'get_nodes', 'get_selection', 'get_styles', 'get_variables',
     'get_components', 'search_nodes', 'find_with_criteria', 'get_plugin_data', 'get_overrides', 'get_instances',
     'get_selection_colors', 'get_top_level_frame', 'get_style_consumers', 'get_publish_status', 'get_relaunch_data',
-    'get_audit'],
+    'get_audit', 'list_pages'],
   write: ['set_node_property', 'create_node', 'delete_node', 'clone_node', 'move_node', 'group',
     'set_selection', 'scroll_to', 'map_nodes', 'set_viewport', 'rescale', 'lock_aspect_ratio',
     'unlock_aspect_ratio', 'create_section', 'set_skip_invisible_instance_children', 'set_grid_child_position',
@@ -389,6 +389,13 @@ export const TOOLS: ToolDef[] = [
       allPages: z.boolean().optional(),
       maxNodes: z.number().int().positive().optional(),
     }),
+  },
+  {
+    name: 'list_pages',
+    category: 'read',
+    description:
+      'List all pages (id, name, current) WITHOUT loading their contents — cheap even on a 97-page file, unlike get_document. Use to enumerate pageIds for a batched search_nodes.',
+    schema: z.object({}),
   },
   {
     name: 'export_node',

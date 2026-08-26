@@ -197,7 +197,8 @@ type ToolMethod =
   | 'delete_style'
   | 'edit_annotation_category'
   | 'delete_annotation_category'
-  | 'get_audit';
+  | 'get_audit'
+  | 'list_pages';
 
 interface ToolRequest {
   kind: 'request';
@@ -1205,6 +1206,9 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         variableCollections: cols.length,
       };
       return s;
+    }
+    case 'list_pages': {
+      return { pages: figma.root.children.map((p) => ({ id: p.id, name: p.name, current: p.id === figma.currentPage.id })) };
     }
     case 'export_node': {
       const node = await getNode(params.nodeId);
@@ -3511,7 +3515,7 @@ const READ_ONLY_METHODS = new Set<string>([
   'get_image_by_hash', 'get_stamp_author', 'get_overrides',
   'get_publish_status', 'get_text_content', 'get_top_level_frame',
   'get_relaunch_data', 'get_buzz_asset_type',
-  'slides_get_canvas_grid', 'get_slide_transition', 'get_audit',
+  'slides_get_canvas_grid', 'get_slide_transition', 'get_audit', 'list_pages',
   // listings + loaders that don't change the canvas
   'list_fonts', 'load_font', 'load_brushes', 'list_shaders',
   'list_animation_styles', 'get_animations', 'spring_to_normalized', 'get_library_usage',

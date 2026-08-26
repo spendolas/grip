@@ -55,8 +55,8 @@ assert.deepStrictEqual(resolveMerged('slides_canvas', { op: 'get_grid' }), { met
 assert.deepStrictEqual(resolveMerged('subscribe', { target: 'selection' }), { method: 'subscribe_selection', rest: {} });
 
 // Final reconcile (phase 3 complete): exact tool count + full category bijection.
-// Server-side-optimization sprint task 2 added get_audit: 146 -> 147.
-assert.strictEqual(TOOLS.length, 147, `expected 147 tools, got ${TOOLS.length}`);
+// Server-side-optimization sprint task 3 added list_pages: 147 -> 148.
+assert.strictEqual(TOOLS.length, 148, `expected 148 tools, got ${TOOLS.length}`);
 const catNames = Object.values(TOOL_CATEGORIES).flat();
 assert.strictEqual(catNames.length, TOOLS.length, 'category flatten count != TOOLS.length');
 assert.strictEqual(new Set(catNames).size, catNames.length, 'category flatten has duplicate tool names');
