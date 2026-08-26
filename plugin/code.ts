@@ -2672,21 +2672,45 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       }
       let applied = 0;
       await forEachNode(nodes, async (n) => {
+        let acted = false;
         if (doDelete) { n.remove(); applied++; return; }
         if (setProps) {
           for (const prop of Object.keys(setProps)) await applyProperty(n as SceneNode, prop, setProps[prop]);
+          acted = true;
         }
         if (rn) {
           n.name = rn.regex ? n.name.replace(new RegExp(rn.find, 'g'), rn.replace) : n.name.split(rn.find).join(rn.replace);
+          acted = true;
         }
         if (swapTarget && n.type === 'INSTANCE') {
           (n as InstanceNode).swapComponent(swapTarget);
+          acted = true;
         }
         if (st) {
-          const prop = st.type === 'text' ? 'textStyleId' : st.type === 'effect' ? 'effectStyleId' : st.type === 'grid' ? 'gridStyleId' : st.type === 'stroke' ? 'strokeStyleId' : 'fillStyleId';
-          await applyProperty(n as SceneNode, prop, st.styleId);
+          // dynamic-page access makes fillStyleId/strokeStyleId/effectStyleId/
+          // gridStyleId/textStyleId READ-ONLY — must go through the async
+          // setter. Mirrors apply_style's exact branching (code.ts:1495-1529),
+          // not applyProperty's sync PASSTHROUGH assignment.
+          const sn = n as any;
+          if (st.type === 'text') {
+            if ('setTextStyleIdAsync' in sn) await sn.setTextStyleIdAsync(st.styleId);
+            else sn.textStyleId = st.styleId;
+          } else if (st.type === 'effect') {
+            if ('setEffectStyleIdAsync' in sn) await sn.setEffectStyleIdAsync(st.styleId);
+            else sn.effectStyleId = st.styleId;
+          } else if (st.type === 'grid') {
+            if ('setGridStyleIdAsync' in sn) await sn.setGridStyleIdAsync(st.styleId);
+            else sn.gridStyleId = st.styleId;
+          } else if (st.type === 'stroke') {
+            if ('setStrokeStyleIdAsync' in sn) await sn.setStrokeStyleIdAsync(st.styleId);
+            else sn.strokeStyleId = st.styleId;
+          } else {
+            if ('setFillStyleIdAsync' in sn) await sn.setFillStyleIdAsync(st.styleId);
+            else sn.fillStyleId = st.styleId;
+          }
+          acted = true;
         }
-        applied++;
+        if (acted) applied++;
       }, { budget, chunk });
       return {
         matched,
