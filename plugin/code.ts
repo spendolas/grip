@@ -1096,18 +1096,24 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       }
 
       const slice = matches.slice(offset, offset + max);
+      const wantProps = Array.isArray(params.properties) && params.properties.length;
+      const propsSet = wantProps ? new Set<string>(params.properties) : undefined;
+      const results: any[] = [];
+      for (const n of slice) {
+        if (propsSet) {
+          const proj = await serializeNode(n, { depth: 0, maxDepth: 0, includeChildren: false, properties: propsSet });
+          results.push({ ...proj, parentId: n.parent?.id ?? '' });
+        } else {
+          results.push({ id: n.id, name: n.name, type: n.type, parentId: n.parent?.id ?? '' });
+        }
+      }
       return {
         total: matches.length,
         offset,
         ...(partial ? { partial: true } : {}),
         ...(nextPageCursor !== undefined ? { nextPageCursor } : {}),
         ...(nextNodeCursor !== undefined && nextNodeCursor > 0 ? { nextNodeCursor } : {}),
-        results: slice.map((n) => ({
-          id: n.id,
-          name: n.name,
-          type: n.type,
-          parentId: n.parent?.id ?? '',
-        })),
+        results,
       };
     }
     case 'export_node': {

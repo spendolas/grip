@@ -353,7 +353,7 @@ export const TOOLS: ToolDef[] = [
     description:
       'Find nodes by type(s), name (substring/regex), text, fill hex, or audit predicates (fillType/hasStyle/hasBoundVariable). Scope: page(s)/subtree/all pages. Paginated. grip_capabilities {tool:\'search_nodes\'} has predicate + scope shapes.',
     detail:
-      "Scope precedence: scope=<nodeId subtree> > pageIds=[<pageId>,…] (loads ONLY those pages — batch 5–10/call to search a big multi-page file without loadAllPagesAsync timing out) > allPages (lazily loads pages one at a time as it reaches them — never loadAllPagesAsync; add maxPages=N [+pageCursor, default 0] to bound pages loaded per call and get nextPageCursor back, auto-iterating a 97-page file in bounded calls) > pageId (one page) > current page. allPages is time-budgeted per call (timeBudgetMs, default 45000, capped 55000, under the 60s bridge timeout): if the budget trips mid-run it returns `partial:true` plus `nextPageCursor`/`nextNodeCursor` (feed both back to resume — nextNodeCursor resumes mid-page when a typed search was mid-way through a page's findAllWithCriteria results; an untyped page is atomic and resumes at its start) instead of the whole request timing out, so one pathological page can't take down the request. Predicates AND together and filter during the plugin's walk (only matches returned), riding the findAllWithCriteria fast path when `type` is set. fillType: match if any fill paint is SOLID|IMAGE|VIDEO|SHADER|GRADIENT_LINEAR|GRADIENT_RADIAL|GRADIENT_ANGULAR|GRADIENT_DIAMOND, or GRADIENT for any gradient subtype (guards figma.mixed). hasStyle:true → nodes with any bound style (fill/stroke/text/effect/grid StyleId). hasBoundVariable:true → nodes with >=1 boundVariables entry. fillHex matches any SOLID fill (#RRGGBB).",
+      "Scope precedence: scope=<nodeId subtree> > pageIds=[<pageId>,…] (loads ONLY those pages — batch 5–10/call to search a big multi-page file without loadAllPagesAsync timing out) > allPages (lazily loads pages one at a time as it reaches them — never loadAllPagesAsync; add maxPages=N [+pageCursor, default 0] to bound pages loaded per call and get nextPageCursor back, auto-iterating a 97-page file in bounded calls) > pageId (one page) > current page. allPages is time-budgeted per call (timeBudgetMs, default 45000, capped 55000, under the 60s bridge timeout): if the budget trips mid-run it returns `partial:true` plus `nextPageCursor`/`nextNodeCursor` (feed both back to resume — nextNodeCursor resumes mid-page when a typed search was mid-way through a page's findAllWithCriteria results; an untyped page is atomic and resumes at its start) instead of the whole request timing out, so one pathological page can't take down the request. Predicates AND together and filter during the plugin's walk (only matches returned), riding the findAllWithCriteria fast path when `type` is set. fillType: match if any fill paint is SOLID|IMAGE|VIDEO|SHADER|GRADIENT_LINEAR|GRADIENT_RADIAL|GRADIENT_ANGULAR|GRADIENT_DIAMOND, or GRADIENT for any gradient subtype (guards figma.mixed). hasStyle:true → nodes with any bound style (fill/stroke/text/effect/grid StyleId). hasBoundVariable:true → nodes with >=1 boundVariables entry. fillHex matches any SOLID fill (#RRGGBB). Passing `properties` (array of field names) returns those serialized fields per match instead of just {id,name,type,parentId} — bounded to the returned slice (not the full match set) — so 'find X, show its Y' is one call instead of search_nodes then get_nodes.",
     schema: z.object({
       pageId: z.string().optional(),
       pageIds: z.array(z.string()).optional(),
@@ -374,6 +374,7 @@ export const TOOLS: ToolDef[] = [
       hasBoundVariable: z.boolean().optional(),
       maxResults: z.number().int().positive().optional(),
       offset: z.number().int().nonnegative().optional(),
+      properties: z.array(z.string()).optional(),
     }),
   },
   {
@@ -1287,6 +1288,7 @@ export function toolInputSchema(name: string): Record<string, unknown> {
           hasBoundVariable: { type: 'boolean', description: 'Match nodes with >=1 bound variable' },
           maxResults: { type: 'integer' },
           offset: { type: 'integer' },
+          properties: { type: 'array', items: { type: 'string' }, description: 'Serialized fields to return per match (e.g. fills, fillStyleId, boundVariables, characters) — audit in one call instead of search+get_nodes' },
         },
         additionalProperties: false,
       };

@@ -50,4 +50,10 @@ assert.ok(Array.isArray(js.properties.fillType.enum) && js.properties.fillType.e
 assert.ok(js.properties.pageIds && js.properties.pageIds.type === 'array', 'toolInputSchema advertises pageIds array');
 assert.ok(js.properties.timeBudgetMs && js.properties.nodeCursor, 'toolInputSchema advertises timeBudgetMs + nodeCursor');
 
+// properties projection (server-side opt: fields per match in one call)
+const pr = t.schema.safeParse({ type: 'TEXT', properties: ['fills', 'characters'] });
+assert.ok(pr.success && Array.isArray(pr.data.properties), 'schema accepts properties[]');
+assert.deepStrictEqual(pr.data.properties, ['fills', 'characters'], 'properties preserved');
+assert.ok(toolInputSchema('search_nodes').properties.properties, 'toolInputSchema advertises properties');
+
 console.log('search-nodes.mjs OK');
