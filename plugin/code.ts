@@ -976,6 +976,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       const textContains = params.textContains ? String(params.textContains).toLowerCase() : null;
 
       const scopes: BaseNode[] = [];
+      let nextPageCursor: number | undefined; // set by bounded allPages (maxPages)
       if (params.scope) {
         scopes.push(await getNode(params.scope));
       } else if (Array.isArray(params.pageIds) && params.pageIds.length) {
@@ -989,8 +990,21 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
           scopes.push(n);
         }
       } else if (params.allPages) {
-        await figma.loadAllPagesAsync();
-        scopes.push(...figma.root.children);
+        const kids = figma.root.children; // cheap enumerate — no loadAllPagesAsync needed just to list pages
+        const mp = typeof params.maxPages === 'number' ? params.maxPages : 0;
+        if (mp > 0) {
+          // Bounded: load + search only [cursor, cursor+maxPages); hand back a
+          // cursor so a caller iterates a huge file without loadAllPagesAsync.
+          const start = Math.max(0, params.pageCursor ?? 0);
+          for (const pg of kids.slice(start, start + mp)) {
+            await (pg as PageNode).loadAsync();
+            scopes.push(pg);
+          }
+          if (start + mp < kids.length) nextPageCursor = start + mp;
+        } else {
+          await figma.loadAllPagesAsync();
+          scopes.push(...kids);
+        }
       } else if (params.pageId) {
         const n = await getNode(params.pageId);
         if (n.type !== 'PAGE') throw new Error(`Not a page: ${params.pageId}`);
@@ -1068,6 +1082,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       return {
         total: matches.length,
         offset,
+        ...(nextPageCursor !== undefined ? { nextPageCursor } : {}),
         results: slice.map((n) => ({
           id: n.id,
           name: n.name,
@@ -3343,7 +3358,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.4.2';
+const PLUGIN_VERSION = '0.4.3';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie

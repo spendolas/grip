@@ -26,8 +26,17 @@ assert.ok(pp.success, 'schema accepts pageIds');
 assert.deepStrictEqual(pp.data.pageIds, ['0:1', '2:3'], 'pageIds preserved as string[]');
 assert.ok(!t.schema.safeParse({ pageIds: 'not-an-array' }).success, 'pageIds must be an array');
 
+// allPages cursor: bounded auto-iteration
+const pc = t.schema.safeParse({ allPages: true, maxPages: 10, pageCursor: 20 });
+assert.ok(pc.success, 'schema accepts maxPages + pageCursor');
+assert.strictEqual(pc.data.maxPages, 10);
+assert.strictEqual(pc.data.pageCursor, 20);
+assert.ok(!t.schema.safeParse({ maxPages: 0 }).success, 'maxPages must be positive');
+assert.ok(!t.schema.safeParse({ pageCursor: -1 }).success, 'pageCursor must be >= 0');
+
 // advertised JSON schema surfaces the new params
 const js = toolInputSchema('search_nodes');
+assert.ok(js.properties.maxPages && js.properties.pageCursor, 'toolInputSchema advertises maxPages + pageCursor');
 assert.ok(js.properties.fillType && js.properties.hasStyle && js.properties.hasBoundVariable, 'toolInputSchema advertises new params');
 assert.ok(Array.isArray(js.properties.fillType.enum) && js.properties.fillType.enum.includes('GRADIENT'), 'fillType enum advertised incl GRADIENT');
 assert.ok(js.properties.pageIds && js.properties.pageIds.type === 'array', 'toolInputSchema advertises pageIds array');
