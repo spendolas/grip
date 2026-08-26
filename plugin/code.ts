@@ -976,7 +976,9 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       const textContains = params.textContains ? String(params.textContains).toLowerCase() : null;
 
       const scopes: BaseNode[] = [];
-      let nextPageCursor: number | undefined; // set by bounded allPages (maxPages)
+      let nextPageCursor: number | undefined; // set by bounded allPages (maxPages) or budget trip
+      let nextNodeCursor: number | undefined; // set when budget trips mid-page
+      let partial = false;
       if (params.scope) {
         scopes.push(await getNode(params.scope));
       } else if (Array.isArray(params.pageIds) && params.pageIds.length) {
@@ -989,35 +991,18 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
           await (n as PageNode).loadAsync();
           scopes.push(n);
         }
-      } else if (params.allPages) {
-        const kids = figma.root.children; // cheap enumerate — no loadAllPagesAsync needed just to list pages
-        const mp = typeof params.maxPages === 'number' ? params.maxPages : 0;
-        if (mp > 0) {
-          // Bounded: load + search only [cursor, cursor+maxPages); hand back a
-          // cursor so a caller iterates a huge file without loadAllPagesAsync.
-          const start = Math.max(0, params.pageCursor ?? 0);
-          for (const pg of kids.slice(start, start + mp)) {
-            await (pg as PageNode).loadAsync();
-            scopes.push(pg);
-          }
-          if (start + mp < kids.length) nextPageCursor = start + mp;
-        } else {
-          await figma.loadAllPagesAsync();
-          scopes.push(...kids);
-        }
       } else if (params.pageId) {
         const n = await getNode(params.pageId);
         if (n.type !== 'PAGE') throw new Error(`Not a page: ${params.pageId}`);
         await (n as PageNode).loadAsync();
         scopes.push(n);
-      } else {
+      } else if (!params.allPages) {
         await figma.currentPage.loadAsync();
         scopes.push(figma.currentPage);
       }
 
       const matches: SceneNode[] = [];
       const tryMatch = (n: BaseNode): boolean => {
-        if (scopes.includes(n)) return false;
         if (types && !types.includes(n.type)) return false;
         if (nameRx && !nameRx.test(n.name)) return false;
         if (needle && !n.name.toLowerCase().includes(needle)) return false;
@@ -1059,6 +1044,38 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         }
         return true;
       };
+      if (params.allPages) {
+        const kids = figma.root.children;                    // cheap page stubs, no content load
+        const mp = (typeof params.maxPages === 'number' && params.maxPages > 0) ? params.maxPages : Infinity;
+        const budget = Math.min(55000, Math.max(1000, typeof params.timeBudgetMs === 'number' ? params.timeBudgetMs : 45000));
+        const t0 = Date.now();
+        const startPage = Math.max(0, params.pageCursor ?? 0);
+        let startNode = Math.max(0, params.nodeCursor ?? 0);
+        let processed = 0;
+        let pi = startPage;
+        for (; pi < kids.length && processed < mp; pi++, processed++, startNode = 0) {
+          const pg = kids[pi] as PageNode;
+          await pg.loadAsync();
+          let candidates: SceneNode[] | null = null;
+          if (types && 'findAllWithCriteria' in pg) {
+            try { candidates = (pg as any).findAllWithCriteria({ types }) as SceneNode[]; } catch { candidates = null; }
+          }
+          if (candidates) {
+            let ni = startNode;
+            for (; ni < candidates.length; ni++) {
+              if ((ni & 511) === 0 && Date.now() - t0 > budget) { partial = true; nextPageCursor = pi; nextNodeCursor = ni; break; }
+              if (tryMatch(candidates[ni])) matches.push(candidates[ni]);
+            }
+            if (partial) break;
+          } else {
+            // untyped page = atomic (no cheap mid-page resume); root excluded via n !== pg
+            walk(pg, (n) => { if (n !== pg && tryMatch(n)) matches.push(n as SceneNode); });
+          }
+          // boundary budget check (covers untyped pages + between typed pages)
+          if (pi + 1 < kids.length && processed + 1 < mp && Date.now() - t0 > budget) { partial = true; nextPageCursor = pi + 1; nextNodeCursor = 0; break; }
+        }
+        if (!partial && processed >= mp && pi < kids.length) { nextPageCursor = pi; nextNodeCursor = 0; }  // stopped on maxPages, more remain
+      }
       for (const root of scopes) {
         // Fast path: when types are given, use the NATIVE typed index
         // (findAllWithCriteria) as the candidate set instead of walking every
@@ -1074,7 +1091,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         if (candidates) {
           for (const n of candidates) { if (tryMatch(n)) matches.push(n); }
         } else {
-          walk(root, (n) => { if (tryMatch(n)) matches.push(n as SceneNode); });
+          walk(root, (n) => { if (n !== root && tryMatch(n)) matches.push(n as SceneNode); });
         }
       }
 
@@ -1082,7 +1099,9 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       return {
         total: matches.length,
         offset,
+        ...(partial ? { partial: true } : {}),
         ...(nextPageCursor !== undefined ? { nextPageCursor } : {}),
+        ...(nextNodeCursor !== undefined && nextNodeCursor > 0 ? { nextNodeCursor } : {}),
         results: slice.map((n) => ({
           id: n.id,
           name: n.name,
@@ -3358,7 +3377,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.4.3';
+const PLUGIN_VERSION = '0.4.4';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie

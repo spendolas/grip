@@ -353,7 +353,7 @@ export const TOOLS: ToolDef[] = [
     description:
       'Find nodes by type(s), name (substring/regex), text, fill hex, or audit predicates (fillType/hasStyle/hasBoundVariable). Scope: page(s)/subtree/all pages. Paginated. grip_capabilities {tool:\'search_nodes\'} has predicate + scope shapes.',
     detail:
-      "Scope precedence: scope=<nodeId subtree> > pageIds=[<pageId>,…] (loads ONLY those pages — batch 5–10/call to search a big multi-page file without loadAllPagesAsync timing out) > allPages (loads every page — avoid bare on large files; add maxPages=N [+pageCursor, default 0] to load only pages [cursor,cursor+N) and get nextPageCursor back, auto-iterating a 97-page file in bounded calls) > pageId (one page) > current page. Predicates AND together and filter during the plugin's walk (only matches returned), riding the findAllWithCriteria fast path when `type` is set. fillType: match if any fill paint is SOLID|IMAGE|VIDEO|SHADER|GRADIENT_LINEAR|GRADIENT_RADIAL|GRADIENT_ANGULAR|GRADIENT_DIAMOND, or GRADIENT for any gradient subtype (guards figma.mixed). hasStyle:true → nodes with any bound style (fill/stroke/text/effect/grid StyleId). hasBoundVariable:true → nodes with >=1 boundVariables entry. fillHex matches any SOLID fill (#RRGGBB).",
+      "Scope precedence: scope=<nodeId subtree> > pageIds=[<pageId>,…] (loads ONLY those pages — batch 5–10/call to search a big multi-page file without loadAllPagesAsync timing out) > allPages (lazily loads pages one at a time as it reaches them — never loadAllPagesAsync; add maxPages=N [+pageCursor, default 0] to bound pages loaded per call and get nextPageCursor back, auto-iterating a 97-page file in bounded calls) > pageId (one page) > current page. allPages is time-budgeted per call (timeBudgetMs, default 45000, capped 55000, under the 60s bridge timeout): if the budget trips mid-run it returns `partial:true` plus `nextPageCursor`/`nextNodeCursor` (feed both back to resume — nextNodeCursor resumes mid-page when a typed search was mid-way through a page's findAllWithCriteria results; an untyped page is atomic and resumes at its start) instead of the whole request timing out, so one pathological page can't take down the request. Predicates AND together and filter during the plugin's walk (only matches returned), riding the findAllWithCriteria fast path when `type` is set. fillType: match if any fill paint is SOLID|IMAGE|VIDEO|SHADER|GRADIENT_LINEAR|GRADIENT_RADIAL|GRADIENT_ANGULAR|GRADIENT_DIAMOND, or GRADIENT for any gradient subtype (guards figma.mixed). hasStyle:true → nodes with any bound style (fill/stroke/text/effect/grid StyleId). hasBoundVariable:true → nodes with >=1 boundVariables entry. fillHex matches any SOLID fill (#RRGGBB).",
     schema: z.object({
       pageId: z.string().optional(),
       pageIds: z.array(z.string()).optional(),
@@ -361,6 +361,8 @@ export const TOOLS: ToolDef[] = [
       allPages: z.boolean().optional(),
       maxPages: z.number().int().positive().optional(),
       pageCursor: z.number().int().nonnegative().optional(),
+      timeBudgetMs: z.number().int().positive().optional(),
+      nodeCursor: z.number().int().nonnegative().optional(),
       name: z.string().optional(),
       nameRegex: z.string().optional(),
       nameFlags: z.string().optional(),
@@ -1266,6 +1268,8 @@ export function toolInputSchema(name: string): Record<string, unknown> {
           scope: { type: 'string', description: 'Subtree root nodeId' },
           maxPages: { type: 'integer', description: 'With allPages: bound pages loaded per call; returns nextPageCursor if more remain (auto-iterate a big file without loading all)' },
           pageCursor: { type: 'integer', description: 'With allPages+maxPages: resume from this page index (feed back nextPageCursor)' },
+          timeBudgetMs: { type: 'integer', description: 'allPages: ms budget before returning partial + cursor (default 45000, cap 55000, under the 60s bridge timeout)' },
+          nodeCursor: { type: 'integer', description: 'Resume mid-page: node index within nextPageCursor page (feed back nextNodeCursor)' },
           allPages: { type: 'boolean' },
           name: { type: 'string', description: 'Substring (case-insensitive)' },
           nameRegex: { type: 'string' },

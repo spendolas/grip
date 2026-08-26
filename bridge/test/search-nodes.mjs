@@ -34,11 +34,20 @@ assert.strictEqual(pc.data.pageCursor, 20);
 assert.ok(!t.schema.safeParse({ maxPages: 0 }).success, 'maxPages must be positive');
 assert.ok(!t.schema.safeParse({ pageCursor: -1 }).success, 'pageCursor must be >= 0');
 
+// allPages time budget + resume cursor
+const tb = t.schema.safeParse({ allPages: true, timeBudgetMs: 5000, nodeCursor: 100 });
+assert.ok(tb.success, 'schema accepts timeBudgetMs + nodeCursor');
+assert.strictEqual(tb.data.timeBudgetMs, 5000, 'timeBudgetMs preserved');
+assert.strictEqual(tb.data.nodeCursor, 100, 'nodeCursor preserved');
+assert.ok(!t.schema.safeParse({ timeBudgetMs: 0 }).success, 'timeBudgetMs must be positive');
+assert.ok(!t.schema.safeParse({ nodeCursor: -1 }).success, 'nodeCursor must be >= 0');
+
 // advertised JSON schema surfaces the new params
 const js = toolInputSchema('search_nodes');
 assert.ok(js.properties.maxPages && js.properties.pageCursor, 'toolInputSchema advertises maxPages + pageCursor');
 assert.ok(js.properties.fillType && js.properties.hasStyle && js.properties.hasBoundVariable, 'toolInputSchema advertises new params');
 assert.ok(Array.isArray(js.properties.fillType.enum) && js.properties.fillType.enum.includes('GRADIENT'), 'fillType enum advertised incl GRADIENT');
 assert.ok(js.properties.pageIds && js.properties.pageIds.type === 'array', 'toolInputSchema advertises pageIds array');
+assert.ok(js.properties.timeBudgetMs && js.properties.nodeCursor, 'toolInputSchema advertises timeBudgetMs + nodeCursor');
 
 console.log('search-nodes.mjs OK');
