@@ -13,8 +13,8 @@ export interface ToolDef {
   // a one-shot response. The MCP server short-circuits these.
   subscription?: boolean;
   // Tool-scoping category (phase 1 groundwork). Optional — TOOL_CATEGORIES
-  // below is the authoritative name→category map; this field is currently
-  // set only on the grip_capabilities entry.
+  // below is the authoritative name→category map; this field is set on
+  // entries as needed.
   category?: ToolCategory;
   // Phase 2: deep guidance relocated out of `description` (which stays
   // short for the ListTools payload); surfaced on demand via

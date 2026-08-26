@@ -1,6 +1,6 @@
 # Grip MCP Tools
 
-146 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
+150 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
 
 Phase 3 merged 19 clusters of "N verbs on one object" into single op-enum-dispatched tools — the former per-verb tools no longer exist as standalone entries below; call them via the merged tool's `op`/`target` discriminator (e.g. `group {op:'group'|'ungroup', nodeId(s)}`, `bind_to_variable {target:'property'|'paint'|'effect'|'layout_grid', ...}`, `timer {op:'start'|'stop'|'pause'|'resume'}`). Per-op params are in `grip_capabilities {tool:'<name>'}`.
 
@@ -32,6 +32,16 @@ Pin this MCP session to a specific connected plugin.
 File metadata + page list.
 - Params: none.
 - Returns: `{ name, id, currentPageId, pages: [{ id, name, nodeCount }] }`. `nodeCount` is top-level children only.
+
+### `list_pages`
+Enumerate pages (id, name, current) WITHOUT loading their contents — cheap even on a 97-page file, unlike `get_document`.
+- Params: none.
+- Returns: `{ pages: [{ id, name, current }] }`. Use to build pageIds for a batched `search_nodes`.
+
+### `get_audit`
+One-pass document audit: counts by type, fill-source breakdown (styled vs variable-bound vs hardcoded color), fonts used, and defined styles/variables. Numbers, not trees.
+- Params: `scope` (subtree nodeId), `pageId`, `allPages`, `maxNodes` (bounds the walk).
+- Scope defaults to the current page if none of `scope`/`pageId`/`allPages` is given.
 
 ### `get_page`
 Serialized node tree of a page.
@@ -80,8 +90,9 @@ Find nodes by combination of filters. Paginated. When `type` is given it uses th
   - `type` — single string or array of node types.
   - `textContains` — TEXT-only character match.
   - `fillHex` — `#RRGGBB`; matches first SOLID fill.
+  - `properties` — array of field names; returns those serialized fields per match instead of just `{id,name,type,parentId}` (bounded to the returned slice, not the full match set) — "find X, show its Y" in one call.
   - `maxResults` (default 50), `offset` (default 0).
-- Returns: `{ total, offset, results: [{ id, name, type, parentId }] }`.
+- Returns: `{ total, offset, results: [{ id, name, type, parentId, ...properties }] }`.
 
 ### `get_plugin_data`
 Read pluginData stored on a node.
@@ -139,6 +150,12 @@ Set any one property on a node.
 Create a new node + optionally apply a batch of props.
 - Params: `type` (req: `FRAME | TEXT | RECTANGLE | ELLIPSE | LINE | POLYGON | STAR | VECTOR | COMPONENT | INSTANCE`), `parentId` (default current page), `name`, `x`, `y`, `width`, `height`, `componentId` (req for INSTANCE), `props` (any `set_node_property` values, applied in order at creation), `selectAfter`.
 - Returns: `{ id, name }`.
+
+### `create_tree`
+Build a nested node subtree from one spec in a single call — reuses `create_node`'s type factory + `set_node_property` for props, so a form/card/list doesn't cost one round-trip per node.
+- Params: `parentId` (default current page), `index`, `spec` (req, recursive: `{ type, props?, children? }`).
+- Capped at 2000 nodes per call, no rollback on a partial build (`map_nodes`-style).
+- Returns: the created id tree.
 
 ### `delete_node`
 Remove a node.
@@ -276,6 +293,12 @@ Apply a per-range property to part of a TEXT node.
 Merged: insert/delete characters on a TEXT node's `characters` string, dispatched on `op`.
 - `op: 'insert'` — `{ op, nodeId, start, characters, behavior? }` (was `insert_characters`).
 - `op: 'delete'` — `{ op, nodeId, start, end }` (was `delete_characters`, half-open `[start, end)`).
+
+### `replace_text`
+Bulk find/replace across TEXT nodes in a bounded, font-loading loop (no `run_script`).
+- Params: `find` (req), `replace` (req), `regex` (literal unless true), `scope` (subtree nodeId), `pageId`, `allPages`, `budget`, `chunk`.
+- Scope defaults to the current page if none of `scope`/`pageId`/`allPages` is given.
+- Returns: `{ matched, changed, truncated }`.
 
 ---
 
@@ -538,7 +561,13 @@ Reset all overrides on an INSTANCE.
 
 ### `map_nodes`
 Bulk-edit matched nodes with a **Grip-owned, chunked, yielding loop** — the safe way to "set X on every matching node" without run_script (can't freeze Figma).
-- Params: `query` (req: `{ types, name, nameFlags, scope:<nodeId>, page }` — must have `types` (fast findAllWithCriteria) or `scope`; a bare page-wide match is refused), then `set` (property→value map applied per node like `set_node_property`) OR `delete:true`; `budget` (default 10000), `chunk` (default 200).
+- Params: `query` (req: `{ types, name, nameFlags, scope:<nodeId>, page }` — must have `types` (fast findAllWithCriteria) or `scope`; a bare page-wide match is refused), then one of:
+  - `set` — property→value map applied per node like `set_node_property`.
+  - `delete:true` — removes matched nodes.
+  - `rename:{find,replace,regex?}` — literal substring substitution unless `regex:true` (then `find` is a RegExp source, global flag).
+  - `swap:{componentKey?,componentId?}` — resolves `componentKey` via `importComponentByKeyAsync` or `componentId` via `getNode`, swaps it onto each matched INSTANCE (non-instance matches skipped).
+  - `applyStyle:{styleId,type?}` — `type` selects the style slot (`fill|text|effect|grid|stroke`, default `fill`); uses the same async setter as `apply_style`.
+  - `budget` (default 10000), `chunk` (default 200).
 - Returns: `{ matched, applied, truncated, limitations }`. `truncated:true` (applied < matched) means the budget was hit — narrow the query or raise budget and re-run. 60s timeout.
 
 ### `run_script`
@@ -673,7 +702,7 @@ Applied via `set_node_property` fills/strokes/effects (fully-shaped objects pass
 
 ## Tool scoping (`GRIP_TOOLS`)
 
-By default an agent only sees the `core` scope (~35 always-useful tools), not the full 146 — this keeps per-turn schema weight small. Widen the scope per agent:
+By default an agent only sees the `core` scope (~35 always-useful tools), not the full 150 — this keeps per-turn schema weight small. Widen the scope per agent:
 
 - **stdio:** set env `GRIP_TOOLS=core,motion` on the agent process (delivered to the daemon as an IPC control frame, alongside `GRIP_FILE`).
 - **HTTP:** pass `?tools=core,motion` on the `/mcp` URL.
