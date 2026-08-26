@@ -38,7 +38,8 @@ export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
   meta: ['grip_health', 'grip_diagnose', 'list_files', 'set_active_file', 'get_page_context', 'grip_capabilities'],
   read: ['get_document', 'get_page', 'get_node', 'get_nodes', 'get_selection', 'get_styles', 'get_variables',
     'get_components', 'search_nodes', 'find_with_criteria', 'get_plugin_data', 'get_overrides', 'get_instances',
-    'get_selection_colors', 'get_top_level_frame', 'get_style_consumers', 'get_publish_status', 'get_relaunch_data'],
+    'get_selection_colors', 'get_top_level_frame', 'get_style_consumers', 'get_publish_status', 'get_relaunch_data',
+    'get_audit'],
   write: ['set_node_property', 'create_node', 'delete_node', 'clone_node', 'move_node', 'group',
     'set_selection', 'scroll_to', 'map_nodes', 'set_viewport', 'rescale', 'lock_aspect_ratio',
     'unlock_aspect_ratio', 'create_section', 'set_skip_invisible_instance_children', 'set_grid_child_position',
@@ -375,6 +376,18 @@ export const TOOLS: ToolDef[] = [
       maxResults: z.number().int().positive().optional(),
       offset: z.number().int().nonnegative().optional(),
       properties: z.array(z.string()).optional(),
+    }),
+  },
+  {
+    name: 'get_audit',
+    category: 'read',
+    description:
+      "One-pass document audit: counts by type, fill-source breakdown (styled vs variable-bound vs hardcoded color), fonts used, and defined styles/variables. Returns numbers not trees. Scope: current page (default), scope subtree, a pageId, or allPages. Bounded by maxNodes.",
+    schema: z.object({
+      scope: z.string().optional(),
+      pageId: z.string().optional(),
+      allPages: z.boolean().optional(),
+      maxNodes: z.number().int().positive().optional(),
     }),
   },
   {

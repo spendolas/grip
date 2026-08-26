@@ -196,7 +196,8 @@ type ToolMethod =
   | 'move_local_style'
   | 'delete_style'
   | 'edit_annotation_category'
-  | 'delete_annotation_category';
+  | 'delete_annotation_category'
+  | 'get_audit';
 
 interface ToolRequest {
   kind: 'request';
@@ -1115,6 +1116,95 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         ...(nextNodeCursor !== undefined && nextNodeCursor > 0 ? { nextNodeCursor } : {}),
         results,
       };
+    }
+    case 'get_audit': {
+      const cap = typeof params.maxNodes === 'number' && params.maxNodes > 0 ? params.maxNodes : 50000;
+      const roots: BaseNode[] = [];
+      if (params.scope) roots.push(await getNode(params.scope));
+      else if (params.pageId) {
+        const p = await getNode(params.pageId);
+        if (p.type !== 'PAGE') throw new Error(`Not a page: ${params.pageId}`);
+        await (p as PageNode).loadAsync();
+        roots.push(p);
+      } else if (params.allPages) {
+        for (const pg of figma.root.children) {
+          await (pg as PageNode).loadAsync();
+          roots.push(pg);
+        }
+      } else {
+        await figma.currentPage.loadAsync();
+        roots.push(figma.currentPage);
+      }
+      const s: any = {
+        scanned: 0,
+        truncated: false,
+        byType: {},
+        fills: { solid: 0, gradient: 0, image: 0, video: 0, other: 0, none: 0 },
+        hardcodedColor: 0,
+        styledNodes: 0,
+        boundVarNodes: 0,
+        instances: 0,
+        components: 0,
+        textNodes: 0,
+      };
+      const fonts: Record<string, number> = {};
+      const styleKeys = ['fillStyleId', 'strokeStyleId', 'textStyleId', 'effectStyleId', 'gridStyleId'];
+      const visit = (n: BaseNode): boolean => {
+        if (s.scanned >= cap) { s.truncated = true; return false; }
+        if (roots.includes(n)) { /* skip page/scope root itself */ } else {
+          s.scanned++;
+          s.byType[n.type] = (s.byType[n.type] || 0) + 1;
+          if (n.type === 'INSTANCE') s.instances++;
+          if (n.type === 'COMPONENT' || n.type === 'COMPONENT_SET') s.components++;
+          const a = n as any;
+          if ('fills' in a) {
+            const f = a.fills;
+            if (f === figma.mixed) s.fills.other++;
+            else if (!f || f.length === 0) s.fills.none++;
+            else {
+              const kinds = (f as Paint[]).map((p) => p.type);
+              if (kinds.some((k) => k === 'IMAGE')) s.fills.image++;
+              else if (kinds.some((k) => k === 'VIDEO')) s.fills.video++;
+              else if (kinds.some((k) => k.indexOf('GRADIENT_') === 0)) s.fills.gradient++;
+              else if (kinds.some((k) => k === 'SOLID')) s.fills.solid++;
+              else s.fills.other++;
+              const boundFills = a.boundVariables && a.boundVariables.fills;
+              if (kinds.some((k) => k === 'SOLID') && !(typeof a.fillStyleId === 'string' && a.fillStyleId) && !boundFills) s.hardcodedColor++;
+            }
+          }
+          if (styleKeys.some((k) => typeof a[k] === 'string' && a[k].length > 0)) s.styledNodes++;
+          if (a.boundVariables && Object.keys(a.boundVariables).length > 0) s.boundVarNodes++;
+          if (n.type === 'TEXT') {
+            s.textNodes++;
+            const fn = (n as TextNode).fontName;
+            if (fn !== figma.mixed) {
+              const fam = (fn as FontName).family;
+              fonts[fam] = (fonts[fam] || 0) + 1;
+            }
+          }
+        }
+        if (hasChildren(n)) for (const c of n.children) { if (!visit(c)) return false; }
+        return true;
+      };
+      for (const r of roots) { if (!visit(r)) break; }
+      const [ps, ts, es, gs] = await Promise.all([
+        figma.getLocalPaintStylesAsync(),
+        figma.getLocalTextStylesAsync(),
+        figma.getLocalEffectStylesAsync(),
+        figma.getLocalGridStylesAsync(),
+      ]);
+      const cols = await figma.variables.getLocalVariableCollectionsAsync();
+      const vars = await figma.variables.getLocalVariablesAsync();
+      s.fonts = Object.entries(fonts).map(([family, count]) => ({ family, count })).sort((x, y) => y.count - x.count);
+      s.defined = {
+        paintStyles: ps.length,
+        textStyles: ts.length,
+        effectStyles: es.length,
+        gridStyles: gs.length,
+        variables: vars.length,
+        variableCollections: cols.length,
+      };
+      return s;
     }
     case 'export_node': {
       const node = await getNode(params.nodeId);
@@ -3421,7 +3511,7 @@ const READ_ONLY_METHODS = new Set<string>([
   'get_image_by_hash', 'get_stamp_author', 'get_overrides',
   'get_publish_status', 'get_text_content', 'get_top_level_frame',
   'get_relaunch_data', 'get_buzz_asset_type',
-  'slides_get_canvas_grid', 'get_slide_transition',
+  'slides_get_canvas_grid', 'get_slide_transition', 'get_audit',
   // listings + loaders that don't change the canvas
   'list_fonts', 'load_font', 'load_brushes', 'list_shaders',
   'list_animation_styles', 'get_animations', 'spring_to_normalized', 'get_library_usage',
