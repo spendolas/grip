@@ -2646,22 +2646,45 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
     case 'map_nodes': {
       // Grip-owned bulk loop: resolve a bounded node set (findNodes → typed
       // findAllWithCriteria or a scoped subtree — never a page-wide freeze) and
-      // apply `set`/`delete` in yielding chunks. No agent JS, so it can't wedge.
+      // apply `set`/`delete`/`rename`/`swap`/`applyStyle` in yielding chunks.
+      // No agent JS, so it can't wedge.
       const q = coerce(params.query) as NodeQuery;
       const setProps = params.set ? (coerce(params.set) as Record<string, any>) : null;
       const doDelete = params.delete === true;
-      if (!setProps && !doDelete) {
-        throw new Error("map_nodes needs `set` (a property→value map) or `delete:true`.");
+      const rn = params.rename ? (coerce(params.rename) as { find: string; replace: string; regex?: boolean }) : null;
+      const sw = params.swap ? (coerce(params.swap) as { componentKey?: string; componentId?: string }) : null;
+      const st = params.applyStyle ? (coerce(params.applyStyle) as { styleId: string; type?: string }) : null;
+      if (!setProps && !doDelete && !rn && !sw && !st) {
+        throw new Error("map_nodes needs `set` (a property→value map), `delete:true`, `rename`, `swap`, or `applyStyle`.");
       }
       const budget = typeof params.budget === 'number' && params.budget > 0 ? params.budget : 10000;
       const chunk = typeof params.chunk === 'number' && params.chunk > 0 ? params.chunk : 200;
       const nodes = await findNodes(q);
       const matched = nodes.length;
+      // Resolve the swap target once up front (not per-node) — avoids
+      // re-importing/re-fetching the same component for every matched instance.
+      let swapTarget: ComponentNode | null = null;
+      if (sw) {
+        if (!sw.componentKey && !sw.componentId) throw new Error('map_nodes swap needs `componentKey` or `componentId`.');
+        const resolved = sw.componentKey ? await figma.importComponentByKeyAsync(sw.componentKey) : await getNode(sw.componentId!);
+        if (resolved.type !== 'COMPONENT') throw new Error(`Swap target not a COMPONENT: ${sw.componentKey ?? sw.componentId}`);
+        swapTarget = resolved as ComponentNode;
+      }
       let applied = 0;
       await forEachNode(nodes, async (n) => {
-        if (doDelete) { n.remove(); }
-        else if (setProps) {
+        if (doDelete) { n.remove(); applied++; return; }
+        if (setProps) {
           for (const prop of Object.keys(setProps)) await applyProperty(n as SceneNode, prop, setProps[prop]);
+        }
+        if (rn) {
+          n.name = rn.regex ? n.name.replace(new RegExp(rn.find, 'g'), rn.replace) : n.name.split(rn.find).join(rn.replace);
+        }
+        if (swapTarget && n.type === 'INSTANCE') {
+          (n as InstanceNode).swapComponent(swapTarget);
+        }
+        if (st) {
+          const prop = st.type === 'text' ? 'textStyleId' : st.type === 'effect' ? 'effectStyleId' : st.type === 'grid' ? 'gridStyleId' : st.type === 'stroke' ? 'strokeStyleId' : 'fillStyleId';
+          await applyProperty(n as SceneNode, prop, st.styleId);
         }
         applied++;
       }, { budget, chunk });

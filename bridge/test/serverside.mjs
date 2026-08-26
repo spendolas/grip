@@ -30,4 +30,36 @@ const createTree = TOOLS.find((t) => t.name === 'create_tree');
 assert.ok(createTree, 'create_tree tool def exists');
 assert.ok(createTree.schema.safeParse({ spec: { type: 'FRAME' } }).success, 'create_tree schema');
 
+// Task 5: map_nodes extended with rename/swap/applyStyle ops (no new tool —
+// TOOLS.length stays 149).
+const mn = TOOLS.find((t) => t.name === 'map_nodes');
+assert.ok(mn, 'map_nodes tool def exists');
+assert.ok(
+  mn.schema.safeParse({ query: { types: ['TEXT'] }, rename: { find: 'a', replace: 'b' } }).success,
+  'map_nodes rename accepted',
+);
+assert.deepStrictEqual(
+  mn.schema.safeParse({ query: { types: ['TEXT'] }, rename: { find: 'a', replace: 'b' } }).data.rename,
+  { find: 'a', replace: 'b' },
+  'map_nodes rename preserved',
+);
+assert.ok(
+  mn.schema.safeParse({ query: { types: ['INSTANCE'] }, swap: { componentKey: 'k' } }).success,
+  'map_nodes swap accepted',
+);
+assert.deepStrictEqual(
+  mn.schema.safeParse({ query: { types: ['INSTANCE'] }, swap: { componentKey: 'k' } }).data.swap,
+  { componentKey: 'k' },
+  'map_nodes swap preserved',
+);
+assert.ok(
+  mn.schema.safeParse({ query: { types: ['FRAME'] }, applyStyle: { styleId: 's1', type: 'fill' } }).success,
+  'map_nodes applyStyle accepted',
+);
+assert.deepStrictEqual(
+  mn.schema.safeParse({ query: { types: ['FRAME'] }, applyStyle: { styleId: 's1', type: 'fill' } }).data.applyStyle,
+  { styleId: 's1', type: 'fill' },
+  'map_nodes applyStyle preserved',
+);
+
 console.log('serverside.mjs OK');
