@@ -56,7 +56,7 @@ assert.deepStrictEqual(resolveMerged('subscribe', { target: 'selection' }), { me
 
 // Final reconcile (phase 3 complete): exact tool count + full category bijection.
 // Server-side-optimization sprint task 3 added list_pages: 147 -> 148.
-assert.strictEqual(TOOLS.length, 148, `expected 148 tools, got ${TOOLS.length}`);
+assert.strictEqual(TOOLS.length, 149, `expected 149 tools, got ${TOOLS.length}`);
 const catNames = Object.values(TOOL_CATEGORIES).flat();
 assert.strictEqual(catNames.length, TOOLS.length, 'category flatten count != TOOLS.length');
 assert.strictEqual(new Set(catNames).size, catNames.length, 'category flatten has duplicate tool names');

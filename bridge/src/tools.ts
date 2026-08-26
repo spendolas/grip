@@ -40,7 +40,7 @@ export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
     'get_components', 'search_nodes', 'find_with_criteria', 'get_plugin_data', 'get_overrides', 'get_instances',
     'get_selection_colors', 'get_top_level_frame', 'get_style_consumers', 'get_publish_status', 'get_relaunch_data',
     'get_audit', 'list_pages'],
-  write: ['set_node_property', 'create_node', 'delete_node', 'clone_node', 'move_node', 'group',
+  write: ['set_node_property', 'create_node', 'create_tree', 'delete_node', 'clone_node', 'move_node', 'group',
     'set_selection', 'scroll_to', 'map_nodes', 'set_viewport', 'rescale', 'lock_aspect_ratio',
     'unlock_aspect_ratio', 'create_section', 'set_skip_invisible_instance_children', 'set_grid_child_position',
     'set_relaunch_data', 'run_script'],
@@ -463,6 +463,21 @@ export const TOOLS: ToolDef[] = [
     name: 'delete_node',
     description: 'Delete a node by id.',
     schema: z.object({ nodeId: z.string() }),
+  },
+  {
+    name: 'create_tree',
+    category: 'write',
+    description:
+      "Build a nested node subtree from one spec in a single call. spec = { type, props?, children? } (recursive). Reuses create_node's type factory + set_node_property for props. Capped at 2000 nodes. Returns the created id tree.",
+    schema: z.object({
+      parentId: z.string().optional(),
+      index: z.number().int().nonnegative().optional(),
+      spec: z.object({
+        type: z.string(),
+        props: z.record(z.any()).optional(),
+        children: z.array(z.any()).optional(),
+      }).passthrough(),
+    }),
   },
   {
     name: 'set_variable_value',

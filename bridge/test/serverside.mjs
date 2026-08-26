@@ -11,7 +11,7 @@ const catNames = new Set(Object.values(TOOL_CATEGORIES).flat());
 for (const n of [
   'get_audit',
   'list_pages',
-  // TODO(task 4): 'create_tree',
+  'create_tree',
   // TODO(task 5): 'replace_text',
 ]) {
   assert.ok(names.has(n), `${n} registered in TOOLS`);
@@ -25,5 +25,9 @@ assert.ok(audit.schema.safeParse({ allPages: true, maxNodes: 1000 }).success, 'g
 const listPages = TOOLS.find((t) => t.name === 'list_pages');
 assert.ok(listPages, 'list_pages tool def exists');
 assert.ok(listPages.schema.safeParse({}).success, 'list_pages schema');
+
+const createTree = TOOLS.find((t) => t.name === 'create_tree');
+assert.ok(createTree, 'create_tree tool def exists');
+assert.ok(createTree.schema.safeParse({ spec: { type: 'FRAME' } }).success, 'create_tree schema');
 
 console.log('serverside.mjs OK');

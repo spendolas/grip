@@ -198,7 +198,8 @@ type ToolMethod =
   | 'edit_annotation_category'
   | 'delete_annotation_category'
   | 'get_audit'
-  | 'list_pages';
+  | 'list_pages'
+  | 'create_tree';
 
 interface ToolRequest {
   kind: 'request';
@@ -1284,6 +1285,35 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
     case 'create_node': {
       const node = await createByType(params);
       return { id: node.id, name: node.name };
+    }
+    case 'create_tree': {
+      let created = 0;
+      const CAP = 2000;
+      const build = async (spec: any, parent: BaseNode & ChildrenMixin, index?: number): Promise<any> => {
+        if (++created > CAP) throw new Error(`create_tree exceeded ${CAP} nodes`);
+        // createByType defaults its own parent to figma.currentPage (no
+        // parentId passed here); the insertChild/appendChild below then
+        // reparents the freshly-created node onto the real target parent —
+        // Figma's appendChild moves rather than duplicates a node, so this
+        // is a plain (cheap) reparent, not a double-parent.
+        const node = await createByType({ type: spec.type, props: spec.props });
+        if (typeof index === 'number') parent.insertChild(index, node);
+        else parent.appendChild(node);
+        const out: any = { id: node.id, name: node.name };
+        if (Array.isArray(spec.children) && spec.children.length) {
+          if (!hasChildren(node)) throw new Error(`${spec.type} cannot contain children`);
+          out.children = [];
+          for (const c of spec.children) out.children.push(await build(c, node as any));
+        }
+        return out;
+      };
+      let parent: BaseNode & ChildrenMixin = figma.currentPage;
+      if (params.parentId) {
+        const p = await getNode(params.parentId);
+        if (!hasChildren(p)) throw new Error(`Parent ${params.parentId} cannot contain children`);
+        parent = p as any;
+      }
+      return await build(params.spec, parent, params.index);
     }
     case 'delete_node': {
       const n = await getNode(params.nodeId);
