@@ -978,6 +978,16 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       const scopes: BaseNode[] = [];
       if (params.scope) {
         scopes.push(await getNode(params.scope));
+      } else if (Array.isArray(params.pageIds) && params.pageIds.length) {
+        // Search ONLY the named pages — load just these, not the whole file.
+        // Lets a caller batch a big multi-page file (e.g. 5-10 pages/call)
+        // instead of allPages' loadAllPagesAsync timing out on 97 pages.
+        for (const pid of params.pageIds) {
+          const n = await getNode(String(pid));
+          if (n.type !== 'PAGE') throw new Error(`Not a page: ${pid}`);
+          await (n as PageNode).loadAsync();
+          scopes.push(n);
+        }
       } else if (params.allPages) {
         await figma.loadAllPagesAsync();
         scopes.push(...figma.root.children);
@@ -3333,7 +3343,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.4.1';
+const PLUGIN_VERSION = '0.4.2';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie

@@ -20,9 +20,16 @@ assert.ok(!t.schema.safeParse({ fillType: 'BOGUS' }).success, 'bad fillType reje
 // existing params still work (no regression)
 assert.ok(t.schema.safeParse({ type: 'TEXT', fillHex: '#FF0000', maxResults: 10 }).success, 'existing params still valid');
 
+// pageIds batch param (scales allPages to bounded per-call page batches)
+const pp = t.schema.safeParse({ type: 'FRAME', pageIds: ['0:1', '2:3'] });
+assert.ok(pp.success, 'schema accepts pageIds');
+assert.deepStrictEqual(pp.data.pageIds, ['0:1', '2:3'], 'pageIds preserved as string[]');
+assert.ok(!t.schema.safeParse({ pageIds: 'not-an-array' }).success, 'pageIds must be an array');
+
 // advertised JSON schema surfaces the new params
 const js = toolInputSchema('search_nodes');
 assert.ok(js.properties.fillType && js.properties.hasStyle && js.properties.hasBoundVariable, 'toolInputSchema advertises new params');
 assert.ok(Array.isArray(js.properties.fillType.enum) && js.properties.fillType.enum.includes('GRADIENT'), 'fillType enum advertised incl GRADIENT');
+assert.ok(js.properties.pageIds && js.properties.pageIds.type === 'array', 'toolInputSchema advertises pageIds array');
 
 console.log('search-nodes.mjs OK');
