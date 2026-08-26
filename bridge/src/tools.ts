@@ -468,7 +468,7 @@ export const TOOLS: ToolDef[] = [
     name: 'create_tree',
     category: 'write',
     description:
-      "Build a nested node subtree from one spec in a single call. spec = { type, props?, children? } (recursive). Reuses create_node's type factory + set_node_property for props. Capped at 2000 nodes. Returns the created id tree.",
+      "Build a nested node subtree from one spec in a single call. spec = { type, props?, children? } (recursive), plus any create_node top-level fields (name, x, y, width, height, componentId, selectAfter) — they pass through per-node. type:'INSTANCE' requires componentId. Reuses create_node's type factory + set_node_property for props. Capped at 2000 nodes. Returns the created id tree.",
     schema: z.object({
       parentId: z.string().optional(),
       index: z.number().int().nonnegative().optional(),

@@ -1297,7 +1297,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         // reparents the freshly-created node onto the real target parent —
         // Figma's appendChild moves rather than duplicates a node, so this
         // is a plain (cheap) reparent, not a double-parent.
-        const node = await createByType({ type: spec.type, props: spec.props });
+        const node = await createByType({ ...spec, children: undefined });
         if (typeof index === 'number') parent.insertChild(index, node);
         else parent.appendChild(node);
         const out: any = { id: node.id, name: node.name };
@@ -1333,6 +1333,10 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
           nodes.push(...(pg.findAllWithCriteria({ types: ['TEXT'] }) as SceneNode[]));
         }
       } else {
+        if (params.pageId && !params.scope) {
+          const p = await getNode(params.pageId);
+          if (p.type !== 'PAGE') throw new Error(`Not a page: ${params.pageId}`);
+        }
         nodes = await findNodes({ types: ['TEXT'], scope: params.scope, page: params.pageId });
       }
       const matched = nodes.length;
@@ -2728,23 +2732,32 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
           // setter. Mirrors apply_style's exact branching (code.ts:1495-1529),
           // not applyProperty's sync PASSTHROUGH assignment.
           const sn = n as any;
-          if (st.type === 'text') {
-            if ('setTextStyleIdAsync' in sn) await sn.setTextStyleIdAsync(st.styleId);
-            else sn.textStyleId = st.styleId;
-          } else if (st.type === 'effect') {
-            if ('setEffectStyleIdAsync' in sn) await sn.setEffectStyleIdAsync(st.styleId);
-            else sn.effectStyleId = st.styleId;
-          } else if (st.type === 'grid') {
-            if ('setGridStyleIdAsync' in sn) await sn.setGridStyleIdAsync(st.styleId);
-            else sn.gridStyleId = st.styleId;
-          } else if (st.type === 'stroke') {
-            if ('setStrokeStyleIdAsync' in sn) await sn.setStrokeStyleIdAsync(st.styleId);
-            else sn.strokeStyleId = st.styleId;
-          } else {
-            if ('setFillStyleIdAsync' in sn) await sn.setFillStyleIdAsync(st.styleId);
-            else sn.fillStyleId = st.styleId;
+          const slotProp = st.type === 'text' ? 'textStyleId'
+            : st.type === 'effect' ? 'effectStyleId'
+            : st.type === 'grid' ? 'gridStyleId'
+            : st.type === 'stroke' ? 'strokeStyleId'
+            : 'fillStyleId';
+          // Node lacks this style slot (e.g. a LINE has no fillStyleId) —
+          // skip without setting `acted`, so it isn't miscounted as applied.
+          if (slotProp in sn) {
+            if (st.type === 'text') {
+              if ('setTextStyleIdAsync' in sn) await sn.setTextStyleIdAsync(st.styleId);
+              else sn.textStyleId = st.styleId;
+            } else if (st.type === 'effect') {
+              if ('setEffectStyleIdAsync' in sn) await sn.setEffectStyleIdAsync(st.styleId);
+              else sn.effectStyleId = st.styleId;
+            } else if (st.type === 'grid') {
+              if ('setGridStyleIdAsync' in sn) await sn.setGridStyleIdAsync(st.styleId);
+              else sn.gridStyleId = st.styleId;
+            } else if (st.type === 'stroke') {
+              if ('setStrokeStyleIdAsync' in sn) await sn.setStrokeStyleIdAsync(st.styleId);
+              else sn.strokeStyleId = st.styleId;
+            } else {
+              if ('setFillStyleIdAsync' in sn) await sn.setFillStyleIdAsync(st.styleId);
+              else sn.fillStyleId = st.styleId;
+            }
+            acted = true;
           }
-          acted = true;
         }
         if (acted) applied++;
       }, { budget, chunk });
