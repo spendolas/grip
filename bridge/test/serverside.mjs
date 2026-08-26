@@ -12,7 +12,7 @@ for (const n of [
   'get_audit',
   'list_pages',
   'create_tree',
-  // TODO(task 5): 'replace_text',
+  'replace_text',
 ]) {
   assert.ok(names.has(n), `${n} registered in TOOLS`);
   assert.ok(catNames.has(n), `${n} categorised`);
@@ -60,6 +60,25 @@ assert.deepStrictEqual(
   mn.schema.safeParse({ query: { types: ['FRAME'] }, applyStyle: { styleId: 's1', type: 'fill' } }).data.applyStyle,
   { styleId: 's1', type: 'fill' },
   'map_nodes applyStyle preserved',
+);
+
+// Task 6: replace_text bulk find/replace.
+const replaceText = TOOLS.find((t) => t.name === 'replace_text');
+assert.ok(replaceText, 'replace_text tool def exists');
+assert.ok(
+  replaceText.schema.safeParse({ find: 'foo', replace: 'bar' }).success,
+  'replace_text minimal schema',
+);
+assert.ok(
+  replaceText.schema.safeParse({
+    find: 'foo', replace: 'bar', regex: true, scope: 'n1', pageId: 'p1', allPages: false, budget: 500, chunk: 50,
+  }).success,
+  'replace_text full schema',
+);
+assert.strictEqual(
+  replaceText.schema.safeParse({ find: 'foo' }).success,
+  false,
+  'replace_text requires replace',
 );
 
 console.log('serverside.mjs OK');

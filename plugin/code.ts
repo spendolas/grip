@@ -199,7 +199,8 @@ type ToolMethod =
   | 'delete_annotation_category'
   | 'get_audit'
   | 'list_pages'
-  | 'create_tree';
+  | 'create_tree'
+  | 'replace_text';
 
 interface ToolRequest {
   kind: 'request';
@@ -1314,6 +1315,41 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         parent = p as any;
       }
       return await build(params.spec, parent, params.index);
+    }
+    case 'replace_text': {
+      const find = String(params.find);
+      const repl = String(params.replace);
+      const useRegex = Boolean(params.regex);
+      const budget = typeof params.budget === 'number' && params.budget > 0 ? params.budget : 10000;
+      const chunk = typeof params.chunk === 'number' && params.chunk > 0 ? params.chunk : 100;
+      // findNodes doesn't know `allPages` — walk pages ourselves (typed
+      // findAllWithCriteria per page, same cheap-stub approach search_nodes
+      // uses) rather than paying loadAllPagesAsync up front on a big file.
+      let nodes: SceneNode[];
+      if (params.allPages) {
+        nodes = [];
+        for (const pg of figma.root.children as PageNode[]) {
+          await pg.loadAsync();
+          nodes.push(...(pg.findAllWithCriteria({ types: ['TEXT'] }) as SceneNode[]));
+        }
+      } else {
+        nodes = await findNodes({ types: ['TEXT'], scope: params.scope, page: params.pageId });
+      }
+      const matched = nodes.length;
+      const truncated = matched > budget;
+      let changed = 0;
+      await forEachNode(nodes, async (n) => {
+        const t = n as TextNode;
+        const next = useRegex
+          ? t.characters.replace(new RegExp(find, 'g'), repl)
+          : t.characters.split(find).join(repl);
+        if (next === t.characters) return;
+        const fonts = t.getRangeAllFontNames(0, t.characters.length);
+        await Promise.all(fonts.map((f) => figma.loadFontAsync(f)));
+        t.characters = next;
+        changed++;
+      }, { budget, chunk });
+      return { matched, changed, truncated };
     }
     case 'delete_node': {
       const n = await getNode(params.nodeId);

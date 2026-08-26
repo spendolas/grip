@@ -4,7 +4,8 @@ import { resolveToolScope, toolInScope, CORE_TOOL_NAMES, META_TOOL_NAMES, TOOL_C
 
 // Phase 3 task 6 (3b): storage/ui/slides/subscribe cluster merge landed 157 -> 146.
 // Server-side-optimization sprint task 3 added list_pages: 147 -> 148.
-assert.strictEqual(TOOLS.length, 149, `TOOLS.length should be 149, got ${TOOLS.length}`);
+// Server-side-optimization sprint task 6 added replace_text: 149 -> 150.
+assert.strictEqual(TOOLS.length, 150, `TOOLS.length should be 150, got ${TOOLS.length}`);
 
 // Every tool has exactly one category; every core/meta name is a real tool.
 const allNames = new Set(TOOLS.map((t) => t.name));
