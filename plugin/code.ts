@@ -3292,6 +3292,22 @@ async function applyProperty(node: SceneNode, property: string, value: any) {
       t.characters = String(value);
       return;
     }
+    // Style-id props are READ-ONLY under documentAccess:dynamic-page — a plain
+    // `node.fillStyleId = x` throws ("Use setFillStyleIdAsync instead"). Route
+    // through the async setter (with sync fallback for non-dynamic-page), matching
+    // apply_style. Covers set_node_property / map_nodes {set} / create_tree props.
+    case 'fillStyleId':
+    case 'strokeStyleId':
+    case 'effectStyleId':
+    case 'gridStyleId':
+    case 'textStyleId': {
+      must(property in sn, `no ${property} on this node`);
+      const sid = value == null ? '' : String(value);
+      const setter = `set${property.charAt(0).toUpperCase()}${property.slice(1)}Async`;
+      if (setter in sn) await sn[setter](sid);
+      else sn[property] = sid;
+      return;
+    }
     case 'fontName':
     case 'fontFamily':
     case 'fontWeight': {
@@ -3603,7 +3619,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.5.0';
+const PLUGIN_VERSION = '0.5.1';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
