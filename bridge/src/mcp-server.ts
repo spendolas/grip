@@ -5,8 +5,8 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { v4 as uuid } from 'uuid';
-import { readFile, writeFile, stat, open } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { readFile, writeFile, stat, open, mkdir } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   TOOLS, toolInputSchema, resolveToolScope, toolInScope, toolCategorySummary, toolDetail,
@@ -14,6 +14,38 @@ import {
 } from './tools.js';
 import type { PluginBridge } from './ws-server.js';
 import type { McpSession, WSEvent } from './types.js';
+
+// File extension per export format, for auto temp-file naming.
+const EXPORT_EXT: Record<string, string> = {
+  SVG: 'svg', PNG: 'png', JPG: 'jpg', PDF: 'pdf', CSS: 'css', JSON: 'json',
+  MP4: 'mp4', GIF: 'gif', WEBM: 'webm',
+};
+
+// Best-effort pixel dimensions from a raster buffer's header — PNG (IHDR) and
+// JPEG (SOF marker) only. Returns undefined for anything else (PDF, unknown),
+// so callers spread it and simply omit width/height when unavailable.
+function rasterDimensions(buf: Buffer): { width: number; height: number } | undefined {
+  try {
+    // PNG: \x89PNG, then IHDR width/height as big-endian u32 at offsets 16/20.
+    if (buf.length >= 24 && buf.readUInt32BE(0) === 0x89504e47) {
+      return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+    }
+    // JPEG: scan segments for a Start-Of-Frame marker (C0–CF, excluding
+    // C4/C8/CC), whose payload holds height then width as big-endian u16.
+    if (buf.length >= 4 && buf[0] === 0xff && buf[1] === 0xd8) {
+      let o = 2;
+      while (o + 9 < buf.length) {
+        if (buf[o] !== 0xff) { o++; continue; }
+        const marker = buf[o + 1];
+        if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+          return { height: buf.readUInt16BE(o + 5), width: buf.readUInt16BE(o + 7) };
+        }
+        o += 2 + buf.readUInt16BE(o + 2); // skip this segment
+      }
+    }
+  } catch { /* malformed header — just omit dims */ }
+  return undefined;
+}
 
 // Read last N bytes of the bridge log without slurping the whole thing.
 async function tailLog(maxBytes = 8192): Promise<string> {
@@ -369,34 +401,58 @@ export function createSession(bridge: PluginBridge): LiveSession {
       }
     }
 
-    // Export-to-disk. A raster export returns base64 in `data`; even a
-    // modest PNG (~165KB) blows the MCP tool-result token limit, so the
-    // agent gets an error instead of an image. When `path` is set, the
-    // bridge writes the bytes to disk itself (like upload_image_from_path in
-    // reverse) and returns just {path, format, bytes} — no giant payload
-    // crosses MCP. PNG/JPG/PDF decode from base64; SVG/CSS/JSON write as text.
-    // Video formats always produce large binary — inline base64 would blow
-    // the MCP token limit. Refuse them without a `path`.
+    // Export defaults to disk. A raster/video export returns base64 in `data`;
+    // that base64 lands in the MCP tool_result and accumulates IRREVERSIBLY in
+    // the consuming agent's context — 94 inline exports once made a resumed Hub
+    // session 39MB (82% base64), re-cached every turn until the watchdog killed
+    // it. So the bridge writes bytes to disk itself and returns a tiny
+    // {path, format, bytes, width?, height?}; the agent Reads the file only if
+    // it actually needs pixels. Path selection:
+    //   • explicit `path`        → write there
+    //   • `inline: true`         → return base64 in `data` (opt-in; NOT video)
+    //   • default (raster/video) → auto-write to a temp file, return its path
+    //   • text (SVG/CSS/JSON), no path, not inline → returned inline (cheap)
     if (name === 'export_node') {
-      const fmt = (parsed.data as any)?.format;
-      if ((fmt === 'MP4' || fmt === 'GIF' || fmt === 'WEBM') && typeof (parsed.data as any)?.path !== 'string') {
-        return errorResult(`export_node ${fmt} requires a 'path' (video is written to disk, never returned inline).`);
+      const d = parsed.data as Record<string, unknown>;
+      const fmt = String(d.format ?? '');
+      const isText = fmt === 'SVG' || fmt === 'CSS' || fmt === 'JSON';
+      const isVideo = fmt === 'MP4' || fmt === 'GIF' || fmt === 'WEBM';
+      const explicitPath = typeof d.path === 'string' ? (d.path as string) : undefined;
+      const inline = d.inline === true;
+
+      if (isVideo && inline) {
+        return errorResult(`export_node ${fmt}: video is never returned inline — omit 'inline' (auto-written to a temp file) or pass a 'path'.`);
       }
-    }
-    if (name === 'export_node' && typeof (parsed.data as any)?.path === 'string') {
-      const { path: outPath, ...exportArgs } = parsed.data as Record<string, unknown> & { path: string };
-      try {
-        const result = (await bridge.request('export_node', exportArgs, session)) as {
-          format: string;
-          data: string;
-        };
-        const isText = result.format === 'SVG' || result.format === 'CSS' || result.format === 'JSON';
-        const buf = isText ? Buffer.from(result.data, 'utf8') : Buffer.from(result.data, 'base64');
-        await writeFile(outPath, buf);
-        return okResult({ path: outPath, format: result.format, bytes: buf.length });
-      } catch (err) {
-        return errorResult(`export_node to '${outPath}' failed: ${(err as Error).message}`);
+
+      // Decide the destination. Inline only when explicitly asked (any raster/
+      // text), or by default for text with no path (SVG/CSS/JSON are small).
+      const wantInline = inline || (isText && !explicitPath);
+      if (!wantInline) {
+        const { path: _p, inline: _i, ...exportArgs } = d;
+        let outPath = explicitPath;
+        if (!outPath) {
+          // Auto temp path: ~/tmpdir/grip-exports/<node>-<ts>.<ext>
+          const dir = join(tmpdir(), 'grip-exports');
+          try { await mkdir(dir, { recursive: true }); }
+          catch (err) { return errorResult(`export_node: could not create temp dir ${dir}: ${(err as Error).message}`); }
+          const nodeTag = String(d.nodeId ?? 'node').replace(/[^\w.-]/g, '_');
+          outPath = join(dir, `${nodeTag}-${Date.now()}.${EXPORT_EXT[fmt] ?? fmt.toLowerCase()}`);
+        }
+        try {
+          const result = (await bridge.request('export_node', exportArgs, session)) as {
+            format: string; data: string;
+          };
+          const asText = result.format === 'SVG' || result.format === 'CSS' || result.format === 'JSON';
+          const buf = asText ? Buffer.from(result.data, 'utf8') : Buffer.from(result.data, 'base64');
+          await writeFile(outPath, buf);
+          const dims = asText ? undefined : rasterDimensions(buf);
+          return okResult({ path: outPath, format: result.format, bytes: buf.length, ...dims });
+        } catch (err) {
+          return errorResult(`export_node to '${outPath}' failed: ${(err as Error).message}`);
+        }
       }
+      // wantInline — fall through to the generic forward, which returns
+      // { format, data: <base64|text> } straight from the plugin.
     }
 
     // Phase 3: merged tools ({op}/{target}-dispatched clusters). Translate

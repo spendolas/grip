@@ -16,7 +16,9 @@ import type { PluginBridge } from './ws-server.js';
 // the IPC and stdio paths use, so routing/binding/rate-limits are shared and
 // HTTP sessions are counted by activeSessionCount() (keeps the daemon warm).
 
-const SESSION_IDLE_MS = 5 * 60_000; // reap a session with no activity this long
+const SESSION_IDLE_MS = Number(process.env.GRIP_HTTP_IDLE_MS ?? 5 * 60_000);   // reap a session with no activity this long
+const PENDING_GRACE_MS = Number(process.env.GRIP_HTTP_PENDING_MS ?? 60_000);   // reap a session that never finished initialize
+const SWEEP_MS = Number(process.env.GRIP_HTTP_SWEEP_MS ?? 60_000);             // how often the reaper runs
 
 interface HttpSession {
   transport: StreamableHTTPServerTransport;
@@ -24,9 +26,21 @@ interface HttpSession {
   lastActivity: number;
 }
 
+// A session created for a new POST but not yet initialized. If initialize
+// never completes (health probe, malformed body, aborted/retried handshake),
+// onsessioninitialized never fires and the LiveSession would otherwise leak —
+// createSession already pushed it to liveSessions, pinning the daemon warm.
+// We hold it here so onclose, the sweep, and shutdown can all reap it.
+interface PendingSession {
+  transport: StreamableHTTPServerTransport;
+  live: LiveSession;
+  createdAt: number;
+}
+
 export class HttpServer {
   private server: HttpNetServer;
   private sessions = new Map<string, HttpSession>();
+  private pending = new Set<PendingSession>();
   private sweepTimer?: NodeJS.Timeout;
 
   constructor(private port: number, private bridge: PluginBridge) {
@@ -82,18 +96,38 @@ export class HttpServer {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => uuid(),
       onsessioninitialized: (id) => {
+        this.pending.delete(pend);                       // graduated → tracked by id
         this.sessions.set(id, { transport, live, lastActivity: Date.now() });
         process.stderr.write(`[grip] http session ${id.slice(0, 8)} initialized (${this.sessions.size} http)\n`);
       },
       onsessionclosed: (id) => this.cleanup(id, 'client DELETE'),
     });
-    await live.server.connect(transport);
+    // Register as pending BEFORE any await, so a connection that dies during
+    // connect()/handleRequest() is still reapable by onclose or the sweep.
+    const pend: PendingSession = { transport, live, createdAt: Date.now() };
+    this.pending.add(pend);
     const serverOnClose = transport.onclose;
     transport.onclose = () => {
       serverOnClose?.();
       if (transport.sessionId) this.cleanup(transport.sessionId, 'transport close');
+      else this.reapPending(pend, 'transport close before init');
     };
-    return transport.handleRequest(req, res);
+    try {
+      await live.server.connect(transport);
+      return await transport.handleRequest(req, res);
+    } catch (err) {
+      // connect/handshake threw before onclose could wire up — reap now.
+      this.reapPending(pend, 'init error');
+      throw err;
+    }
+  }
+
+  // Destroy a never-initialized session's LiveSession (idempotent).
+  private reapPending(pend: PendingSession, reason: string) {
+    if (!this.pending.delete(pend)) return;
+    try { destroySession(pend.live); } catch {}
+    try { void pend.transport.close(); } catch {}
+    process.stderr.write(`[grip] http pending session reaped (${reason})\n`);
   }
 
   // GET (SSE stream) / DELETE (teardown) — must carry a known session id.
@@ -143,7 +177,12 @@ export class HttpServer {
           for (const [id, e] of this.sessions) {
             if (now - e.lastActivity > SESSION_IDLE_MS) this.cleanup(id, 'idle');
           }
-        }, 60_000);
+          // Backstop for the leak: any session still un-initialized past the
+          // grace never will be — reap it even if onclose never fired.
+          for (const p of this.pending) {
+            if (now - p.createdAt > PENDING_GRACE_MS) this.reapPending(p, 'pending timeout');
+          }
+        }, SWEEP_MS);
         this.sweepTimer.unref();
         resolve(true);
       });
@@ -153,6 +192,7 @@ export class HttpServer {
   close() {
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     for (const [id] of this.sessions) this.cleanup(id, 'daemon shutdown');
+    for (const p of [...this.pending]) this.reapPending(p, 'daemon shutdown');
     try { this.server.close(); } catch {}
   }
 }
