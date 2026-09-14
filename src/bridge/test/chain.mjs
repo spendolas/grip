@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 
 const calls = JSON.parse(process.argv[2]);
 
-const bridge = spawn('node', [resolve('dist/index.js')], {
+const bridge = spawn('node', [resolve(new URL('../dist/index.js', import.meta.url).pathname)], {
   stdio: ['pipe', 'pipe', 'inherit'],
 });
 

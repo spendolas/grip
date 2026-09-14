@@ -7,7 +7,7 @@ import { resolve } from 'node:path';
 const tool = process.argv[2] ?? 'get_document';
 const args = process.argv[3] ? JSON.parse(process.argv[3]) : {};
 
-const bridge = spawn('node', [resolve('dist/index.js')], {
+const bridge = spawn('node', [resolve(new URL('../dist/index.js', import.meta.url).pathname)], {
   stdio: ['pipe', 'pipe', 'inherit'],
 });
 

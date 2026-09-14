@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Cap V8's lazy source-rendering work for any Error.stack lookup. Default
 // is 10 frames + full source-position walk per frame, which on hot error
 // paths (heartbeat reject loops, rate-limit retries) lights up the V8

@@ -16,9 +16,9 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const BRIDGE = join(HERE, '..');
-const INSTALL_JS = join(BRIDGE, 'dist', 'install.js');
-const INDEX_JS = join(BRIDGE, 'dist', 'index.js');
+const REPO = join(HERE, '..', '..', '..');
+const INSTALL_JS = join(REPO, 'bridge', 'install.mjs');
+const INDEX_JS = join(REPO, 'bridge', 'grip-bridge.mjs');
 const NODE = process.execPath;
 
 let failures = 0;
@@ -48,12 +48,12 @@ function runInstaller({ fakePlatform, http }) {
     GRIP_FAKE_PLATFORM: fakePlatform,
     PATH: `${stubDir()}:${process.env.PATH}`,
   };
-  const argv = ['install', ...(http ? ['--http'] : [])];
+  const argv = http ? ['--http'] : [];
   const out = execFileSync(NODE, [INSTALL_JS, ...argv], { env, encoding: 'utf8' });
   return { home, appdata, out };
 }
 
-console.log('\n1. Static: dist/index.js carries the win32 branches');
+console.log('\n1. Static: bundled bridge carries the win32 branches');
 {
   const src = readFileSync(INDEX_JS, 'utf8');
   // Match regardless of backslash-escape depth in the emitted source.
@@ -65,7 +65,7 @@ console.log('\n1. Static: dist/index.js carries the win32 branches');
 console.log('\n2. Windows install (GRIP_FAKE_PLATFORM=win32 --http)');
 {
   const { home, appdata } = runInstaller({ fakePlatform: 'win32', http: true });
-  const entry = join(home, '.grip', 'bridge', 'dist', 'index.js');
+  const entry = join(home, '.grip', 'grip-bridge.mjs');
   check('bridge copied to ~/.grip/bridge', existsSync(entry));
 
   const cfg = JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8'));
@@ -78,7 +78,7 @@ console.log('\n2. Windows install (GRIP_FAKE_PLATFORM=win32 --http)');
     const v = readFileSync(vbs, 'utf8');
     check('VBS runs node + entry hidden (window style 0)',
       v.includes('.Run') && v.includes('--daemon --persistent') && /,\s*0\s*,/.test(v));
-    check('VBS references the copied entry', v.includes(join(home, '.grip', 'bridge', 'dist', 'index.js')));
+    check('VBS references the copied entry', v.includes(join(home, '.grip', 'grip-bridge.mjs')));
   }
 }
 
@@ -88,7 +88,7 @@ console.log('\n3. Windows install stdio (GRIP_FAKE_PLATFORM=win32, no --http)');
   const cfg = JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8'));
   const g = cfg.mcpServers?.grip;
   check('stdio registration uses absolute node + entry',
-    g?.command === NODE && g?.args?.[0]?.endsWith(join('.grip', 'bridge', 'dist', 'index.js')),
+    g?.command === NODE && g?.args?.[0]?.endsWith(join('.grip', 'grip-bridge.mjs')),
     JSON.stringify(g));
 }
 
@@ -100,7 +100,7 @@ console.log('\n4. Linux install (GRIP_FAKE_PLATFORM=linux --http)');
   if (existsSync(unit)) {
     const u = readFileSync(unit, 'utf8');
     check('unit ExecStart runs entry --daemon --persistent',
-      u.includes('--daemon --persistent') && u.includes(join(home, '.grip', 'bridge', 'dist', 'index.js')));
+      u.includes('--daemon --persistent') && u.includes(join(home, '.grip', 'grip-bridge.mjs')));
     check('unit installs to default.target', u.includes('WantedBy=default.target'));
   }
 }

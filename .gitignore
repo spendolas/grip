@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Intermediate build output (tsc). Only used for local dev and the test suite —
+# what actually ships is the bundled bridge/ and figma-plugin/ folders.
+src/bridge/dist/
+
+# macOS
+.DS_Store
+
+# Logs / local runtime state
+*.log
+
+# Local memory / scratch (not part of the project)
+.remember/
+
+# Editor / agent local state (worktrees, session config)
+.claude/
+
+# Docs kept locally, not published
+docs/
+
+# ---------------------------------------------------------------------------
+# DELIBERATELY COMMITTED (do not add ignores for these):
+#   figma-plugin/code.js   — built plugin. Users import the folder in Figma
+#                            with no toolchain; it is byte-identical on every
+#                            platform.
+#   bridge/*.mjs           — bundled bridge + installer. Single self-contained
+#                            files so users need no npm install.
+# Both are build artifacts, so rebuild and commit them when source changes:
+#   npm run build
+# ---------------------------------------------------------------------------

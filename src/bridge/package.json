@@ -1,7 +1,7 @@
 {
   "name": "grip-figma-bridge",
   "version": "0.5.2",
-  "description": "Bridge between the Grip Figma plugin and MCP agents — install with: npx grip-figma-bridge install",
+  "description": "Bridge between the Grip Figma plugin and MCP agents \u2014 install with: npx grip-figma-bridge install",
   "main": "dist/index.js",
   "type": "module",
   "engines": {
@@ -12,7 +12,9 @@
     "scripts"
   ],
   "scripts": {
-    "build": "tsc && chmod +x dist/index.js dist/install.js",
+    "build": "npm run compile && npm run bundle",
+    "compile": "tsc",
+    "bundle": "node build.mjs && chmod +x ../../bridge/grip-bridge.mjs ../../bridge/install.mjs",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "test": "node test/scope.mjs",
@@ -33,6 +35,7 @@
     "@types/node": "^20.12.0",
     "@types/uuid": "^9.0.8",
     "@types/ws": "^8.5.12",
+    "esbuild": "^0.28.2",
     "typescript": "^5.5.0"
   }
 }

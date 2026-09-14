@@ -1,0 +1,19 @@
+{
+  "name": "grip",
+  "version": "0.5.2",
+  "private": true,
+  "description": "Figma plugin + local bridge exposing full canvas read/write to MCP agents",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "setup": "npm --prefix src/bridge install && npm --prefix src/plugin install",
+    "build": "npm --prefix src/bridge run build && npm --prefix src/plugin run build",
+    "build:bridge": "npm --prefix src/bridge run build",
+    "build:plugin": "npm --prefix src/plugin run build",
+    "test": "npm --prefix src/bridge test && npm --prefix src/bridge run test:win",
+    "grip:install": "node bridge/install.mjs",
+    "grip:install:http": "node bridge/install.mjs --http"
+  }
+}

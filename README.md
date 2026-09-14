@@ -1,96 +1,59 @@
 # Grip
 
-Figma plugin + local Node bridge that exposes full canvas read/write to MCP agents. Pairs with **Gaffer** (After Effects, separate tool).
+Full Figma canvas read/write for MCP agents. Pairs with **Gaffer** (After Effects, separate tool).
 
-An agent (Claude Code, Claude Hub, any MCP client) talks to a small stdio **shim**; the shim spawns a single detached **daemon** that owns a WebSocket on `:7777`; each Figma window running the plugin connects to that daemon. One daemon serves many agents and many files at once.
+Grip has two halves. The **plugin** runs inside Figma. The **bridge** runs on your machine and is what your agent actually talks to. The plugin is inert on its own — it opens a WebSocket to `127.0.0.1:7777` and waits for the bridge to answer.
+
+```
+your agent  ⇄  bridge (local)  ⇄  Figma plugin  ⇄  the canvas
+```
+
+One bridge serves many agents and many Figma windows at once.
+
+## Install
+
+Nothing to compile. Both halves ship prebuilt.
+
+**1. The bridge** — one file, no dependencies, no npm:
+
+```sh
+node bridge/install.mjs
+```
+
+This copies the bridge to `~/.grip` and registers it with your agent. Add `--http` if you'd rather have an always-on background daemon (Login Item on macOS, Startup entry on Windows, systemd user service on Linux). Without it, nothing stays running and the first agent call starts the bridge on demand.
+
+**2. The plugin** — in Figma, go to **Plugins → Development → Import plugin from manifest…** and choose the **`figma-plugin`** folder.
+
+**3. Check it.** Restart your agent, run the plugin in any Figma file, then ask your agent to read your selection. The small status strip turns green.
+
+Requirements: **Node 18+** and **Figma**. Figma Desktop exists on macOS and Windows; on Linux use Figma in the browser — plugin development import works there too.
+
+## What's in here
+
+```
+figma-plugin/     import this folder in Figma — 3 files, nothing to build
+bridge/           the bridge + installer — single self-contained files
+src/              source for both halves (ignore unless you're changing Grip)
+```
 
 - **[`CLAUDE.md`](./CLAUDE.md)** — architecture (canonical).
 - **[`TOOLS.md`](./TOOLS.md)** — the 150-tool surface (canonical).
-- **[`bridge/README.md`](./bridge/README.md)** — bridge internals.
 
-## Build from this repo
+## Cold start
 
-Clone, then build both halves. `node_modules/`, `bridge/dist/`, and `plugin/build/` are **not** checked in — you regenerate them.
+The Figma sandbox can't launch a local process, so opening the plugin **before** any agent has called Grip shows it disconnected (grey). That's expected — the first agent call starts the bridge and the plugin reconnects within a couple of seconds. Use `--http` if you'd rather it always be running.
 
-Prerequisites: **Node 18+**, **Figma**, and the **Claude Code CLI** (`claude`) if registering there.
-
-**Platforms.** macOS, Windows and Linux are all supported. Figma Desktop exists only on macOS and Windows — on Linux, run Figma in the browser; the plugin reaches the local bridge the same way. The bridge talks to its background daemon over a UNIX socket on macOS/Linux and a named pipe on Windows; this is handled automatically.
+## Developing
 
 ```sh
-git clone <your-repo-url>
-cd grip
+npm run setup     # install dependencies for both halves
+npm run build     # rebuild the plugin and the bridge bundles
+npm test          # test suites
 ```
 
-### 1. Bridge (the MCP server)
+`figma-plugin/code.js` and `bridge/*.mjs` are build artifacts that are **deliberately committed**, so users don't need a toolchain. Rebuild and commit them whenever you change source.
 
-```sh
-cd bridge
-npm install
-npm run build          # tsc → dist/index.js (+ chmod +x)
-```
-
-Then run the installer, which does the registration for you:
-
-```sh
-node dist/install.js install
-```
-
-It copies the built bridge to a stable location (`~/.grip/bridge`) so the registered path survives rebuilds, registers grip with Claude Code, and falls back to writing `~/.claude.json` directly if the `claude` CLI isn't on your PATH. Add `--http` if you want an always-on daemon instead of the on-demand default — a Login Item on macOS, a Startup entry on Windows, a systemd user service on Linux.
-
-Nothing needs to keep running by default: the first agent tool call spawns the detached daemon on demand.
-
-<details>
-<summary>Registering by hand instead</summary>
-
-```sh
-claude mcp add --scope user grip node "$(pwd)/dist/index.js"
-```
-
-The path is stored **absolutely**. Run this from inside `bridge/` so `$(pwd)` resolves correctly, or paste the full absolute path to `dist/index.js`. Other MCP clients: transport `stdio`, `command: node`, `args: ["<abs>/bridge/dist/index.js"]`.
-
-</details>
-
-### 2. Plugin (the Figma side)
-
-Nothing to build — the compiled plugin is checked in. It's a single self-contained file, identical on every platform.
-
-In **Figma → Plugins → Development → Import plugin from manifest…** pick `plugin/manifest.json`. Run the plugin in any file; the 120×32 status strip goes green once connected.
-
-> On Linux, use Figma in the browser — plugin development import works there too.
-
-<details>
-<summary>Building the plugin yourself (only if you change its source)</summary>
-
-```sh
-cd plugin
-npm install
-npm run build          # tsc → build/code.js  (manifest.json points here)
-```
-
-`build/code.js` is committed, so rebuild and commit it whenever you change `plugin/code.ts`.
-
-</details>
-
-### 3. Verify
-
-```sh
-claude mcp list                 # grip listed
-# make one grip call from your agent, then:
-cat ~/.grip-bridge.status       # daemon pid / version / plugin count
-```
-
-## Cold-start note
-
-The Figma sandbox can't launch a local process, so opening the plugin **before** any agent has called grip shows it disconnected (grey). That's expected: the first agent call starts the daemon and the plugin's auto-reconnect latches within ~2s. Make one grip call and the strip greens.
-
-## Develop
-
-```sh
-cd bridge && npm run dev     # tsc --watch
-cd plugin && npm run dev     # tsc --watch — plugin hot-reloads in Figma on rebuild
-```
-
-The bridge picks up changes when its parent MCP client restarts. A **manifest** change requires re-importing in Figma; a code-only change hot-reloads.
+For live work, `npm --prefix src/plugin run dev` watches the plugin (it hot-reloads in Figma); the bridge picks up changes when its parent agent restarts.
 
 ## Licence
 

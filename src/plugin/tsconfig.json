@@ -7,7 +7,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "outDir": "./build"
+    "outDir": "../../figma-plugin"
   },
   "include": ["code.ts", "node_modules/@figma/plugin-typings/index.d.ts"]
 }
