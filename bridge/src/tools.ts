@@ -400,7 +400,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'export_node',
     description:
-      "Export a node. Formats: SVG, PNG, JPG, PDF, CSS, JSON, and video MP4/GIF/WEBM. Constraint can be SCALE/WIDTH/HEIGHT. Raster/video exports are WRITTEN TO DISK by default and return a tiny {path, format, bytes, width?, height?} — never inline base64 (that accumulates irreversibly in your context). Pass `path` for an explicit location, else it auto-writes to a temp file. Then Read the file only if you need the pixels. SVG/CSS/JSON return inline (they're small). Set `inline:true` to force base64 back (not allowed for video). Call grip_capabilities {tool:'export_node'} for video (animated-frame) rules and the response-cap lever.",
+      "Export a node. Formats: SVG, PNG, JPG, PDF, CSS, JSON, video MP4/GIF/WEBM. Constraint SCALE/WIDTH/HEIGHT. Raster/video are WRITTEN TO DISK and return {path, format, bytes, width?, height?} — never inline base64. Pass `path` for a location, else a temp file is used; Read it only if you need pixels. SVG/CSS/JSON return inline. `inline:true` forces base64 (not for video). Call grip_capabilities {tool:'export_node'} for video rules and the response-cap lever.",
     detail:
       'Raster (PNG/JPG/PDF) and video (MP4/GIF/WEBM) default to disk — no base64 crosses MCP unless you set inline:true (raster only). This is deliberate: inline image base64 in tool_results is re-cached every turn of a resumed session and once bloated a Hub session to 39MB. Video works only on an ANIMATED top-level frame (uses Figma Motion) and takes fps / quality (MP4/WEBM) / loopCount (GIF); a large video may exceed the 8MB WS response cap — raise GRIP_RESPONSE_CAP_BYTES if so.',
     schema: z.object({
