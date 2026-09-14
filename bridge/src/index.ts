@@ -21,7 +21,13 @@ import { runProxy } from './proxy.js';
 
 const WS_PORT = Number(process.env.GRIP_WS_PORT ?? 7777);
 const HTTP_PORT = Number(process.env.GRIP_HTTP_PORT ?? 7778);
-const IPC_PATH = process.env.GRIP_IPC_PATH ?? join(tmpdir(), 'grip-bridge.sock');
+// IPC endpoint. On Windows, Node's local-domain sockets ARE named pipes and
+// the path MUST live under \\.\pipe\ — a filesystem path silently fails to
+// bind/connect. On macOS/Linux it's a UNIX socket file in tmpdir. GRIP_IPC_PATH
+// overrides either.
+const IS_WIN = process.platform === 'win32';
+const IPC_PATH = process.env.GRIP_IPC_PATH ??
+  (IS_WIN ? '\\\\.\\pipe\\grip-bridge' : join(tmpdir(), 'grip-bridge.sock'));
 const STATUS_PATH = process.env.GRIP_STATUS_PATH ?? join(homedir(), '.grip-bridge.status');
 const IS_DAEMON = process.argv.includes('--daemon');
 // Set by the launchd LaunchAgent. Disables idle-exit + lifetime ceiling so
@@ -202,7 +208,10 @@ async function runDaemon(bridge: PluginBridge) {
   // (we still own the port), wedging the whole system. Detect the missing
   // socket and exit so the next shim spawns a clean daemon that rebinds
   // both port and socket. existsSync on a unix socket path is cheap.
-  setInterval(() => {
+  // Windows named pipes are NOT filesystem entries — existsSync always
+  // returns false for \\.\pipe\..., so this self-heal only applies to the
+  // UNIX-socket platforms (the /var/folders sweep it guards is macOS anyway).
+  if (!IS_WIN) setInterval(() => {
     if (!existsSync(IPC_PATH)) {
       process.stderr.write('[grip] daemon: IPC socket vanished, exiting for clean respawn\n');
       bridge.close();
@@ -288,6 +297,7 @@ function spawnDaemonDetached() {
   const child = spawn(process.execPath, [self, '--daemon'], {
     detached: true,          // new session/group — immune to our parent's group signals
     stdio: 'ignore',         // fully decoupled; daemon logs to the file via stderr mirror
+    windowsHide: true,       // no flashing console window on Windows detach
     env: process.env,
   });
   child.unref();

@@ -5,14 +5,16 @@ Figma plugin + local Node bridge that exposes full canvas read/write to MCP agen
 An agent (Claude Code, Claude Hub, any MCP client) talks to a small stdio **shim**; the shim spawns a single detached **daemon** that owns a WebSocket on `:7777`; each Figma window running the plugin connects to that daemon. One daemon serves many agents and many files at once.
 
 - **[`CLAUDE.md`](./CLAUDE.md)** — architecture (canonical).
-- **[`TOOLS.md`](./TOOLS.md)** — the 178-tool surface (canonical).
+- **[`TOOLS.md`](./TOOLS.md)** — the 150-tool surface (canonical).
 - **[`bridge/README.md`](./bridge/README.md)** — bridge internals.
 
 ## Build from this repo
 
 Clone, then build both halves. `node_modules/`, `bridge/dist/`, and `plugin/build/` are **not** checked in — you regenerate them.
 
-Prerequisites: **Node 20+**, **Figma Desktop**, and the **Claude Code CLI** (`claude`) if registering there.
+Prerequisites: **Node 18+**, **Figma**, and the **Claude Code CLI** (`claude`) if registering there.
+
+**Platforms.** macOS, Windows and Linux are all supported. Figma Desktop exists only on macOS and Windows — on Linux, run Figma in the browser; the plugin reaches the local bridge the same way. The bridge talks to its background daemon over a UNIX socket on macOS/Linux and a named pipe on Windows; this is handled automatically.
 
 ```sh
 git clone <your-repo-url>
@@ -27,15 +29,26 @@ npm install
 npm run build          # tsc → dist/index.js (+ chmod +x)
 ```
 
-Register it with Claude Code (writes user-scope config to `~/.claude.json`):
+Then run the installer, which does the registration for you:
+
+```sh
+node dist/install.js install
+```
+
+It copies the built bridge to a stable location (`~/.grip/bridge`) so the registered path survives rebuilds, registers grip with Claude Code, and falls back to writing `~/.claude.json` directly if the `claude` CLI isn't on your PATH. Add `--http` if you want an always-on daemon instead of the on-demand default — a Login Item on macOS, a Startup entry on Windows, a systemd user service on Linux.
+
+Nothing needs to keep running by default: the first agent tool call spawns the detached daemon on demand.
+
+<details>
+<summary>Registering by hand instead</summary>
 
 ```sh
 claude mcp add --scope user grip node "$(pwd)/dist/index.js"
 ```
 
-> The path is stored **absolutely**. Run the `claude mcp add` line from inside `bridge/` so `$(pwd)` resolves correctly, or paste the full absolute path to `dist/index.js`. Other MCP clients: transport `stdio`, `command: node`, `args: ["<abs>/bridge/dist/index.js"]`.
+The path is stored **absolutely**. Run this from inside `bridge/` so `$(pwd)` resolves correctly, or paste the full absolute path to `dist/index.js`. Other MCP clients: transport `stdio`, `command: node`, `args: ["<abs>/bridge/dist/index.js"]`.
 
-Nothing to keep running — the first agent tool call spawns the detached daemon on demand.
+</details>
 
 ### 2. Plugin (the Figma side)
 
