@@ -91,3 +91,7 @@ cd plugin && npm run dev     # tsc --watch — plugin hot-reloads in Figma on re
 ```
 
 The bridge picks up changes when its parent MCP client restarts. A **manifest** change requires re-importing in Figma; a code-only change hot-reloads.
+
+## Licence
+
+[PolyForm Shield 1.0.0](./LICENSE.md) — use it freely, including commercially at work; modify and share it. You may not use it to build something that competes with Grip.
