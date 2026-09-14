@@ -4,8 +4,13 @@
 // SCOPE: this exercises the platform-specific *logic* — the win32 named-pipe
 // IPC endpoint, the Startup-folder VBS launcher, the systemd unit, and the MCP
 // registration — by forcing the branches with GRIP_FAKE_PLATFORM on this host.
-// It does NOT boot a real daemon on Windows; true runtime confirmation still
-// needs an actual Windows machine (named-pipe bind/connect, detached spawn).
+// It is a fast guard against regressions, not a substitute for running Windows.
+//
+// VERIFIED ON REAL WINDOWS 2026-09-14 (Windows 11 26200, Node 24): the bundle
+// downloaded from GitHub bound \\.\pipe\grip-bridge and :7777, the installer
+// placed a single file in %USERPROFILE%\.grip and registered the MCP server,
+// and a shim spawned the detached daemon and attached over the pipe
+// (activeMcpSessions: 1). Re-run on Windows if the IPC or spawn paths change.
 //
 // Run: node test/win-smoke.mjs   (after `npm run build`)
 
@@ -106,6 +111,6 @@ console.log('\n4. Linux install (GRIP_FAKE_PLATFORM=linux --http)');
 }
 
 console.log(failures === 0
-  ? '\n\x1b[32mAll Windows/Linux install-path checks passed.\x1b[0m\n(Real Windows runtime — named-pipe bind + detached spawn — still needs a Windows box.)\n'
+  ? '\n\x1b[32mAll Windows/Linux install-path checks passed.\x1b[0m\n(Logic only. Real Windows runtime was verified separately — see header.)\n'
   : `\n\x1b[31m${failures} check(s) failed.\x1b[0m\n`);
 process.exit(failures === 0 ? 0 : 1);
