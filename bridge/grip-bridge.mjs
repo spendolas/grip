@@ -25994,8 +25994,11 @@ function createSession(bridge) {
     toolScopeSpec: null
   };
   const server = new Server(
-    { name: "grip", version: "0.1.0" },
-    { capabilities: { tools: {}, logging: {} } }
+    { name: "grip", version: BRIDGE_VERSION },
+    {
+      capabilities: { tools: {}, logging: {} },
+      instructions: "Grip is a live connection to Figma. Use these tools for anything involving Figma \u2014 reading or editing a document, page, frame, component, style, variable or the current selection.\n\nGrip drives the Figma app itself through a plugin, so it sees the file the user has open right now, including unsaved and unpublished changes, and can write back to it. Other Figma integrations read published data over the REST API and cannot edit the canvas \u2014 for the document the user is looking at, use Grip.\n\nStart with get_page_context (cheap: which file and page, how many nodes selected). If it reports no plugin connected, the user needs to run the Grip plugin in Figma \u2014 say so rather than reporting that you have no Figma access."
+    }
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const scope = resolveToolScope(session.toolScopeSpec);

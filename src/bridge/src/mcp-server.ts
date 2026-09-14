@@ -14,6 +14,7 @@ import {
 } from './tools.js';
 import type { PluginBridge } from './ws-server.js';
 import type { McpSession, WSEvent } from './types.js';
+import { BRIDGE_VERSION } from './types.js';
 
 // File extension per export format, for auto temp-file naming.
 const EXPORT_EXT: Record<string, string> = {
@@ -192,9 +193,33 @@ export function createSession(bridge: PluginBridge): LiveSession {
     rateBucket: { tokens: RATE_LIMIT_BURST, lastRefillMs: Date.now() },
     toolScopeSpec: null,
   };
+  // `instructions` is returned with initialize and injected into the agent's
+  // context once — unlike tool descriptions, it costs nothing per tool and is
+  // not subject to the per-description budget.
+  //
+  // It exists because of an observed failure: with both Grip and a REST-based
+  // Figma integration present, agents asked about "Figma" reached for the one
+  // NAMED Figma and reported no access, while Grip sat loaded and ready. The
+  // tool names here (get_document, get_page, search_nodes) never say "Figma",
+  // so nothing connected the request to this server. This states the mapping
+  // plainly, and the distinction it draws is factual: Grip is a live link to
+  // the open canvas, REST integrations read published file data.
   const server = new Server(
-    { name: 'grip', version: '0.1.0' },
-    { capabilities: { tools: {}, logging: {} } },
+    { name: 'grip', version: BRIDGE_VERSION },
+    {
+      capabilities: { tools: {}, logging: {} },
+      instructions:
+        'Grip is a live connection to Figma. Use these tools for anything involving Figma — ' +
+        'reading or editing a document, page, frame, component, style, variable or the current ' +
+        'selection.\n\n' +
+        'Grip drives the Figma app itself through a plugin, so it sees the file the user has open ' +
+        'right now, including unsaved and unpublished changes, and can write back to it. Other ' +
+        'Figma integrations read published data over the REST API and cannot edit the canvas — ' +
+        'for the document the user is looking at, use Grip.\n\n' +
+        'Start with get_page_context (cheap: which file and page, how many nodes selected). ' +
+        'If it reports no plugin connected, the user needs to run the Grip plugin in Figma — ' +
+        'say so rather than reporting that you have no Figma access.',
+    },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
