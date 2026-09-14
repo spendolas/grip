@@ -52,13 +52,24 @@ The path is stored **absolutely**. Run this from inside `bridge/` so `$(pwd)` re
 
 ### 2. Plugin (the Figma side)
 
+Nothing to build — the compiled plugin is checked in. It's a single self-contained file, identical on every platform.
+
+In **Figma → Plugins → Development → Import plugin from manifest…** pick `plugin/manifest.json`. Run the plugin in any file; the 120×32 status strip goes green once connected.
+
+> On Linux, use Figma in the browser — plugin development import works there too.
+
+<details>
+<summary>Building the plugin yourself (only if you change its source)</summary>
+
 ```sh
-cd ../plugin
+cd plugin
 npm install
 npm run build          # tsc → build/code.js  (manifest.json points here)
 ```
 
-Then in **Figma Desktop → Plugins → Development → Import plugin from manifest…** and pick `plugin/manifest.json`. Run the plugin in any file; the 120×32 status strip goes green once connected.
+`build/code.js` is committed, so rebuild and commit it whenever you change `plugin/code.ts`.
+
+</details>
 
 ### 3. Verify
 
