@@ -1,6 +1,8 @@
 # Grip
 
-Full Figma canvas read/write for MCP agents. Pairs with **Gaffer** (After Effects, separate tool).
+Full Figma canvas read/write for MCP agents.
+
+Pairs with **[Gaffer](https://github.com/spendolas/gaffer-ae)**, which does the same job for After Effects. Enable both and one agent can read a design out of Figma and build it in After Effects in a single conversation.
 
 Grip has two halves. The **plugin** runs inside Figma. The **bridge** runs on your machine and is what your agent actually talks to. The plugin is inert on its own — it opens a WebSocket to `127.0.0.1:7777` and waits for the bridge to answer.
 
