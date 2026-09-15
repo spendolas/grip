@@ -16,6 +16,11 @@
         background: var(--c-disconnected);
         transition: background 180ms ease;
       }
+      /* Clickable only while there is no bridge — that is the one state where
+         the plugin has something useful to offer (where to install it). When
+         connected, a stray click must not navigate anything. */
+      #state.actionable { cursor: pointer; }
+      #state.actionable:hover { filter: brightness(1.08); }
       #state.connected { background: var(--c-connected); }
       #state.warning { background: var(--c-warning); }
       #state.error { background: var(--c-error); }
@@ -43,6 +48,14 @@
         current = name;
         el.classList.remove('connected', 'warning', 'error');
         if (name !== 'disconnected') el.classList.add(name);
+        // Grey means no bridge is listening. The plugin can't start one — the
+        // Figma sandbox has no way to launch a local process — so offer the
+        // install instructions instead of just sitting there grey.
+        const needsSetup = name === 'disconnected' || name === 'error';
+        el.classList.toggle('actionable', needsSetup);
+        el.title = needsSetup
+          ? 'Grip bridge not running — click for setup instructions'
+          : '';
         applyPulse();
       }
 
@@ -146,6 +159,16 @@
           flashError();
         }
       };
+
+      el.addEventListener('click', () => {
+        if (!el.classList.contains('actionable')) return;
+        parent.postMessage({ pluginMessage: { kind: 'openSetup' } }, '*');
+      });
+
+      // Initialise title/cursor for the starting (disconnected) state, which
+      // setState() skips because `current` already equals 'disconnected'.
+      el.classList.add('actionable');
+      el.title = 'Grip bridge not running — click for setup instructions';
 
       connect();
     </script>

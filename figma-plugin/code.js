@@ -3826,6 +3826,15 @@ figma.ui.onmessage = async (msg) => {
         sendHello();
         return;
     }
+    // The strip is clickable while disconnected. The plugin alone cannot start
+    // the bridge — Figma's sandbox can't launch a local process — so the only
+    // useful thing it can offer is where to go and install it. Opening the
+    // README rather than a separate hosted page keeps one copy of the install
+    // instructions instead of two that drift apart.
+    if (msg && msg.kind === 'openSetup') {
+        figma.openExternal('https://github.com/spendolas/grip#install');
+        return;
+    }
     if (!msg || msg.kind !== 'request')
         return;
     figma.ui.postMessage({ kind: 'busy', busy: true });
