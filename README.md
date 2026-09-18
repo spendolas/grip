@@ -36,6 +36,7 @@ Requirements: **Node 18+** and **Figma**. Figma Desktop exists on macOS and Wind
 figma-plugin/     import this folder in Figma — 3 files, nothing to build
 bridge/           the bridge + installer — single self-contained files
 src/              source for both halves (ignore unless you're changing Grip)
+assets/           artwork for the Community listing — not used at runtime
 ```
 
 - **[`CLAUDE.md`](./CLAUDE.md)** — architecture (canonical).
