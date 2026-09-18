@@ -157,6 +157,63 @@ and back. Two requirements:
 
 Amber persists until clicked or timed out, so it needs no minimum display time.
 
+### Pulse patterns to explore
+
+A symmetric ease-in-out sine — what the busy pulse uses — is the pattern you pick
+when you want to signal without interrupting. Amber is the opposite: it is asking
+someone to stop and act. A gentle breath is likely the wrong instrument, so treat
+the waveform as an open design question rather than a detail.
+
+Two things work against a smooth sine here:
+
+- **Peripheral vision responds to abrupt change**, not gradual transition. The user
+  is looking at the canvas, not at a 120x32 strip in the corner. A slow fade is
+  close to invisible outside the fovea.
+- **Habituation.** Anything perfectly regular is tuned out within a minute or two,
+  and this state can persist for as long as it takes someone to notice it.
+
+Candidates, roughly from calm to insistent:
+
+**Asymmetric ramp.** Fast rise, slow decay. The sharp onset gets noticed; the
+gentle fall keeps it from feeling like an alarm. Probably the best first thing to
+try — closest to the current feel while fixing the salience problem.
+
+**Double pulse (heartbeat).** Two quick blips, then a longer rest. Biological
+rhythms are unusually attention-grabbing and read as "waiting" rather than
+"broken". Distinct from anything else in the UI at a glance.
+
+**Dim and hold.** Fade down, hold at the bottom, return. The hold is a
+discontinuity, and discontinuity is what the eye catches — smooth motion is what
+it filters out.
+
+**Escalation.** Start subtle and grow more insistent the longer it goes
+unanswered. Polite to someone mid-thought, progressively harder to ignore. Pairs
+naturally with the timeout, since the escalation curve and the give-up point are
+the same clock.
+
+**Sweep.** A lighter band travelling across the strip. Positional motion is more
+peripherally salient than uniform opacity change — but at 120x32 it may just read
+as mush. Worth trying, easy to discard.
+
+**Syncopation.** Irregular intervals so habituation never settles. Risks feeling
+broken rather than deliberate; probably a modifier on one of the above rather than
+a pattern in its own right.
+
+Constraints any candidate has to satisfy:
+
+- Tolerable for minutes, not seconds. It persists until answered, and this lives
+  inside a tool where people are concentrating. Annoying is a real failure mode,
+  not a safe default.
+- Clearly distinct from the green busy pulse in motion, not just colour.
+- Honour `prefers-reduced-motion` — degrade to static amber, or a single slow
+  change. Animation as the only channel for a required action excludes people.
+
+**How to decide.** These are close to impossible to judge from description. Build a
+throwaway page with the candidates side by side at exactly 120x32, then look away
+and work on something else — the only honest test is whether it catches you when
+you are not looking at it. Judging them while staring directly at the strip will
+pick the wrong winner every time.
+
 ### While we are in here: the green busy pulse never completes
 
 Separate bug, same strip. The busy pulse is a 900ms cycle, but real tool calls are
