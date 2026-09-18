@@ -98,6 +98,69 @@ exists only for the feature that genuinely requires it.
 - Seeding needs edit access. View-only files fall back to name and session id.
 - It writes to the document. Invisible, but a write, and some users will object.
 
+## Confirming the file: the amber handshake
+
+A pasted figma.com link is the most natural way a user says "work on this" — and
+on a public build it fails today, because the key in the URL matches no session.
+The URL still carries the file name as a slug, which is the way in:
+
+```
+figma.com/design/tc5ASMCGihXdPgtaMxub8t/Plugin-Dev?node-id=570-4100
+                 |___ real key ____|    |__ name __|
+```
+
+Match the slug against connected sessions' `root.name` to find candidates. But a
+name match is an inference, not proof — so ask.
+
+**The strip turns amber and slowly blinks in the file Grip believes it is in.**
+Clicking confirms. This is correct by construction: the signal appears in a
+specific file, so a wrong guess shows up somewhere the user did not mean and
+simply never gets clicked. Nothing can be confirmed by accident.
+
+On confirmation the plugin writes the real key from the URL into the document, so
+the cost is paid once and every later session resolves silently — with working
+deep links, since it is Figma's own key.
+
+### Why this beats asking for a paste
+
+No key literacy, no URL typing, no settings panel. A file key is not something a
+human can verify by looking at it; "is this the file you meant?" is. The question
+is asked in the one place where the answer is obvious.
+
+### Multi-candidate resolution
+
+When several sessions match — same file name, or an ambiguous slug — blink amber
+in **all** of them and let whichever is clicked win. This turns
+`ambiguous_active_file`, currently a hard error, into a one-click resolution, with
+the human supplying context the bridge cannot have.
+
+Worth considering on the org build too, not just public: it is a better answer to
+ambiguity than an error message in either case.
+
+### The signal
+
+Amber is currently dead. Its only trigger in `ui.html` is a WebSocket close with
+code `1000` and reason `"duplicate"`, and the bridge never sends that — grep finds
+it nowhere in `src/bridge/src`. It is a colour, a CSS class and a branch that has
+never fired, left behind when the bridge stopped rejecting second connections.
+
+Retire that branch as part of this work, so amber has exactly one meaning.
+
+Blink spec: a slow breath, around a 2s cycle, opacity easing 1 -> ~0.45 -> 1. It
+must read as clearly slower than the existing 900ms busy pulse, or the two states
+are indistinguishable at a glance. Static amber is too easy to miss for something
+that is asking the user to act.
+
+### Failure path
+
+If nobody clicks, time out and say so plainly — "couldn't confirm which file you
+meant, nothing was changed" — rather than hanging or quietly picking one.
+
+### Limitation
+
+It requires the user to look at Figma. Fine for a once-per-file handshake, wrong
+for anything more frequent.
+
 ## Capability tiering
 
 The `hello` already carries capabilities. Whether a real `fileKey` arrives is
