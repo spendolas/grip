@@ -146,10 +146,49 @@ never fired, left behind when the bridge stopped rejecting second connections.
 
 Retire that branch as part of this work, so amber has exactly one meaning.
 
-Blink spec: a slow breath, around a 2s cycle, opacity easing 1 -> ~0.45 -> 1. It
-must read as clearly slower than the existing 900ms busy pulse, or the two states
-are indistinguishable at a glance. Static amber is too easy to miss for something
-that is asking the user to act.
+Blink spec: a slow breath, around a 2s cycle, easing down to roughly 0.45 opacity
+and back. Two requirements:
+
+- **Clearly slower than the 900ms busy pulse.** Colour differs, but motion is what
+  the eye catches first; at similar timings the two states are indistinguishable.
+- **A deeper dip than the busy pulse's 0.55.** This has to be noticed peripherally
+  by someone looking at the canvas, not at a 120x32 strip. Static amber is far too
+  easy to miss for something that is asking the user to act.
+
+Amber persists until clicked or timed out, so it needs no minimum display time.
+
+### While we are in here: the green busy pulse never completes
+
+Separate bug, same strip. The busy pulse is a 900ms cycle, but real tool calls are
+far shorter than that. Measured in one session against a live file:
+
+```
+rescale 183 stars      211 ms
+rescale 183 stars      226 ms
+recolour 200 stars     238 ms
+create 205 stars       767 ms
+clone 200 icons       1255 ms
+```
+
+Most calls finish in a quarter to a half of one cycle. The class is removed
+part-way through, so the strip dims slightly, snaps back, and the user sees
+nothing. The indicator is calibrated for operations far longer than the ones that
+actually happen — it is clearly visible on an artificial 8-second call and almost
+never in real use.
+
+The fix is **not** a minimum display time. Two rules:
+
+1. **Never stop mid-cycle.** When busy reaches zero, do not remove the class
+   immediately — mark it to stop and remove it on the next `animationiteration`,
+   so the strip always lands back at full opacity on a cycle boundary.
+2. **Coalesce, do not restart.** If `busy: true` arrives during that wind-down,
+   cancel the pending stop and let the *same* animation continue. Removing and
+   re-adding the class restarts the CSS animation, which makes a burst of quick
+   calls stutter — each one visibly jumping back to the start. Continuing the
+   existing animation makes a burst read as one uninterrupted breath.
+
+`animationiteration` is the primitive for both: it fires at each cycle boundary,
+which is the only safe moment to stop.
 
 ### Failure path
 
