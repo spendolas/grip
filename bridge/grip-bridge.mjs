@@ -23909,6 +23909,7 @@ var RichRead = {
   includePluginData: external_exports.boolean().optional(),
   pluginDataKeys: external_exports.array(external_exports.string()).optional(),
   includeBoundVariables: external_exports.boolean().optional(),
+  stubs: external_exports.boolean().optional(),
   properties: external_exports.array(external_exports.string()).optional()
 };
 var TOOLS = [
@@ -24895,6 +24896,7 @@ var richReadProps = {
   includePluginData: { type: "boolean" },
   pluginDataKeys: { type: "array", items: { type: "string" } },
   includeBoundVariables: { type: "boolean" },
+  stubs: { type: "boolean", description: "Default true: nodes cut off by depth/maxNodes list their children as stubs (truncated:true). false \u2192 no stub layer; depth N is exactly N levels and the cut node carries childCount." },
   properties: {
     type: "array",
     items: { type: "string" },

@@ -362,7 +362,10 @@ Always present: `id`, `name`, `type`. Other fields appear when the node has them
 | `boundVariables` | Only when `includeBoundVariables: true`. Map of field → `{ variableId, type }`. |
 | `pluginData` | Only when `includePluginData: true`. `{ key: value }`. Filter with `pluginDataKeys`. |
 | `exportSettings` | Array of Figma export presets. |
-| `children` | Recursive serialized children, OR at max depth, stubs `{ id, name, type, childCount }`. |
+| `children` | Recursive serialized children, OR at max depth, stubs `{ id, name, type, childCount }`. The node whose children were cut off by `depth` or the node budget carries `truncated: true`. |
+| `childCount` | Only with `stubs: false`, on a node cut off at max depth (it then has no `children`). |
+
+Read params (`get_node`/`get_nodes`/`get_selection`/`get_page`): `depth: N` serializes N levels below the root fully, then lists one more layer as stubs. Pass `stubs: false` to drop that layer so `depth: N` returns exactly N levels (cut nodes get `childCount` + `truncated: true` instead of `children`).
 
 ---
 

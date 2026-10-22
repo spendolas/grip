@@ -298,6 +298,7 @@ const RichRead = {
   includePluginData: z.boolean().optional(),
   pluginDataKeys: z.array(z.string()).optional(),
   includeBoundVariables: z.boolean().optional(),
+  stubs: z.boolean().optional(),
   properties: z.array(z.string()).optional(),
 };
 
@@ -1295,6 +1296,7 @@ const richReadProps = {
   includePluginData: { type: 'boolean' },
   pluginDataKeys: { type: 'array', items: { type: 'string' } },
   includeBoundVariables: { type: 'boolean' },
+  stubs: { type: 'boolean', description: 'Default true: nodes cut off by depth/maxNodes list their children as stubs (truncated:true). false → no stub layer; depth N is exactly N levels and the cut node carries childCount.' },
   properties: {
     type: 'array',
     items: { type: 'string' },

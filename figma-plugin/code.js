@@ -454,8 +454,11 @@ async function serializeNode(node, optsOrDepth, maxDepth, includeChildren) {
         // Collapse to stubs at max depth OR when the node budget is spent.
         const budgetSpent = !!opts.budget && opts.budget.remaining <= 0;
         if (opts.depth >= opts.maxDepth || budgetSpent) {
-            out.children = kids.map(stub);
-            if (budgetSpent && kids.length)
+            if (opts.stubs === false && !budgetSpent)
+                out.childCount = kids.length;
+            else
+                out.children = kids.map(stub);
+            if (kids.length)
                 out.truncated = true;
         }
         else {
@@ -3228,7 +3231,7 @@ function serializeOptsFrom(params, maxDepth, override = {}) {
     const budget = maxNodes === 0 || (typeof maxNodes === 'number' && maxNodes < 0)
         ? undefined
         : { remaining: typeof maxNodes === 'number' ? maxNodes : DEFAULT_READ_NODE_BUDGET };
-    return Object.assign({ depth: 0, maxDepth, includeChildren: params.includeChildren !== false, includePluginData: !!params.includePluginData, pluginDataKeys: params.pluginDataKeys, includeBoundVariables: !!params.includeBoundVariables, properties, includeParent: !!params.includeParent, budget }, override);
+    return Object.assign({ depth: 0, maxDepth, includeChildren: params.includeChildren !== false, includePluginData: !!params.includePluginData, pluginDataKeys: params.pluginDataKeys, includeBoundVariables: !!params.includeBoundVariables, properties, includeParent: !!params.includeParent, stubs: params.stubs !== false, budget }, override);
 }
 // Trim a serialized tree by node type / name regex post-walk. Cheaper to
 // keep these out of serializeNode (which doesn't know about scope-wide
