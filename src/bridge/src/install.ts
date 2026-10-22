@@ -136,7 +136,20 @@ function daemonMac() {
 </plist>
 `);
   const launcher = join(macos, 'grip-daemon');
-  writeFileSync(launcher, `#!/bin/bash\nexec "${process.execPath}" "${ENTRY}" --daemon --persistent\n`);
+  // Keep-alive: launchd can't be used (program lives on a noowners volume for
+  // some setups), so this app supervises the daemon itself and respawns it.
+  // Quitting the app (TERM/INT) stops the child and ends the loop.
+  writeFileSync(launcher, [
+    '#!/bin/bash',
+    'trap \'kill "$CHILD" 2>/dev/null; exit 0\' TERM INT',
+    'while true; do',
+    `  "${process.execPath}" "${ENTRY}" --daemon --persistent &`,
+    '  CHILD=$!',
+    '  wait "$CHILD"',
+    '  sleep 5',
+    'done',
+    '',
+  ].join('\n'));
   chmodSync(launcher, 0o755);
   try {
     execFileSync('osascript', ['-e',

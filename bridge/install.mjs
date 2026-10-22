@@ -122,9 +122,17 @@ function daemonMac() {
 `
   );
   const launcher = join(macos, "grip-daemon");
-  writeFileSync(launcher, `#!/bin/bash
-exec "${process.execPath}" "${ENTRY}" --daemon --persistent
-`);
+  writeFileSync(launcher, [
+    "#!/bin/bash",
+    `trap 'kill "$CHILD" 2>/dev/null; exit 0' TERM INT`,
+    "while true; do",
+    `  "${process.execPath}" "${ENTRY}" --daemon --persistent &`,
+    "  CHILD=$!",
+    '  wait "$CHILD"',
+    "  sleep 5",
+    "done",
+    ""
+  ].join("\n"));
   chmodSync(launcher, 493);
   try {
     execFileSync(
