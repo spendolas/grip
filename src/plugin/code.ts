@@ -386,9 +386,10 @@ interface SerializeOpts {
   includeBoundVariables?: boolean;
   properties?: Set<string>;    // when set, only emit these top-level fields
   includeParent?: boolean;     // emit parent stub
-  // At the depth limit, list the next layer as {id,name,type,childCount}
-  // stubs (default). false → omit it entirely so depth N is exactly N levels;
-  // the node then carries childCount instead.
+  // At the depth limit, omit the next layer so depth N is exactly N levels;
+  // the cut node carries childCount + truncated instead. true → list that
+  // layer as {id,name,type,childCount} stubs. (A spent node budget always
+  // collapses to stubs.)
   stubs?: boolean;
   // Shared mutable node budget. Bounds total nodes walked so a huge
   // selection can't produce a multi-minute / multi-MB serialize that
@@ -627,7 +628,7 @@ async function serializeNode(
     // Collapse to stubs at max depth OR when the node budget is spent.
     const budgetSpent = !!opts.budget && opts.budget.remaining <= 0;
     if (opts.depth >= opts.maxDepth || budgetSpent) {
-      if (opts.stubs === false && !budgetSpent) out.childCount = kids.length;
+      if (opts.stubs !== true && !budgetSpent) out.childCount = kids.length;
       else out.children = kids.map(stub);
       if (kids.length) out.truncated = true;
     } else {
@@ -3121,7 +3122,7 @@ function serializeOptsFrom(params: any, maxDepth: number, override: Partial<Seri
     includeBoundVariables: !!params.includeBoundVariables,
     properties,
     includeParent: !!params.includeParent,
-    stubs: params.stubs !== false,
+    stubs: params.stubs === true,
     budget,
     ...override,
   };

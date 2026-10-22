@@ -24896,7 +24896,7 @@ var richReadProps = {
   includePluginData: { type: "boolean" },
   pluginDataKeys: { type: "array", items: { type: "string" } },
   includeBoundVariables: { type: "boolean" },
-  stubs: { type: "boolean", description: "Default true: nodes cut off by depth/maxNodes list their children as stubs (truncated:true). false \u2192 no stub layer; depth N is exactly N levels and the cut node carries childCount." },
+  stubs: { type: "boolean", description: "Default false: depth N is exactly N levels; a node cut off by depth carries childCount + truncated:true. true \u2192 list the next layer as {id,name,type,childCount} stubs." },
   properties: {
     type: "array",
     items: { type: "string" },
