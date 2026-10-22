@@ -35,7 +35,8 @@ export type ToolCategory =
   | 'library' | 'assets' | 'storage' | 'subscribe' | 'misc';
 
 export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
-  meta: ['grip_health', 'grip_diagnose', 'list_files', 'set_active_file', 'get_page_context', 'grip_capabilities'],
+  meta: ['grip_health', 'grip_diagnose', 'list_files', 'set_active_file', 'get_page_context', 'grip_capabilities',
+    'grip_load_tools'],
   read: ['get_document', 'get_page', 'get_node', 'get_nodes', 'get_selection', 'get_styles', 'get_variables',
     'get_components', 'search_nodes', 'find_with_criteria', 'get_plugin_data', 'get_overrides', 'get_instances',
     'get_selection_colors', 'get_top_level_frame', 'get_style_consumers', 'get_publish_status', 'get_relaunch_data',
@@ -201,6 +202,55 @@ export function toolInScope(name: string, scope: ToolScope): boolean {
   return scope.categories.has(categoryOf(name));
 }
 
+// Runtime scope change: load and/or unload tokens ('all' | 'core' | category
+// names) against the session's current spec. Pure so it can be tested without
+// MCP. Refuses when the current scope lacks run_script: such a scope is a
+// deliberate read-only restriction, and self-escalating would defeat it
+// (a scope WITH run_script already reaches everything, so nothing is lost).
+// Unload only drops categories: 'core' and 'meta' are never removable (core
+// holds run_script — dropping it would strand the session), and unloading
+// 'all' resets to core. Tools that are in core stay even if their category
+// is unloaded.
+export function mergeToolScope(
+  currentSpec: string | null | undefined,
+  load: string[],
+  unload: string[] = [],
+): { ok: true; spec: string; added: string[]; removed: string[]; unknown: string[]; ignored: string[] } | { ok: false; error: string } {
+  const before = resolveToolScope(currentSpec);
+  if (!toolInScope('run_script', before)) {
+    return { ok: false, error: 'This session was launched with a restricted tool scope (no run_script), so it cannot change its own scope. Relaunch with a different GRIP_TOOLS / ?tools= instead.' };
+  }
+  const cur = (currentSpec ?? '').trim();
+  const tokens = new Set(cur ? cur.split(',').map((t) => t.trim()).filter(Boolean) : ['core']);
+  const isCat = (t: string) => Object.prototype.hasOwnProperty.call(TOOL_CATEGORIES, t);
+  const unknown: string[] = [];
+  const ignored: string[] = [];
+  for (const raw of load) {
+    const t = raw.trim();
+    if (t === 'all' || t === 'core' || isCat(t)) tokens.add(t);
+    else if (t) unknown.push(t);
+  }
+  for (const raw of unload) {
+    const t = raw.trim();
+    if (!t) continue;
+    if (t === 'core' || t === 'meta') { ignored.push(t); continue; }
+    if (t === 'all') { tokens.clear(); tokens.add('core'); continue; }
+    if (!isCat(t)) { unknown.push(t); continue; }
+    if (tokens.has('all')) {
+      tokens.delete('all');
+      tokens.add('core');
+      for (const c of Object.keys(TOOL_CATEGORIES)) if (c !== 'meta') tokens.add(c);
+    }
+    tokens.delete(t);
+  }
+  const spec = tokens.has('all') ? 'all' : [...tokens].join(',');
+  const after = resolveToolScope(spec);
+  const names = TOOLS.map((x) => x.name);
+  const added = names.filter((n) => toolInScope(n, after) && !toolInScope(n, before));
+  const removed = names.filter((n) => toolInScope(n, before) && !toolInScope(n, after));
+  return { ok: true, spec, added, removed, unknown, ignored };
+}
+
 // The "there's more" directory: one row per non-meta category, with whether
 // any of its tools are reachable under the given scope. Powers the
 // grip_capabilities tool (mcp-server.ts) — pure + testable independent of
@@ -321,8 +371,15 @@ export const TOOLS: ToolDef[] = [
     name: 'grip_capabilities',
     category: 'meta',
     description:
-      "List grip's tool categories and which are loaded in THIS agent's scope. Use it to discover tools that aren't injected: a category shows loaded:false when it's out of scope — reach it now via run_script, or relaunch with GRIP_TOOLS including that category for the typed tools.",
+      "List grip's tool categories and which are loaded in THIS agent's scope. Use it to discover tools that aren't injected: a category shows loaded:false when it's out of scope — load it with grip_load_tools.",
     schema: z.object({ tool: z.string().optional() }),
+  },
+  {
+    name: 'grip_load_tools',
+    category: 'meta',
+    description:
+      "Load/unload tool categories (see grip_capabilities) for this session; changes apply next turn.",
+    schema: z.object({ categories: z.array(z.string()).optional(), unload: z.array(z.string()).optional() }),
   },
   {
     name: 'get_deep_link',

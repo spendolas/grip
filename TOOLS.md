@@ -1,6 +1,6 @@
 # Grip MCP Tools
 
-150 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
+151 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
 
 Phase 3 merged 19 clusters of "N verbs on one object" into single op-enum-dispatched tools — the former per-verb tools no longer exist as standalone entries below; call them via the merged tool's `op`/`target` discriminator (e.g. `group {op:'group'|'ungroup', nodeId(s)}`, `bind_to_variable {target:'property'|'paint'|'effect'|'layout_grid', ...}`, `timer {op:'start'|'stop'|'pause'|'resume'}`). Per-op params are in `grip_capabilities {tool:'<name>'}`.
 
@@ -702,7 +702,7 @@ Applied via `set_node_property` fills/strokes/effects (fully-shaped objects pass
 
 ## Tool scoping (`GRIP_TOOLS`)
 
-By default an agent only sees the `core` scope (~35 always-useful tools), not the full 150 — this keeps per-turn schema weight small. Widen the scope per agent:
+By default an agent only sees the `core` scope (~35 always-useful tools), not the full 151 — this keeps per-turn schema weight small. Widen the scope per agent — at launch (below) or mid-session with `grip_load_tools {categories:['motion', …]}` (or `'all'`), and drop them again with `grip_load_tools {unload:['motion']}` (`'all'` resets to core; `core`/`meta` can't be unloaded, and tools that are also in core stay). Each change refreshes the tool list via `tools/list_changed` (applies next turn; clients that ignore the notification can still use `run_script`). Not available to restricted scopes without `run_script` (e.g. `GRIP_TOOLS=read`):
 
 - **stdio:** set env `GRIP_TOOLS=core,motion` on the agent process (delivered to the daemon as an IPC control frame, alongside `GRIP_FILE`).
 - **HTTP:** pass `?tools=core,motion` on the `/mcp` URL.
@@ -711,7 +711,7 @@ Tokens are comma-separated. `core` (the default when `GRIP_TOOLS` is unset) and 
 
 `meta`, `read`, `write`, `pages`, `styles`, `variables`, `components`, `text`, `export`, `vector`, `motion`, `figjam`, `slides`, `devmode`, `library`, `assets`, `storage`, `subscribe`, `misc`.
 
-`meta` tools (`grip_health`, `grip_diagnose`, `list_files`, `set_active_file`, `get_page_context`, `grip_capabilities`) are always present regardless of scope. Regardless of scope, `run_script` (in `core` and in `write`) can reach any Plugin API surface, including tools your scope doesn't expose typed schemas for.
+`meta` tools (`grip_health`, `grip_diagnose`, `list_files`, `set_active_file`, `get_page_context`, `grip_capabilities`, `grip_load_tools`) are always present regardless of scope. Regardless of scope, `run_script` (in `core` and in `write`) can reach any Plugin API surface, including tools your scope doesn't expose typed schemas for.
 
 Call `grip_capabilities` to see every category, its tool count, a sample of its tools, and whether it's currently `loaded` for your session — the way to discover what a narrower scope is hiding, and to know what to add to `GRIP_TOOLS`/`?tools=` to get it back as typed tools instead of reaching it via `run_script`.
 

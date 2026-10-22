@@ -1,11 +1,12 @@
 import assert from 'node:assert';
 import { TOOLS } from '../dist/tools.js';
-import { resolveToolScope, toolInScope, CORE_TOOL_NAMES, META_TOOL_NAMES, TOOL_CATEGORIES, toolCategorySummary, toolDetail } from '../dist/tools.js';
+import { mergeToolScope, resolveToolScope, toolInScope, CORE_TOOL_NAMES, META_TOOL_NAMES, TOOL_CATEGORIES, toolCategorySummary, toolDetail } from '../dist/tools.js';
 
 // Phase 3 task 6 (3b): storage/ui/slides/subscribe cluster merge landed 157 -> 146.
 // Server-side-optimization sprint task 3 added list_pages: 147 -> 148.
 // Server-side-optimization sprint task 6 added replace_text: 149 -> 150.
-assert.strictEqual(TOOLS.length, 150, `TOOLS.length should be 150, got ${TOOLS.length}`);
+// grip_load_tools (runtime scope widening): 150 -> 151.
+assert.strictEqual(TOOLS.length, 151, `TOOLS.length should be 151, got ${TOOLS.length}`);
 
 // Every tool has exactly one category; every core/meta name is a real tool.
 const allNames = new Set(TOOLS.map((t) => t.name));
@@ -97,5 +98,37 @@ for (const [name, kw] of Object.entries(DIET)) {
 import { resolveToolScope as _rs, toolInScope as _tis } from '../dist/tools.js';
 const coreDescBytes = TOOLS.filter((t) => _tis(t.name, _rs('core'))).reduce((a, t) => a + (t.description || '').length, 0);
 assert.ok(coreDescBytes < 7000, `core description bytes should drop below 7000, got ${coreDescBytes}`);
+
+// grip_load_tools / mergeToolScope
+assert.ok(toolInScope('grip_load_tools', resolveToolScope('read')), 'grip_load_tools is meta (always listed)');
+const m1 = mergeToolScope(null, ['motion']);
+assert.ok(m1.ok && m1.spec === 'core,motion', `default+motion => core,motion, got ${m1.spec}`);
+assert.ok(m1.added.includes('animation_style') && !m1.added.includes('set_node_property'), 'adds motion only');
+const m2 = mergeToolScope('core,motion', ['motion', 'variables', 'bogus']);
+assert.ok(m2.ok && m2.spec === 'core,motion,variables' && m2.unknown[0] === 'bogus', 'idempotent + unknown reported');
+assert.ok(!m2.added.includes('animation_style'), 'already-loaded tools are not re-reported');
+const m3 = mergeToolScope('core', ['all']);
+assert.ok(m3.ok && m3.spec === 'all' && m3.added.length > 0, "'all' collapses spec");
+assert.strictEqual(mergeToolScope('read', ['write']).ok, false, 'read-only scope (no run_script) cannot self-escalate');
+assert.ok(mergeToolScope('core', ['bogus']).added.length === 0, 'unknown-only adds nothing');
+
+// unload
+const u1 = mergeToolScope('core,motion,variables', [], ['motion']);
+assert.ok(u1.ok && u1.spec === 'core,variables', `unload motion => core,variables, got ${u1.spec}`);
+assert.ok(u1.removed.includes('animation_style') && !u1.removed.includes('set_variable_value'), 'removes motion only');
+const u2 = mergeToolScope('core,write', [], ['write']);
+assert.ok(u2.ok && !u2.removed.includes('set_node_property'), 'tools also in core survive unloading their category');
+assert.ok(u2.removed.includes('rescale'), 'non-core write tools are removed');
+const u3 = mergeToolScope('all', [], ['motion']);
+assert.ok(u3.ok && u3.spec.startsWith('core') && !u3.spec.includes('motion') && u3.spec.includes('figjam'), "unload from 'all' expands then subtracts");
+assert.ok(toolInScope('create_sticky', resolveToolScope(u3.spec)) && !toolInScope('animation_style', resolveToolScope(u3.spec)));
+const u4 = mergeToolScope('core,motion,figjam', [], ['all']);
+assert.ok(u4.ok && u4.spec === 'core', "unload 'all' resets to core");
+const u5 = mergeToolScope('core,motion', [], ['core', 'meta', 'bogus']);
+assert.ok(u5.ok && u5.spec === 'core,motion' && u5.ignored.join() === 'core,meta' && u5.unknown[0] === 'bogus', 'core/meta cannot be unloaded');
+assert.ok(toolInScope('run_script', resolveToolScope(u5.spec)), 'run_script survives any unload');
+const u6 = mergeToolScope('core', ['motion'], ['motion']);
+assert.ok(u6.ok && u6.spec === 'core', 'unload wins when a category is in both');
+assert.strictEqual(mergeToolScope('read', [], ['read']).ok, false, 'restricted scope cannot change itself');
 
 console.log('scope.mjs OK');

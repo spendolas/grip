@@ -9,7 +9,7 @@ import { readFile, writeFile, stat, open, mkdir } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  TOOLS, toolInputSchema, resolveToolScope, toolInScope, toolCategorySummary, toolDetail,
+  TOOLS, toolInputSchema, resolveToolScope, mergeToolScope, toolInScope, toolCategorySummary, toolDetail,
   MERGED_TOOLS, resolveMerged,
 } from './tools.js';
 import type { PluginBridge } from './ws-server.js';
@@ -207,7 +207,7 @@ export function createSession(bridge: PluginBridge): LiveSession {
   const server = new Server(
     { name: 'grip', version: BRIDGE_VERSION },
     {
-      capabilities: { tools: {}, logging: {} },
+      capabilities: { tools: { listChanged: true }, logging: {} },
       instructions:
         'Grip is a live connection to Figma. Use these tools for anything involving Figma — ' +
         'reading or editing a document, page, frame, component, style, variable or the current ' +
@@ -355,6 +355,31 @@ export function createSession(bridge: PluginBridge): LiveSession {
       }
     }
 
+    if (name === 'grip_load_tools') {
+      const a = parsed.data as { categories?: string[]; unload?: string[] };
+      if (!a.categories?.length && !a.unload?.length) return errorResult("Pass `categories` to load and/or `unload` to drop (category names from grip_capabilities, or 'all').");
+      const r = mergeToolScope(session.toolScopeSpec, a.categories ?? [], a.unload ?? []);
+      if (!r.ok) return errorResult(r.error);
+      session.toolScopeSpec = r.spec;
+      if (r.added.length || r.removed.length) {
+        setTimeout(() => {
+          server.sendToolListChanged().catch((err: Error) => {
+            process.stderr.write(`[grip] tools/list_changed failed: ${err.message}\n`);
+          });
+        }, 0);
+      }
+      return okResult({
+        scope: r.spec,
+        added: r.added,
+        removed: r.removed,
+        unknownCategories: r.unknown,
+        ignored: r.ignored.length ? `${r.ignored.join(', ')} cannot be unloaded` : undefined,
+        note: r.added.length || r.removed.length
+          ? 'Tool list refreshed; changes apply on your next turn. If your client does not refresh, call tools via run_script.'
+          : 'No change (already loaded/unloaded, or unknown category).',
+      });
+    }
+
     // grip_capabilities: the "there's more" directory. Bridge-side only —
     // no plugin round-trip — so it answers even with no Figma window open.
     // Tells a scoped agent which categories exist and whether THIS session's
@@ -372,7 +397,7 @@ export function createSession(bridge: PluginBridge): LiveSession {
       return okResult({
         scope: session.toolScopeSpec ?? 'core (default)',
         howToChange:
-          "Relaunch with env GRIP_TOOLS=core,<category> (stdio) or ?tools=core,<category> (HTTP); or call the API directly via run_script (if run_script is in scope). Call grip_capabilities {tool:'<name>'} for a tool's full detail.",
+          "Call grip_load_tools {categories:[...]} to load a category into this session. Or set the launch scope: env GRIP_TOOLS=core,<category> (stdio) / ?tools=core,<category> (HTTP). run_script reaches any tool regardless. Call grip_capabilities {tool:'<name>'} for a tool's full detail.",
         categories: toolCategorySummary(scope),
       });
     }
