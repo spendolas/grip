@@ -72,7 +72,7 @@ All local paint / text / effect / grid styles.
 ### `get_variables`
 All local variable collections + variables.
 - Params: none.
-- Returns: array of collections; variables include `description`, `scopes`, `codeSyntax`, `hiddenFromPublishing`, `key`, `remote`, `valuesByMode`. Color values emit `{ hex, opacity }`. Aliases emit `{ aliasOf: id }`.
+- Returns: array of collections; variables include `description`, `scopes`, `codeSyntax`, `hiddenFromPublishing`, `key`, `remote`, `valuesByMode`. Color values emit `{ hex, opacity }`. Aliases emit `{ aliasOf: id }`. Composed colors emit `{ color: {hex,opacity}|{aliasOf}, opacity: number|{aliasOf} }`.
 
 ### `get_components`
 All local components + component sets.
@@ -242,7 +242,9 @@ Bind a node property to a local style.
 
 ### `set_variable_value`
 Set a variable's value for a mode.
-- Params: `variableId`, `modeId`, `value`. COLOR accepts `'#hex'` or `{ hex, opacity }`. FLOAT/BOOLEAN/STRING coerced.
+- Params: `variableId`, `modeId`, `value`. COLOR accepts `'#hex'`, `{ hex, opacity }`, `{ r, g, b, a? }`, an alias, or a composed color. FLOAT/BOOLEAN/STRING are coerced, or may be an alias.
+- **Alias** (any type): `{ aliasOf: '<variableId>' }` — the shape `get_variables` emits (`{ variableId }` and Figma's `{ type: 'VARIABLE_ALIAS', id }` are also accepted).
+- **Composed color** (COLOR only — needs Figma typings ≥ 1.142): a color plus a separate opacity, where the color **or** the opacity (or both) is an alias: `{ color: <'#hex' | { hex, opacity } | { r,g,b,a? } | { aliasOf }>, opacity: <0–1 number | { aliasOf }> }`. Neither part aliased is rejected — use `{ hex, opacity }`. `get_variables` returns the same shape. Also accepted by variable create (`value` / `valuesByMode`).
 - Returns: `{ success: true }`.
 
 ### `bind_to_variable`

@@ -541,7 +541,9 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'set_variable_value',
     description:
-      "Set a variable's value for a specific mode. Color values use '#hex' or {hex, opacity}.",
+      "Set a variable's value for a mode ('#hex', {hex,opacity}, {aliasOf}, composed color — see detail).",
+    detail:
+      "`value` by type — COLOR: '#hex' | {hex, opacity} | {r,g,b,a?} | an alias | a composed color. FLOAT/STRING/BOOLEAN: the plain value, or an alias. Alias (any type, reads emit this shape): {aliasOf: '<variableId>'} (also accepts {variableId} or Figma's {type:'VARIABLE_ALIAS', id}). Composed color (COLOR only; a color plus a separate opacity, where the color OR the opacity — or both — is an alias): {color: <hex | {hex,opacity} | {r,g,b,a?} | {aliasOf}>, opacity: <0–1 number | {aliasOf}>}. get_variables returns the same shapes: composed → {color:{hex,opacity}|{aliasOf}, opacity:number|{aliasOf}}. A composed color with neither part aliased is rejected — use {hex, opacity}. Same value shapes work in variable create (value/valuesByMode).",
     schema: z.object({
       variableId: z.string(),
       modeId: z.string(),

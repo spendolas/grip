@@ -3266,19 +3266,27 @@ function walk(root, fn) {
             walk(c, fn);
     }
 }
-function serializeVarValues(v) {
+// One part of a variable value (a color, an opacity, or the whole value):
+// alias → {aliasOf}, RGB(A) → {hex, opacity}, anything else as-is.
+function serializeVarPart(raw) {
     var _a;
+    if (raw && typeof raw === 'object') {
+        if (raw.type === 'VARIABLE_ALIAS')
+            return { aliasOf: raw.id };
+        if ('r' in raw)
+            return { hex: rgbToHex(raw.r, raw.g, raw.b), opacity: (_a = raw.a) !== null && _a !== void 0 ? _a : 1 };
+    }
+    return raw;
+}
+function serializeVarValues(v) {
     const out = {};
     for (const [modeId, raw] of Object.entries(v.valuesByMode)) {
-        if (v.resolvedType === 'COLOR' && raw && typeof raw === 'object' && 'r' in raw) {
+        if (v.resolvedType === 'COLOR' && raw && typeof raw === 'object' && 'color' in raw && 'opacity' in raw) {
             const c = raw;
-            out[modeId] = { hex: rgbToHex(c.r, c.g, c.b), opacity: (_a = c.a) !== null && _a !== void 0 ? _a : 1 };
-        }
-        else if (raw && typeof raw === 'object' && 'type' in raw && raw.type === 'VARIABLE_ALIAS') {
-            out[modeId] = { aliasOf: raw.id };
+            out[modeId] = { color: serializeVarPart(c.color), opacity: serializeVarPart(c.opacity) };
         }
         else {
-            out[modeId] = raw;
+            out[modeId] = serializeVarPart(raw);
         }
     }
     return out;
@@ -3655,18 +3663,42 @@ async function createByType(params) {
     }
     return node;
 }
+// {aliasOf: id} (what reads emit) | {variableId} | Figma's {type:'VARIABLE_ALIAS', id}.
+function toVarAlias(v) {
+    var _a, _b;
+    if (!v || typeof v !== 'object')
+        return null;
+    const id = (_b = (_a = v.aliasOf) !== null && _a !== void 0 ? _a : v.variableId) !== null && _b !== void 0 ? _b : (v.type === 'VARIABLE_ALIAS' ? v.id : undefined);
+    return typeof id === 'string' ? { type: 'VARIABLE_ALIAS', id } : null;
+}
+function toRgba(v) {
+    var _a, _b;
+    if (typeof v === 'string')
+        return Object.assign(Object.assign({}, hexToRgb(v)), { a: 1 });
+    if (v && typeof v === 'object' && 'hex' in v)
+        return Object.assign(Object.assign({}, hexToRgb(v.hex)), { a: (_a = v.opacity) !== null && _a !== void 0 ? _a : 1 });
+    if (v && typeof v === 'object' && 'r' in v && 'g' in v && 'b' in v)
+        return { r: v.r, g: v.g, b: v.b, a: (_b = v.a) !== null && _b !== void 0 ? _b : 1 };
+    throw new Error('color expects hex string, {hex, opacity}, {r,g,b,a?} or {aliasOf}');
+}
 function coerceVarValue(type, value) {
-    var _a;
+    var _a, _b;
+    const alias = toVarAlias(value);
+    if (alias)
+        return alias;
     if (type === 'COLOR') {
-        if (typeof value === 'string') {
-            const rgb = hexToRgb(value);
-            return Object.assign(Object.assign({}, rgb), { a: 1 });
+        // Composed color: a color and a separate opacity, at least one of them an alias.
+        if (value && typeof value === 'object' && 'color' in value && 'opacity' in value) {
+            const color = (_a = toVarAlias(value.color)) !== null && _a !== void 0 ? _a : toRgba(value.color);
+            const opacity = (_b = toVarAlias(value.opacity)) !== null && _b !== void 0 ? _b : Number(value.opacity);
+            if (typeof opacity === 'number' && !Number.isFinite(opacity))
+                throw new Error('composed color opacity must be a number or {aliasOf}');
+            if (!('type' in color) && typeof opacity === 'number') {
+                throw new Error('composed color needs the color or the opacity to be a variable alias — for a plain color use {hex, opacity}');
+            }
+            return { color, opacity };
         }
-        if (value && typeof value === 'object' && 'hex' in value) {
-            const rgb = hexToRgb(value.hex);
-            return Object.assign(Object.assign({}, rgb), { a: (_a = value.opacity) !== null && _a !== void 0 ? _a : 1 });
-        }
-        throw new Error('COLOR variable expects hex string or {hex, opacity}');
+        return toRgba(value);
     }
     if (type === 'FLOAT')
         return Number(value);

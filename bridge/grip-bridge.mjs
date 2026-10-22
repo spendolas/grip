@@ -24143,7 +24143,8 @@ var TOOLS = [
   },
   {
     name: "set_variable_value",
-    description: "Set a variable's value for a specific mode. Color values use '#hex' or {hex, opacity}.",
+    description: "Set a variable's value for a mode ('#hex', {hex,opacity}, {aliasOf}, composed color \u2014 see detail).",
+    detail: "`value` by type \u2014 COLOR: '#hex' | {hex, opacity} | {r,g,b,a?} | an alias | a composed color. FLOAT/STRING/BOOLEAN: the plain value, or an alias. Alias (any type, reads emit this shape): {aliasOf: '<variableId>'} (also accepts {variableId} or Figma's {type:'VARIABLE_ALIAS', id}). Composed color (COLOR only; a color plus a separate opacity, where the color OR the opacity \u2014 or both \u2014 is an alias): {color: <hex | {hex,opacity} | {r,g,b,a?} | {aliasOf}>, opacity: <0\u20131 number | {aliasOf}>}. get_variables returns the same shapes: composed \u2192 {color:{hex,opacity}|{aliasOf}, opacity:number|{aliasOf}}. A composed color with neither part aliased is rejected \u2014 use {hex, opacity}. Same value shapes work in variable create (value/valuesByMode).",
     schema: external_exports.object({
       variableId: external_exports.string(),
       modeId: external_exports.string(),
