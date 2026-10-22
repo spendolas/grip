@@ -23464,7 +23464,15 @@ import { join } from "node:path";
 
 // src/tools.ts
 var TOOL_CATEGORIES = {
-  meta: ["grip_health", "grip_diagnose", "list_files", "set_active_file", "get_page_context", "grip_capabilities"],
+  meta: [
+    "grip_health",
+    "grip_diagnose",
+    "list_files",
+    "set_active_file",
+    "get_page_context",
+    "grip_capabilities",
+    "grip_load_tools"
+  ],
   read: [
     "get_document",
     "get_page",
@@ -23812,6 +23820,51 @@ function toolInScope(name, scope) {
   if (scope.coreNames.has(name)) return true;
   return scope.categories.has(categoryOf(name));
 }
+function mergeToolScope(currentSpec, load, unload = []) {
+  const before = resolveToolScope(currentSpec);
+  if (!toolInScope("run_script", before)) {
+    return { ok: false, error: "This session was launched with a restricted tool scope (no run_script), so it cannot change its own scope. Relaunch with a different GRIP_TOOLS / ?tools= instead." };
+  }
+  const cur = (currentSpec ?? "").trim();
+  const tokens = new Set(cur ? cur.split(",").map((t) => t.trim()).filter(Boolean) : ["core"]);
+  const isCat = (t) => Object.prototype.hasOwnProperty.call(TOOL_CATEGORIES, t);
+  const unknown2 = [];
+  const ignored = [];
+  for (const raw of load) {
+    const t = raw.trim();
+    if (t === "all" || t === "core" || isCat(t)) tokens.add(t);
+    else if (t) unknown2.push(t);
+  }
+  for (const raw of unload) {
+    const t = raw.trim();
+    if (!t) continue;
+    if (t === "core" || t === "meta") {
+      ignored.push(t);
+      continue;
+    }
+    if (t === "all") {
+      tokens.clear();
+      tokens.add("core");
+      continue;
+    }
+    if (!isCat(t)) {
+      unknown2.push(t);
+      continue;
+    }
+    if (tokens.has("all")) {
+      tokens.delete("all");
+      tokens.add("core");
+      for (const c of Object.keys(TOOL_CATEGORIES)) if (c !== "meta") tokens.add(c);
+    }
+    tokens.delete(t);
+  }
+  const spec = tokens.has("all") ? "all" : [...tokens].join(",");
+  const after = resolveToolScope(spec);
+  const names = TOOLS.map((x) => x.name);
+  const added = names.filter((n) => toolInScope(n, after) && !toolInScope(n, before));
+  const removed = names.filter((n) => toolInScope(n, before) && !toolInScope(n, after));
+  return { ok: true, spec, added, removed, unknown: unknown2, ignored };
+}
 function toolCategorySummary(scope) {
   return Object.keys(TOOL_CATEGORIES).filter((c) => c !== "meta").map((c) => {
     const names = TOOL_CATEGORIES[c];
@@ -23925,8 +23978,14 @@ var TOOLS = [
   {
     name: "grip_capabilities",
     category: "meta",
-    description: "List grip's tool categories and which are loaded in THIS agent's scope. Use it to discover tools that aren't injected: a category shows loaded:false when it's out of scope \u2014 reach it now via run_script, or relaunch with GRIP_TOOLS including that category for the typed tools.",
+    description: "List grip's tool categories and which are loaded in THIS agent's scope. Use it to discover tools that aren't injected: a category shows loaded:false when it's out of scope \u2014 load it with grip_load_tools.",
     schema: external_exports.object({ tool: external_exports.string().optional() })
+  },
+  {
+    name: "grip_load_tools",
+    category: "meta",
+    description: "Load/unload tool categories (see grip_capabilities); applies next turn.",
+    schema: external_exports.object({ categories: external_exports.array(external_exports.string()).optional(), unload: external_exports.array(external_exports.string()).optional() })
   },
   {
     name: "get_deep_link",
@@ -25996,7 +26055,7 @@ function createSession(bridge) {
   const server = new Server(
     { name: "grip", version: BRIDGE_VERSION },
     {
-      capabilities: { tools: {}, logging: {} },
+      capabilities: { tools: { listChanged: true }, logging: {} },
       instructions: "Grip is a live connection to Figma. Use these tools for anything involving Figma \u2014 reading or editing a document, page, frame, component, style, variable or the current selection.\n\nGrip drives the Figma app itself through a plugin, so it sees the file the user has open right now, including unsaved and unpublished changes, and can write back to it. Other Figma integrations read published data over the REST API and cannot edit the canvas \u2014 for the document the user is looking at, use Grip.\n\nStart with get_page_context (cheap: which file and page, how many nodes selected). If it reports no plugin connected, the user needs to run the Grip plugin in Figma \u2014 say so rather than reporting that you have no Figma access."
     }
   );
@@ -26116,6 +26175,29 @@ ${args.code}
         return errorResult(err.message);
       }
     }
+    if (name === "grip_load_tools") {
+      const a = parsed.data;
+      if (!a.categories?.length && !a.unload?.length) return errorResult("Pass `categories` to load and/or `unload` to drop (category names from grip_capabilities, or 'all').");
+      const r = mergeToolScope(session.toolScopeSpec, a.categories ?? [], a.unload ?? []);
+      if (!r.ok) return errorResult(r.error);
+      session.toolScopeSpec = r.spec;
+      if (r.added.length || r.removed.length) {
+        setTimeout(() => {
+          server.sendToolListChanged().catch((err) => {
+            process.stderr.write(`[grip] tools/list_changed failed: ${err.message}
+`);
+          });
+        }, 0);
+      }
+      return okResult({
+        scope: r.spec,
+        added: r.added,
+        removed: r.removed,
+        unknownCategories: r.unknown,
+        ignored: r.ignored.length ? `${r.ignored.join(", ")} cannot be unloaded` : void 0,
+        note: r.added.length || r.removed.length ? "Tool list refreshed; changes apply on your next turn. If your client does not refresh, call tools via run_script." : "No change (already loaded/unloaded, or unknown category)."
+      });
+    }
     if (name === "grip_capabilities") {
       const scope = resolveToolScope(session.toolScopeSpec);
       const wanted = args && typeof args.tool === "string" ? args.tool : null;
@@ -26126,7 +26208,7 @@ ${args.code}
       }
       return okResult({
         scope: session.toolScopeSpec ?? "core (default)",
-        howToChange: "Relaunch with env GRIP_TOOLS=core,<category> (stdio) or ?tools=core,<category> (HTTP); or call the API directly via run_script (if run_script is in scope). Call grip_capabilities {tool:'<name>'} for a tool's full detail.",
+        howToChange: "Call grip_load_tools {categories:[...]} to load a category into this session. Or set the launch scope: env GRIP_TOOLS=core,<category> (stdio) / ?tools=core,<category> (HTTP). run_script reaches any tool regardless. Call grip_capabilities {tool:'<name>'} for a tool's full detail.",
         categories: toolCategorySummary(scope)
       });
     }

@@ -378,7 +378,7 @@ export const TOOLS: ToolDef[] = [
     name: 'grip_load_tools',
     category: 'meta',
     description:
-      "Load/unload tool categories (see grip_capabilities) for this session; changes apply next turn.",
+      "Load/unload tool categories (see grip_capabilities); applies next turn.",
     schema: z.object({ categories: z.array(z.string()).optional(), unload: z.array(z.string()).optional() }),
   },
   {
