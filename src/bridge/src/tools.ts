@@ -494,6 +494,7 @@ export const TOOLS: ToolDef[] = [
     description:
       "Set any property on a node — one dispatcher across ~60 props: numeric (x, y, width, height, opacity, cornerRadius, strokeWeight, fontSize, …), boolean (visible, locked, isMask, clipsContent, …), and passthrough (name, layoutMode, fills, strokes, effects, componentProperties, …). Call grip_capabilities {tool:'set_node_property'} for the full prop list, CSS-grid auto-layout props, and new paint/effect shapes (SHADER/VIDEO/GRADIENT_DIAMOND, NOISE/TEXTURE/GLASS/progressive-blur).",
     detail:
+      "Text: textWrapStyle ('AUTO'|'BALANCE'|'PRETTY', node-wide; fonts auto-loaded; per-range via set_text_range_property). fontName takes {family, style?, variationSettings?} — omit style to let Figma pick the named instance nearest the axes; variationSettings e.g. {wght:550} (axis tags: list_fonts {axesFor:'<family>'}); unknown axes throw. " +
       'Numeric props (non-exhaustive): x, y, width, height, opacity, rotation, padding*, cornerRadius, individual corner radii (topLeftRadius/topRightRadius/bottomLeftRadius/bottomRightRadius), strokeWeight, fontSize, paragraphSpacing, paragraphIndent, itemSpacing, layoutGrow, min/max width/height, etc. Boolean props: visible, locked, isMask, clipsContent, expanded. Passthrough props (non-exhaustive): name, blendMode, layoutMode, layoutAlign, layoutSizing*, primaryAxisSizingMode/counterAxisSizingMode, strokeAlign/strokeJoin/strokeCap, dashPattern, textAlign*, textCase, textDecoration, textAutoResize, lineHeight, letterSpacing, hyperlink, fillStyleId, fills, strokes, effects, layoutGrids, componentProperties, etc. CSS-grid auto-layout: set layoutMode="GRID" then gridRowCount/gridColumnCount, gridRowGap/gridColumnGap, gridColumnSizes/gridRowSizes (arrays of {type:"FLEX"|"FIXED"|"HUG", value}), gridAutoTracks, gridItemsPositioning; per grid-child gridRowSpan/gridColumnSpan/gridRowAnchorIndex/gridColumnAnchorIndex/gridChildHorizontal|VerticalAlign (or use set_grid_child_position). New paint types on fills/strokes: {type:"GRADIENT_DIAMOND",...}, {type:"SHADER", shaderId,...} (import via import_shader first), {type:"VIDEO",...}. New effect types on effects: {type:"NOISE", noiseType:"MONOTONE"|"DUOTONE"|"MULTITONE", density, noiseSize, color}, {type:"TEXTURE", noiseSize, radius, clipToShape}, {type:"GLASS", refraction, depth, lightIntensity, lightAngle, dispersion, radius}, and progressive blur {type:"LAYER_BLUR"|"BACKGROUND_BLUR", blurType:"PROGRESSIVE", radius, startRadius, startOffset, endOffset}.',
     schema: z.object({
       nodeId: z.string(),
@@ -558,6 +559,8 @@ export const TOOLS: ToolDef[] = [
     name: 'set_style',
     description:
       'Create or update a local style. Omit styleId to create a new one.',
+    detail:
+      "PAINT value=Paint[]; EFFECT value=Effect[]; GRID value=LayoutGrid[]. TEXT value={fontName, fontSize, lineHeight, letterSpacing, textCase, textDecoration, textWrapStyle, paragraphSpacing, paragraphIndent}. textWrapStyle: 'AUTO'|'BALANCE'|'PRETTY'. fontName is {family, style?, variationSettings?} — variable fonts: omit style to let Figma resolve the nearest named instance, variationSettings e.g. {wght:550} (discover axes with list_fonts {axesFor:'<family>'}). get_styles returns textWrapStyle and fontName.variationSettings for text styles.",
     schema: z.object({
       styleId: z.string().optional(),
       name: z.string(),
@@ -796,13 +799,17 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'list_fonts',
-    description: 'List fonts available in this editor. Optional case-insensitive family filter.',
-    schema: z.object({ family: z.string().optional() }),
+    description: "List fonts available in this editor. Optional case-insensitive family filter. axesFor:<family> returns that family's variable-font axes instead.",
+    detail:
+      "Default: [{family, style}]. With axesFor:'<exact family>' (case-insensitive) returns ONE object {family, available, variable, axes, styles}: axes = OpenType axis tags from figma.getFontFamilyVariationAxes (e.g. ['wght','wdth','slnt','opsz']; null for a static family), variable = axes!==null, styles = the family's named instances. Tags only — no min/max/default ranges are exposed by the API. If the API is missing (Figma older than update 138) or the family is unknown, returns {available:false, axes:null, variable:null, styles, error}. Use the tags as keys of fontName.variationSettings.",
+    schema: z.object({ family: z.string().optional(), axesFor: z.string().optional() }),
   },
   {
     name: 'load_font',
-    description: 'Pre-load a font so subsequent text writes do not throw. Style defaults to Regular.',
-    schema: z.object({ family: z.string(), style: z.string().optional() }),
+    description: 'Pre-load a font so subsequent text writes do not throw. Omit style: loads all.',
+    detail:
+      "Shape {family, style?, variationSettings?}. With style: loads that one style -> {success, family, style}. Without style: loads EVERY style of the family (variable and static families; Figma FontNameInput) -> {success, family, style:null, allStyles:true}; if the client rejects a style-less load it falls back to the legacy 'Regular' default -> {success, family, style:'Regular', allStyles:false}. variationSettings (e.g. {wght:550}) is accepted for symmetry with node.fontName but ignored by loading (it affects rendering only) and echoed back when style is omitted. set_node_property fontName, set_text_range_property fontName and set_style TEXT already auto-load what they need.",
+    schema: z.object({ family: z.string(), style: z.string().optional(), variationSettings: z.record(z.number()).optional() }),
   },
   {
     name: 'set_reactions',
@@ -1275,6 +1282,8 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'set_text_range_property',
     description: 'Apply a per-range property to part of a TEXT node. property: fills, fontName, fontSize, fontWeight, lineHeight, letterSpacing, textCase, textDecoration, hyperlink, listOptions, paragraphSpacing, paragraphIndent.',
+    detail:
+      "Calls Figma's setRange<Property>(start,end,value) after loading the range's fonts. Also: property 'textWrapStyle' -> 'AUTO'|'BALANCE'|'PRETTY' (applies to the paragraph(s) containing the range; validated). property 'fontName' -> {family, style?, variationSettings?}: the target font is auto-loaded; omit style to get the named instance nearest the axes (e.g. {family:'Inter', variationSettings:{wght:650}}); unknown axis tags throw (see list_fonts {axesFor}). Read back per range with get_styled_text_segments fields ['fontName','textWrapStyle'].",
     schema: z.object({
       nodeId: z.string(),
       start: z.number().int().nonnegative(),
@@ -1846,7 +1855,7 @@ export function toolInputSchema(name: string): Record<string, unknown> {
     case 'list_fonts':
       return {
         type: 'object',
-        properties: { family: { type: 'string' } },
+        properties: { family: { type: 'string' }, axesFor: { type: 'string', description: "Return this family's variable-font axes ({family,available,variable,axes,styles}) instead of the font list." } },
         additionalProperties: false,
       };
     case 'load_font':
@@ -1854,7 +1863,8 @@ export function toolInputSchema(name: string): Record<string, unknown> {
         type: 'object',
         properties: {
           family: { type: 'string' },
-          style: { type: 'string' },
+          style: { type: 'string', description: 'Omit to load every style of the family.' },
+          variationSettings: { type: 'object', additionalProperties: { type: 'number' }, description: 'Variable-font axes, e.g. {wght:550}. Ignored by loading.' },
         },
         required: ['family'],
         additionalProperties: false,

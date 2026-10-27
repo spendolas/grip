@@ -576,6 +576,9 @@ async function serializeNode(
     if (want('textAlignVertical') && t.textAlignVertical) out.textAlignVertical = t.textAlignVertical;
     if (want('textAutoResize')) out.textAutoResize = t.textAutoResize;
     if (want('textCase') && t.textCase !== figma.mixed) out.textCase = t.textCase;
+    // Figma update 134. Omitted when mixed across ranges (read per-range with
+    // get_styled_text_segments fields:['textWrapStyle']) or on older clients.
+    if (want('textWrapStyle') && (t as any).textWrapStyle !== undefined && (t as any).textWrapStyle !== figma.mixed) out.textWrapStyle = (t as any).textWrapStyle;
     if (want('textDecoration') && t.textDecoration !== figma.mixed) out.textDecoration = t.textDecoration;
     if (want('lineHeight') && t.lineHeight !== figma.mixed) out.lineHeight = t.lineHeight;
     if (want('letterSpacing') && t.letterSpacing !== figma.mixed) out.letterSpacing = t.letterSpacing;
@@ -923,6 +926,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
             letterSpacing: s.letterSpacing,
             textCase: s.textCase,
             textDecoration: s.textDecoration,
+            textWrapStyle: (s as any).textWrapStyle,
           },
         })),
         effect: effects.map((s) => ({
@@ -1768,6 +1772,28 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
     }
     case 'list_fonts': {
       const fonts = await figma.listAvailableFontsAsync();
+      // axesFor: variable-font axis discovery for ONE family (exact match,
+      // case-insensitive against the available fonts). Returns an object, not
+      // the usual [{family,style}] list.
+      if (params.axesFor !== undefined && params.axesFor !== null && params.axesFor !== '') {
+        const want = String(params.axesFor);
+        const match = fonts.find((f) => f.fontName.family.toLowerCase() === want.toLowerCase());
+        const family = match ? match.fontName.family : want;
+        const styles = fonts.filter((f) => f.fontName.family === family).map((f) => f.fontName.style);
+        if (typeof (figma as any).getFontFamilyVariationAxes !== 'function') {
+          return { family, available: false, axes: null, variable: null, styles, error: 'getFontFamilyVariationAxes is not available in this Figma version (variable-font API, update 138)' };
+        }
+        if (!match) {
+          return { family, available: false, axes: null, variable: null, styles, error: `Family not available in this editor: ${want} (use list_fonts {family} to search)` };
+        }
+        let axes: string[] | null;
+        try {
+          axes = (figma as any).getFontFamilyVariationAxes(family) as string[] | null;
+        } catch (e: any) {
+          return { family, available: false, axes: null, variable: null, styles, error: String(e?.message ?? e) };
+        }
+        return { family, available: true, variable: axes !== null, axes, styles };
+      }
       const filterFamily = params.family ? String(params.family).toLowerCase() : null;
       const filtered = filterFamily
         ? fonts.filter((f) => f.fontName.family.toLowerCase().includes(filterFamily))
@@ -1775,9 +1801,26 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       return filtered.map((f) => ({ family: f.fontName.family, style: f.fontName.style }));
     }
     case 'load_font': {
-      const fn: FontName = { family: String(params.family), style: String(params.style ?? 'Regular') };
-      await figma.loadFontAsync(fn);
-      return { success: true, family: fn.family, style: fn.style };
+      const family = String(params.family);
+      const vs = coerce<any>(params.variationSettings);
+      const hasStyle = params.style !== undefined && params.style !== null && params.style !== '';
+      if (hasStyle) {
+        // variationSettings is ignored by loadFontAsync (affects rendering, not loading).
+        const fn: FontName = { family, style: String(params.style) };
+        await figma.loadFontAsync(fn);
+        return { success: true, family: fn.family, style: fn.style };
+      }
+      // No style: load EVERY style of the family (FontNameInput, update 138).
+      // Older clients reject a style-less input -> fall back to the legacy
+      // "Regular" default so existing callers keep working.
+      try {
+        await figma.loadFontAsync({ family } as any);
+        return { success: true, family, style: null, allStyles: true, ...(vs ? { variationSettings: vs } : {}) };
+      } catch (e) {
+        const fn: FontName = { family, style: 'Regular' };
+        await figma.loadFontAsync(fn);
+        return { success: true, family: fn.family, style: fn.style, allStyles: false };
+      }
     }
     case 'set_reactions': {
       const node = await getNode(params.nodeId);
@@ -3173,6 +3216,14 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       // Range setters require the relevant fonts loaded.
       const fonts = t.getRangeAllFontNames(start, end);
       await Promise.all(fonts.map((f) => figma.loadFontAsync(f)));
+      // Setting fontName on a range: the TARGET font must be loaded too
+      // (style may be omitted / variationSettings given — variable fonts).
+      if (prop === 'fontName' && value && typeof value === 'object') {
+        const target: any = { family: String((value as any).family) };
+        if ((value as any).style !== undefined && (value as any).style !== null) target.style = String((value as any).style);
+        await figma.loadFontAsync(target);
+      }
+      if (prop === 'textWrapStyle') assertTextWrapStyle(value);
       const setter = `setRange${prop[0].toUpperCase()}${prop.slice(1)}` as keyof TextNode;
       const fn = (t as any)[setter];
       if (typeof fn !== 'function') throw new Error(`Unsupported text range property: ${prop}`);
@@ -3418,7 +3469,15 @@ async function applyProperty(node: SceneNode, property: string, value: any) {
       const t = node as TextNode;
       let fn: FontName;
       if (property === 'fontName' && value && typeof value === 'object') {
-        fn = { family: String(value.family), style: String(value.style) };
+        // FontNameInput: style optional (Figma resolves the closest named
+        // instance), variationSettings optional (variable-font axes).
+        const v = coerce<any>(value);
+        const input: any = { family: String(v.family) };
+        if (v.style !== undefined && v.style !== null) input.style = String(v.style);
+        if (v.variationSettings && typeof v.variationSettings === 'object') input.variationSettings = v.variationSettings;
+        await figma.loadFontAsync(input);
+        (t as any).fontName = input;
+        return;
       } else {
         const cur = t.fontName === figma.mixed ? { family: 'Inter', style: 'Regular' } : (t.fontName as FontName);
         fn = property === 'fontFamily'
@@ -3427,6 +3486,20 @@ async function applyProperty(node: SceneNode, property: string, value: any) {
       }
       await figma.loadFontAsync(fn);
       t.fontName = fn;
+      return;
+    }
+    case 'textWrapStyle': {
+      requireText();
+      const t = node as TextNode;
+      assertTextWrapStyle(value);
+      // The setter needs every font in the node loaded.
+      if (t.characters.length > 0) {
+        const fonts = t.getRangeAllFontNames(0, t.characters.length);
+        await Promise.all(fonts.map((f) => figma.loadFontAsync(f)));
+      } else if (t.fontName !== figma.mixed) {
+        await figma.loadFontAsync(t.fontName as FontName);
+      }
+      (t as any).textWrapStyle = value;
       return;
     }
     case 'fontSize': {
@@ -3503,6 +3576,12 @@ async function applyProperty(node: SceneNode, property: string, value: any) {
   }
 
   throw new Error(`Property '${property}' not supported on node type ${node.type}`);
+}
+
+function assertTextWrapStyle(v: any): void {
+  if (v !== 'AUTO' && v !== 'BALANCE' && v !== 'PRETTY') {
+    throw new Error(`textWrapStyle must be 'AUTO' | 'BALANCE' | 'PRETTY', got ${JSON.stringify(v)}`);
+  }
 }
 
 function paintsFromInput(rawInput: any): Paint[] {
@@ -3704,14 +3783,23 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
     }
     style.name = params.name;
     if (params.value.fontName) {
-      await figma.loadFontAsync(params.value.fontName);
-      style.fontName = params.value.fontName;
+      // FontNameInput: style optional, variationSettings optional (variable fonts).
+      const fnIn = coerce<any>(params.value.fontName);
+      const input: any = { family: String(fnIn.family) };
+      if (fnIn.style !== undefined && fnIn.style !== null) input.style = String(fnIn.style);
+      if (fnIn.variationSettings && typeof fnIn.variationSettings === 'object') input.variationSettings = fnIn.variationSettings;
+      await figma.loadFontAsync(input);
+      (style as any).fontName = input;
     }
     if (typeof params.value.fontSize === 'number') style.fontSize = params.value.fontSize;
     if (params.value.lineHeight) style.lineHeight = params.value.lineHeight;
     if (params.value.letterSpacing) style.letterSpacing = params.value.letterSpacing;
     if (params.value.textCase) style.textCase = params.value.textCase;
     if (params.value.textDecoration) style.textDecoration = params.value.textDecoration;
+    if (params.value.textWrapStyle !== undefined) {
+      assertTextWrapStyle(params.value.textWrapStyle);
+      (style as any).textWrapStyle = params.value.textWrapStyle;
+    }
     if (typeof params.value.paragraphSpacing === 'number') style.paragraphSpacing = params.value.paragraphSpacing;
     if (typeof params.value.paragraphIndent === 'number') style.paragraphIndent = params.value.paragraphIndent;
     if (typeof params.description === 'string') style.description = params.description;

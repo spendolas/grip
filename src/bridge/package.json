@@ -17,7 +17,7 @@
     "bundle": "node build.mjs && chmod +x ../../bridge/grip-bridge.mjs ../../bridge/install.mjs",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
-    "test": "node test/scope.mjs && node test/load-tools.mjs && node test/animation-style.mjs",
+    "test": "node test/scope.mjs && node test/load-tools.mjs && node test/animation-style.mjs && node test/text-fonts.mjs",
     "test:win": "node test/win-smoke.mjs"
   },
   "bin": {
