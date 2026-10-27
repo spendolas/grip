@@ -140,6 +140,7 @@ plugin/
 
 Highlights worth knowing while editing:
 
+- **Figma API coverage marker.** [`TOOLS.md`](./TOOLS.md) line 5 records which Figma plugin update / `@figma/plugin-typings` version Grip covers (`<!-- figma-api-coverage: update=N typings=X -->`). A weekly scheduled check reads it as its baseline to report newly shipped Plugin API features. When you add support for newly shipped APIs (or bump the pinned typings), update both numbers in the same commit.
 - `set_node_property` value buckets: `NUMERIC_PROPS`, `BOOL_PROPS`, `PASSTHROUGH_PROPS` (in `plugin/code.ts`). Adding a new prop = adding to the right bucket; cases above the bucket switch handle props that need special async work (font loading, paint shaping, instance setProperties).
 - `serializeNode` accepts a `SerializeOpts` ({ depth, maxDepth, includeChildren, includeParent, includePluginData, pluginDataKeys, includeBoundVariables, properties }). Old positional `(node, depth, maxDepth, include)` still works via shim.
 - `figma.on('documentchange')` requires `figma.loadAllPagesAsync()` first under `dynamic-page` access — done in `registerDocumentChange()` at boot.

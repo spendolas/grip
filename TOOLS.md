@@ -2,6 +2,8 @@
 
 152 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
 
+**Figma Plugin API coverage:** through plugin update 141 (Oct 15, 2026) and `@figma/plugin-typings` 1.142.0. <!-- figma-api-coverage: update=141 typings=1.142.0 --> The weekly API-updates check reads the marker in this line as its baseline — bump both numbers in the same commit whenever support for newly shipped Plugin API features lands.
+
 Phase 3 merged 19 clusters of "N verbs on one object" into single op-enum-dispatched tools — the former per-verb tools no longer exist as standalone entries below; call them via the merged tool's `op`/`target` discriminator (e.g. `group {op:'group'|'ungroup', nodeId(s)}`, `bind_to_variable {target:'property'|'paint'|'effect'|'layout_grid', ...}`, `timer {op:'start'|'stop'|'pause'|'resume'}`). Per-op params are in `grip_capabilities {tool:'<name>'}`.
 
 Conventions:
