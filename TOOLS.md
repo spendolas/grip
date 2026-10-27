@@ -137,6 +137,8 @@ Set any one property on a node.
   - **Boolean:** `visible`, `locked`, `isMask`, `clipsContent`, `expanded`, `itemReverseZIndex`, `strokesIncludedInLayout`, `constrainProportions`.
   - **Passthrough (string/enum/object):** `name`, `blendMode`, `strokeAlign`, `strokeJoin`, `strokeCap`, `dashPattern`, `layoutMode`, `layoutWrap`, `layoutAlign`, `layoutPositioning`, `layoutSizingHorizontal`, `layoutSizingVertical`, `primaryAxisSizingMode`, `counterAxisSizingMode`, `primaryAxisAlignItems`, `counterAxisAlignItems`, `constraints`, `exportSettings`, `overflowDirection`, `textAlignHorizontal`, `textAlignVertical`, `textCase`, `textDecoration`, `textAutoResize`, `lineHeight`, `letterSpacing`, `hyperlink`, `listOptions`, `fillStyleId`, `strokeStyleId`, `effectStyleId`, `gridStyleId`, `textStyleId`, `componentProperties`, `overrides`.
   - **Special:**
+    - `textWrapStyle` (TEXT) — `'AUTO' | 'BALANCE' | 'PRETTY'`, node-wide, validated; all fonts in the node are auto-loaded first. Per-range: `set_text_range_property`. Included in text node reads.
+    - `fontName` (TEXT) — `{ family, style?, variationSettings? }`: omit `style` to let Figma pick the named instance nearest the axes; `variationSettings` e.g. `{ wght: 550 }` (axis tags via `list_fonts { axesFor }`; unknown axes throw). The font is auto-loaded. Reads return `fontName` including `variationSettings` for variable fonts.
     - `width`, `height` — call `node.resize()` (preserves the other axis).
     - `characters` — TEXT only; loads the current font first.
     - `fontName`, `fontFamily`, `fontWeight`, `fontSize` — TEXT only; loads font.
@@ -232,7 +234,8 @@ Merge ≥2 COMPONENT nodes into one COMPONENT_SET (variant set). Same as Cmd+Opt
 ### `set_style`
 Create or update a local style. Omit `styleId` to create.
 - Params: `styleId`, `name` (req), `type` (req: `PAINT | TEXT | EFFECT | GRID`), `value` (req — shape varies by type), `description`.
-- PAINT `value` = `Paint[]`. EFFECT `value` = `Effect[]`. GRID `value` = `LayoutGrid[]`. TEXT `value` = `{ fontName, fontSize, lineHeight, letterSpacing, textCase, textDecoration, paragraphSpacing, paragraphIndent }`.
+- PAINT `value` = `Paint[]`. EFFECT `value` = `Effect[]`. GRID `value` = `LayoutGrid[]`. TEXT `value` = `{ fontName, fontSize, lineHeight, letterSpacing, textCase, textDecoration, textWrapStyle, paragraphSpacing, paragraphIndent }`.
+- TEXT `textWrapStyle`: `'AUTO' | 'BALANCE' | 'PRETTY'` (validated). TEXT `fontName` is `{ family, style?, variationSettings? }` — omit `style` to let Figma resolve the named instance nearest `variationSettings` (e.g. `{ wght: 550 }`); the font is auto-loaded. `get_styles` text entries return `textWrapStyle` and `fontName` (with `variationSettings` for variable fonts).
 - Returns: `{ id, name }`.
 
 ### `apply_style`
@@ -287,8 +290,11 @@ Update a variable's metadata. Values not touched — use `set_variable_value` fo
 ### `set_text_range_property`
 Apply a per-range property to part of a TEXT node.
 - Params: `nodeId`, `start`, `end`, `property`, `value`.
-- `property` matches Figma's `setRange<Property>` suffix (`fills`, `fontName`, `fontSize`, `lineHeight`, `letterSpacing`, `textCase`, `textDecoration`, `hyperlink`, `listOptions`, `paragraphSpacing`, `paragraphIndent`).
+- `property` matches Figma's `setRange<Property>` suffix (`fills`, `fontName`, `fontSize`, `lineHeight`, `letterSpacing`, `textCase`, `textDecoration`, `hyperlink`, `listOptions`, `paragraphSpacing`, `paragraphIndent`, `textWrapStyle`).
+- `textWrapStyle`: `'AUTO' | 'BALANCE' | 'PRETTY'` (validated; Figma applies it to the paragraph(s) containing the range).
+- `fontName`: `{ family, style?, variationSettings? }` (variable fonts; omit `style` to get the nearest named instance; unknown axis tags throw — see `list_fonts { axesFor }`). The target font is auto-loaded.
 - Auto-loads the fonts present in the range first.
+- Read per-range values back with `get_styled_text_segments` (`fields: ['fontName','textWrapStyle']`).
 - Returns: `{ success: true }`.
 
 ### `edit_characters`
@@ -474,11 +480,13 @@ Create a version-history snapshot.
 ## Fonts / text introspection
 
 ### `list_fonts`
-- Params: `family` (substring filter, optional). → `[{ family, style }]`.
+- Params: `family` (substring filter, optional), `axesFor` (exact family, case-insensitive, optional). → `[{ family, style }]`.
+- `axesFor: '<family>'` instead returns one object `{ family, available, variable, axes, styles }`: `axes` = OpenType axis tags from `figma.getFontFamilyVariationAxes` (e.g. `['wght','wdth','slnt','opsz']`, `null` for a static family), `variable = axes !== null`, `styles` = the family's named instances. Tags only (the API exposes no min/max/default). If the API is missing (Figma older than update 138) or the family is unknown: `{ available: false, axes: null, variable: null, styles, error }`. Use the tags as keys of `fontName.variationSettings`.
 
 ### `load_font`
 Pre-load a font for upcoming text writes.
-- Params: `family` (req), `style` (default `Regular`). → `{ success, family, style }`.
+- Params: `family` (req), `style` (optional), `variationSettings` (optional, e.g. `{ wght: 550 }`; ignored by loading — it only affects rendering — and echoed back when `style` is omitted).
+- With `style` → `{ success, family, style }`. Without `style` → loads **every** style of the family (variable and static) → `{ success, family, style: null, allStyles: true }`; if the client rejects a style-less load it falls back to the legacy `Regular` default → `{ success, family, style: 'Regular', allStyles: false }`.
 
 ### `get_styled_text_segments`
 Read per-range styled segments from a TEXT node.
