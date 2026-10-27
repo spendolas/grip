@@ -43,7 +43,7 @@ export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
     'get_audit', 'list_pages'],
   write: ['set_node_property', 'create_node', 'create_tree', 'delete_node', 'clone_node', 'move_node', 'group',
     'set_selection', 'scroll_to', 'map_nodes', 'set_viewport', 'rescale', 'lock_aspect_ratio',
-    'unlock_aspect_ratio', 'create_section', 'set_skip_invisible_instance_children', 'set_grid_child_position',
+    'unlock_aspect_ratio', 'create_section', 'set_skip_invisible_instance_children', 'set_grid_child_position', 'reorder_grid_tracks',
     'set_relaunch_data', 'run_script'],
   pages: ['create_page', 'set_current_page', 'delete_page'],
   styles: ['set_style', 'apply_style', 'delete_style', 'move_local_style'],
@@ -128,7 +128,6 @@ export const MERGED_TOOLS: Record<string, {
     remove_row: 'table_remove_row', remove_column: 'table_remove_column',
     move_row: 'table_move_row', move_column: 'table_move_column',
     resize_row: 'table_resize_row', resize_column: 'table_resize_column',
-    reorder_rows: 'table_reorder_rows', reorder_columns: 'table_reorder_columns',
     cell_at: 'table_cell_at' } },
   timer: { discriminator: 'op', category: 'figjam', map: {
     start: 'timer_start', stop: 'timer_stop', pause: 'timer_pause', resume: 'timer_resume' } },
@@ -866,9 +865,9 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'table_op', category: 'figjam',
-    description: "Insert, remove, move, resize, or read rows/columns of a FigJam TABLE. `op`: insert_row ({nodeId, index?}) | insert_column ({nodeId, index?}) | remove_row ({nodeId, index}) | remove_column ({nodeId, index}) | move_row ({nodeId, fromIndex, toIndex}) | move_column ({nodeId, fromIndex, toIndex}) | resize_row ({nodeId, index, height}) | resize_column ({nodeId, index, width}) | reorder_rows ({nodeId, fromIndices, insertionIndex}) | reorder_columns ({nodeId, fromIndices, insertionIndex}) | cell_at ({nodeId, row, column}). Call grip_capabilities {tool:'table_op'} for per-op params.",
-    detail: "op=insert_row: insert a row into a TABLE, index defaults to end (was table_insert_row) — {nodeId, index?}. op=insert_column: insert a column into a TABLE (was table_insert_column) — {nodeId, index?}. op=remove_row: remove a row (was table_remove_row) — {nodeId, index}. op=remove_column: remove a column (was table_remove_column) — {nodeId, index}. op=move_row: move a row (was table_move_row) — {nodeId, fromIndex, toIndex}. op=move_column: move a column (was table_move_column) — {nodeId, fromIndex, toIndex}. op=resize_row: set a TABLE row's height (was table_resize_row) — {nodeId, index, height}. op=resize_column: set a TABLE column's width (was table_resize_column) — {nodeId, index, width}. op=reorder_rows: move several rows at once — {nodeId, fromIndices: number[] (unsorted/non-contiguous OK), insertionIndex: number (0..numRows inclusive, against the ORIGINAL order)} → {success, moves:[{from,to}]}. op=reorder_columns: same for columns (insertionIndex 0..numColumns). Uses Figma's native reorderRows/reorderColumns, which the 1.142 typings declare on auto-layout GRID frames (layoutMode:'GRID'; spanning children pull their spanned tracks along, moves lists them); on a TABLE node that lacks the method it errors — use move_row/move_column. op=cell_at: read the table cell at (row, column) (was table_cell_at) — {nodeId, row, column}.",
-    schema: z.object({ op: z.enum(['insert_row', 'insert_column', 'remove_row', 'remove_column', 'move_row', 'move_column', 'resize_row', 'resize_column', 'reorder_rows', 'reorder_columns', 'cell_at']) }).passthrough(),
+    description: "Insert, remove, move, resize, or read rows/columns of a FigJam TABLE. `op`: insert_row ({nodeId, index?}) | insert_column ({nodeId, index?}) | remove_row ({nodeId, index}) | remove_column ({nodeId, index}) | move_row ({nodeId, fromIndex, toIndex}) | move_column ({nodeId, fromIndex, toIndex}) | resize_row ({nodeId, index, height}) | resize_column ({nodeId, index, width}) | cell_at ({nodeId, row, column}). Call grip_capabilities {tool:'table_op'} for per-op params.",
+    detail: "op=insert_row: insert a row into a TABLE, index defaults to end (was table_insert_row) — {nodeId, index?}. op=insert_column: insert a column into a TABLE (was table_insert_column) — {nodeId, index?}. op=remove_row: remove a row (was table_remove_row) — {nodeId, index}. op=remove_column: remove a column (was table_remove_column) — {nodeId, index}. op=move_row: move a row (was table_move_row) — {nodeId, fromIndex, toIndex}. op=move_column: move a column (was table_move_column) — {nodeId, fromIndex, toIndex}. op=resize_row: set a TABLE row's height (was table_resize_row) — {nodeId, index, height}. op=resize_column: set a TABLE column's width (was table_resize_column) — {nodeId, index, width}. op=cell_at: read the table cell at (row, column) (was table_cell_at) — {nodeId, row, column}.",
+    schema: z.object({ op: z.enum(['insert_row', 'insert_column', 'remove_row', 'remove_column', 'move_row', 'move_column', 'resize_row', 'resize_column', 'cell_at']) }).passthrough(),
   },
   {
     name: 'import_component_by_key',
@@ -1248,6 +1247,7 @@ export const TOOLS: ToolDef[] = [
     }),
   },
   { name: 'set_grid_child_position', description: 'Place a direct child of a GRID auto-layout frame at a 0-based (row, column) cell. Configure the grid container first via set_node_property (layoutMode="GRID", gridRowCount/gridColumnCount, gridRowGap/gridColumnGap, gridColumnSizes/gridRowSizes).', schema: z.object({ nodeId: z.string(), row: z.number().int().nonnegative(), column: z.number().int().nonnegative() }) },
+  { name: 'reorder_grid_tracks', description: "Reorder rows or columns of a GRID auto-layout frame. `axis`: 'rows' | 'columns'; `fromIndices` (any order, non-contiguous OK), `insertionIndex` (0..count inclusive, against the ORIGINAL order). Returns {success, moves:[{from,to}]}; spanning children pull their tracks along. Call grip_capabilities {tool:'reorder_grid_tracks'} for details.", detail: "Wraps GridLayoutMixin.reorderRows/reorderColumns (Figma 1.142). The node must be a frame with layoutMode:'GRID'. Example: axis:'rows', fromIndices:[0], insertionIndex:3 on a 3-row grid moves row 0 to the end. A TABLE node does not have this method — FigJam tables use table_op move_row/move_column.", schema: z.object({ nodeId: z.string(), axis: z.enum(['rows', 'columns']), fromIndices: z.array(z.number().int().nonnegative()).min(1), insertionIndex: z.number().int().nonnegative() }) },
   { name: 'list_shaders', description: 'List shaders available to this file (Figma shader subsystem). Returns an array of shader descriptors (empty if the file has none). Use a returned id with import_shader, then apply via set_node_property fills/effects with {type:"SHADER", shaderId}.', schema: z.object({}) },
   { name: 'import_shader', description: 'Materialize a shader into this file by id (get the id from list_shaders). Returns the imported shader descriptor. Required before a SHADER paint/effect referencing it can be applied.', schema: z.object({ shaderId: z.string() }) },
 
@@ -1490,6 +1490,18 @@ export function toolInputSchema(name: string): Record<string, unknown> {
           column: { type: 'integer', description: '0-based grid column' },
         },
         required: ['nodeId', 'row', 'column'],
+        additionalProperties: false,
+      };
+    case 'reorder_grid_tracks':
+      return {
+        type: 'object',
+        properties: {
+          nodeId: { type: 'string', description: 'A GRID auto-layout frame' },
+          axis: { type: 'string', enum: ['rows', 'columns'] },
+          fromIndices: { type: 'array', items: { type: 'integer' }, description: '0-based tracks to move (any order)' },
+          insertionIndex: { type: 'integer', description: '0..count inclusive, against the original order' },
+        },
+        required: ['nodeId', 'axis', 'fromIndices', 'insertionIndex'],
         additionalProperties: false,
       };
     case 'import_shader':

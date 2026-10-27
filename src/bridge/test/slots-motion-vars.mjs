@@ -1,20 +1,17 @@
 import assert from 'node:assert';
-import { TOOLS, MERGED_TOOLS, resolveMerged, toolDetail } from '../dist/tools.js';
+import { TOOLS, MERGED_TOOLS, resolveMerged, toolDetail, categoryOf } from '../dist/tools.js';
 
-// table_op: reorder ops resolve to the plugin methods and keep their params.
-assert.deepStrictEqual(
-  resolveMerged('table_op', { op: 'reorder_rows', nodeId: '1:2', fromIndices: [0, 2], insertionIndex: 4 }),
-  { method: 'table_reorder_rows', rest: { nodeId: '1:2', fromIndices: [0, 2], insertionIndex: 4 } },
-);
-assert.deepStrictEqual(
-  resolveMerged('table_op', { op: 'reorder_columns', nodeId: '1:2', fromIndices: [1], insertionIndex: 0 }),
-  { method: 'table_reorder_columns', rest: { nodeId: '1:2', fromIndices: [1], insertionIndex: 0 } },
-);
+// Grid track reorder is a GRID auto-layout tool (category write), NOT a FigJam table op.
 const tableTool = TOOLS.find((t) => t.name === 'table_op');
 for (const op of Object.keys(MERGED_TOOLS.table_op.map)) {
   assert.ok(tableTool.schema.safeParse({ op, nodeId: 'x' }).success, `table_op schema accepts op=${op}`);
 }
-assert.ok(tableTool.schema.safeParse({ op: 'reorder_rows' }).success);
+assert.ok(!('reorder_rows' in MERGED_TOOLS.table_op.map) && !('reorder_columns' in MERGED_TOOLS.table_op.map), 'reorder ops are not on table_op');
+const grid = TOOLS.find((t) => t.name === 'reorder_grid_tracks');
+assert.ok(grid, 'reorder_grid_tracks exists');
+assert.strictEqual(categoryOf('reorder_grid_tracks'), 'write', 'reorder_grid_tracks is in the write category');
+assert.ok(grid.schema.safeParse({ nodeId: '1:2', axis: 'rows', fromIndices: [0, 2], insertionIndex: 4 }).success);
+assert.ok(!grid.schema.safeParse({ nodeId: '1:2', axis: 'diagonal', fromIndices: [0], insertionIndex: 1 }).success, 'axis is validated');
 
 // create_slot: slotSettings survive zod parsing (a plain z.object would strip them).
 const slot = TOOLS.find((t) => t.name === 'create_slot');

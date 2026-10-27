@@ -5,8 +5,8 @@ import { mergeToolScope, resolveToolScope, toolInScope, CORE_TOOL_NAMES, META_TO
 // Phase 3 task 6 (3b): storage/ui/slides/subscribe cluster merge landed 157 -> 146.
 // Server-side-optimization sprint task 3 added list_pages: 147 -> 148.
 // Server-side-optimization sprint task 6 added replace_text: 149 -> 150.
-// grip_load_tools (runtime scope widening): 150 -> 151.
-assert.strictEqual(TOOLS.length, 151, `TOOLS.length should be 151, got ${TOOLS.length}`);
+// grip_load_tools (runtime scope widening): 150 -> 151. reorder_grid_tracks: 151 -> 152.
+assert.strictEqual(TOOLS.length, 152, `TOOLS.length should be 152, got ${TOOLS.length}`);
 
 // Every tool has exactly one category; every core/meta name is a real tool.
 const allNames = new Set(TOOLS.map((t) => t.name));

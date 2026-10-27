@@ -23513,6 +23513,7 @@ var TOOL_CATEGORIES = {
     "create_section",
     "set_skip_invisible_instance_children",
     "set_grid_child_position",
+    "reorder_grid_tracks",
     "set_relaunch_data",
     "run_script"
   ],
@@ -23741,7 +23742,14 @@ var MERGED_TOOLS = {
   } },
   animation_style: { discriminator: "op", category: "motion", map: {
     apply: "apply_animation_style",
-    remove: "remove_animation_style"
+    remove: "remove_animation_style",
+    create: "create_custom_animation_style",
+    list_local: "list_custom_animation_styles",
+    update: "update_custom_animation_style",
+    move_style: "move_custom_animation_style",
+    move_folder: "move_custom_animation_folder",
+    add_entry: "add_animation_entry",
+    remove_entry: "remove_animation_entry"
   } },
   manual_keyframe_track: { discriminator: "op", category: "motion", map: {
     apply: "apply_manual_keyframe_track",
@@ -24054,7 +24062,7 @@ var TOOLS = [
   {
     name: "list_pages",
     category: "read",
-    description: "List all pages (id, name, current) WITHOUT loading their contents \u2014 cheap even on a 97-page file, unlike get_document. Use to enumerate pageIds for a batched search_nodes.",
+    description: "List all pages (id, name, current, isPageDivider) WITHOUT loading their contents \u2014 cheap even on a 97-page file, unlike get_document. Use to enumerate pageIds for a batched search_nodes.",
     schema: external_exports.object({})
   },
   {
@@ -24088,7 +24096,7 @@ var TOOLS = [
   {
     name: "set_node_property",
     description: "Set any property on a node \u2014 one dispatcher across ~60 props: numeric (x, y, width, height, opacity, cornerRadius, strokeWeight, fontSize, \u2026), boolean (visible, locked, isMask, clipsContent, \u2026), and passthrough (name, layoutMode, fills, strokes, effects, componentProperties, \u2026). Call grip_capabilities {tool:'set_node_property'} for the full prop list, CSS-grid auto-layout props, and new paint/effect shapes (SHADER/VIDEO/GRADIENT_DIAMOND, NOISE/TEXTURE/GLASS/progressive-blur).",
-    detail: 'Numeric props (non-exhaustive): x, y, width, height, opacity, rotation, padding*, cornerRadius, individual corner radii (topLeftRadius/topRightRadius/bottomLeftRadius/bottomRightRadius), strokeWeight, fontSize, paragraphSpacing, paragraphIndent, itemSpacing, layoutGrow, min/max width/height, etc. Boolean props: visible, locked, isMask, clipsContent, expanded. Passthrough props (non-exhaustive): name, blendMode, layoutMode, layoutAlign, layoutSizing*, primaryAxisSizingMode/counterAxisSizingMode, strokeAlign/strokeJoin/strokeCap, dashPattern, textAlign*, textCase, textDecoration, textAutoResize, lineHeight, letterSpacing, hyperlink, fillStyleId, fills, strokes, effects, layoutGrids, componentProperties, etc. CSS-grid auto-layout: set layoutMode="GRID" then gridRowCount/gridColumnCount, gridRowGap/gridColumnGap, gridColumnSizes/gridRowSizes (arrays of {type:"FLEX"|"FIXED"|"HUG", value}), gridAutoTracks, gridItemsPositioning; per grid-child gridRowSpan/gridColumnSpan/gridRowAnchorIndex/gridColumnAnchorIndex/gridChildHorizontal|VerticalAlign (or use set_grid_child_position). New paint types on fills/strokes: {type:"GRADIENT_DIAMOND",...}, {type:"SHADER", shaderId,...} (import via import_shader first), {type:"VIDEO",...}. New effect types on effects: {type:"NOISE", noiseType:"MONOTONE"|"DUOTONE"|"MULTITONE", density, noiseSize, color}, {type:"TEXTURE", noiseSize, radius, clipToShape}, {type:"GLASS", refraction, depth, lightIntensity, lightAngle, dispersion, radius}, and progressive blur {type:"LAYER_BLUR"|"BACKGROUND_BLUR", blurType:"PROGRESSIVE", radius, startRadius, startOffset, endOffset}.',
+    detail: `Text: textWrapStyle ('AUTO'|'BALANCE'|'PRETTY', node-wide; fonts auto-loaded; per-range via set_text_range_property). fontName takes {family, style?, variationSettings?} \u2014 omit style to let Figma pick the named instance nearest the axes; variationSettings e.g. {wght:550} (axis tags: list_fonts {axesFor:'<family>'}); unknown axes throw. Numeric props (non-exhaustive): x, y, width, height, opacity, rotation, padding*, cornerRadius, individual corner radii (topLeftRadius/topRightRadius/bottomLeftRadius/bottomRightRadius), strokeWeight, fontSize, paragraphSpacing, paragraphIndent, itemSpacing, layoutGrow, min/max width/height, etc. Boolean props: visible, locked, isMask, clipsContent, expanded. Passthrough props (non-exhaustive): name, blendMode, layoutMode, layoutAlign, layoutSizing*, primaryAxisSizingMode/counterAxisSizingMode, strokeAlign/strokeJoin/strokeCap, dashPattern, textAlign*, textCase, textDecoration, textAutoResize, lineHeight, letterSpacing, hyperlink, fillStyleId, fills, strokes, effects, layoutGrids, componentProperties, etc. CSS-grid auto-layout: set layoutMode="GRID" then gridRowCount/gridColumnCount, gridRowGap/gridColumnGap, gridColumnSizes/gridRowSizes (arrays of {type:"FLEX"|"FIXED"|"HUG", value}), gridAutoTracks, gridItemsPositioning; per grid-child gridRowSpan/gridColumnSpan/gridRowAnchorIndex/gridColumnAnchorIndex/gridChildHorizontal|VerticalAlign (or use set_grid_child_position). New paint types on fills/strokes: {type:"GRADIENT_DIAMOND",...}, {type:"SHADER", shaderId,...} (import via import_shader first), {type:"VIDEO",...}. New effect types on effects: {type:"NOISE", noiseType:"MONOTONE"|"DUOTONE"|"MULTITONE", density, noiseSize, color}, {type:"TEXTURE", noiseSize, radius, clipToShape}, {type:"GLASS", refraction, depth, lightIntensity, lightAngle, dispersion, radius}, and progressive blur {type:"LAYER_BLUR"|"BACKGROUND_BLUR", blurType:"PROGRESSIVE", radius, startRadius, startOffset, endOffset}. COLOR SPACES (Figma 141): every color in fills/strokes/effects accepts a #hex, ANY CSS color string ('oklch(0.7 0.1 200)', 'hsl(...)', 'lab(...)', 'rgb(...)', #RRGGBBAA \u2014 alpha becomes paint opacity / color a), or a ColorWithColorSpace {space:"SRGB"|"DISPLAY_P3",r,g,b} | {space:"HSL",h,s,l} | {space:"HSB",h,s,b} | {space:"OKLAB",l,a,b} | {space:"OKLCH",l,c,h}. Paints: {type:"SOLID", hex|color:<any of the above>, sourceColor?, opacity}; gradient stops {position, hex|color, sourceColor?, opacity}; effect colors (color/secondaryColor) take a CSS string, {hex,opacity,sourceColor?} or {space,...}. Reads emit hex (sRGB) PLUS sourceColor ({space,...}) on paints/stops/effect colors when the color was authored in a color space; pass it back as-is to round-trip. If you change hex but leave a stale sourceColor, the sourceColor is dropped (hex wins); to change the authored color, change or drop sourceColor. Non-hex input needs figma.util.rgba (Figma 141+); plain hex works everywhere.`,
     schema: external_exports.object({
       nodeId: external_exports.string(),
       property: external_exports.string(),
@@ -24144,7 +24152,7 @@ var TOOLS = [
   {
     name: "set_variable_value",
     description: "Set a variable's value for a mode ('#hex', {hex,opacity}, {aliasOf}, composed color \u2014 see detail).",
-    detail: "`value` by type \u2014 COLOR: '#hex' | {hex, opacity} | {r,g,b,a?} | an alias | a composed color. FLOAT/STRING/BOOLEAN: the plain value, or an alias. Alias (any type, reads emit this shape): {aliasOf: '<variableId>'} (also accepts {variableId} or Figma's {type:'VARIABLE_ALIAS', id}). Composed color (COLOR only; a color plus a separate opacity, where the color OR the opacity \u2014 or both \u2014 is an alias): {color: <hex | {hex,opacity} | {r,g,b,a?} | {aliasOf}>, opacity: <0\u20131 number | {aliasOf}>}. get_variables returns the same shapes: composed \u2192 {color:{hex,opacity}|{aliasOf}, opacity:number|{aliasOf}}. A composed color with neither part aliased is rejected \u2014 use {hex, opacity}. Same value shapes work in variable create (value/valuesByMode).",
+    detail: "`value` by type \u2014 COLOR: '#hex' | {hex, opacity} | {r,g,b,a?} | an alias | a composed color. FLOAT/STRING/BOOLEAN: the plain value, or an alias. Alias (any type, reads emit this shape): {aliasOf: '<variableId>'} (also accepts {variableId} or Figma's {type:'VARIABLE_ALIAS', id}). Composed color (COLOR only; a color plus a separate opacity, where the color OR the opacity \u2014 or both \u2014 is an alias): {color: <hex | {hex,opacity} | {r,g,b,a?} | {aliasOf}>, opacity: <0\u20131 number | {aliasOf}>}. get_variables returns the same shapes: composed \u2192 {color:{hex,opacity}|{aliasOf}, opacity:number|{aliasOf}}. A composed color with neither part aliased is rejected \u2014 use {hex, opacity}. Same value shapes work in variable create (value/valuesByMode). COLOR also accepts any CSS color string ('oklch(0.7 0.1 200)', 'hsl(...)', 'lab(...)', 'rgb(...)'; string alpha becomes the color's a) or a {space:'OKLCH'|'OKLAB'|'HSL'|'HSB'|'DISPLAY_P3'|'SRGB',...} object, converted to sRGB RGBA (needs Figma 141+; variable values do not store the authoring color space, so reads stay {hex,opacity}).",
     schema: external_exports.object({
       variableId: external_exports.string(),
       modeId: external_exports.string(),
@@ -24154,6 +24162,7 @@ var TOOLS = [
   {
     name: "set_style",
     description: "Create or update a local style. Omit styleId to create a new one.",
+    detail: "PAINT value=Paint[]; EFFECT value=Effect[]; GRID value=LayoutGrid[]. TEXT value={fontName, fontSize, lineHeight, letterSpacing, textCase, textDecoration, textWrapStyle, paragraphSpacing, paragraphIndent}. textWrapStyle: 'AUTO'|'BALANCE'|'PRETTY'. fontName is {family, style?, variationSettings?} \u2014 variable fonts: omit style to let Figma resolve the nearest named instance, variationSettings e.g. {wght:550} (discover axes with list_fonts {axesFor:'<family>'}). get_styles returns textWrapStyle and fontName.variationSettings for text styles. PAINT value = Paint[] and EFFECT value = Effect[], in the same shapes get_styles returns ({type,hex,opacity,sourceColor?,stops?} / {type,color:{hex,opacity,sourceColor?},...}). Colors accept #hex, any CSS color string ('oklch(0.7 0.1 200)', 'hsl(...)', 'lab(...)') or {space,...}; sourceColor round-trips (see set_node_property detail, COLOR SPACES).",
     schema: external_exports.object({
       styleId: external_exports.string().optional(),
       name: external_exports.string(),
@@ -24324,8 +24333,8 @@ var TOOLS = [
   {
     name: "variable",
     category: "variables",
-    description: "Create or delete a variable. `op`: create ({name, collectionId, resolvedType, value?/valuesByMode?, ...}) | delete ({variableId}). Call grip_capabilities {tool:'variable'} for per-op params.",
-    detail: "op=create: create a new variable in a collection (was create_variable) \u2014 {name, collectionId, resolvedType: COLOR|FLOAT|STRING|BOOLEAN, value?, valuesByMode?, description?, scopes?, codeSyntax?, hiddenFromPublishing?}. op=delete: delete a variable (was delete_variable) \u2014 {variableId}.",
+    description: "Create or delete a variable. `op`: create ({name, collectionId, resolvedType COLOR|FLOAT|STRING|BOOLEAN|EASING|TIMING, value?/valuesByMode?, ...}) | delete ({variableId}). Call grip_capabilities {tool:'variable'} for per-op params.",
+    detail: "op=create: create a new variable in a collection (was create_variable) \u2014 {name, collectionId, resolvedType: COLOR|FLOAT|STRING|BOOLEAN|EASING|TIMING, value?, valuesByMode?, description?, scopes?, codeSyntax?, hiddenFromPublishing?}. EASING value (motion easing): a type name ('EASE_IN'|'EASE_OUT'|'EASE_IN_AND_OUT'|'LINEAR'|'EASE_IN_BACK'|'EASE_OUT_BACK'|'EASE_IN_AND_OUT_BACK'|'GENTLE'|'QUICK'|'BOUNCY'|'SLOW'|'HOLD') or {type, ...}; custom curves: {type:'CUSTOM_CUBIC_BEZIER', x1,y1,x2,y2} (or easingFunctionCubicBezier:{x1,y1,x2,y2}) and {type:'CUSTOM_SPRING', bounce:0..1} (or easingFunctionSpring:{bounce}). TIMING value: a number of seconds (>= 0). Either may also be an alias {aliasOf}. Reads return EASING as the plain MotionEasing object and TIMING as the number. op=delete: delete a variable (was delete_variable) \u2014 {variableId}.",
     schema: external_exports.object({ op: external_exports.enum(["create", "delete"]) }).passthrough()
   },
   {
@@ -24338,6 +24347,7 @@ var TOOLS = [
   {
     name: "set_variable_meta",
     description: "Update a variable's metadata (name, description, scopes, codeSyntax, hiddenFromPublishing). Values are unchanged \u2014 use set_variable_value for those.",
+    detail: "scopes accepts any of: ALL_SCOPES, TEXT_CONTENT, CORNER_RADIUS, WIDTH_HEIGHT, GAP, ALL_FILLS, FRAME_FILL, SHAPE_FILL, TEXT_FILL, STROKE_COLOR, STROKE_FLOAT, EFFECT_FLOAT, EFFECT_COLOR, OPACITY, COLOR_OPACITY (the opacity part of a composed color; Update 139), FONT_FAMILY, FONT_STYLE, FONT_WEIGHT, FONT_SIZE, LINE_HEIGHT, LETTER_SPACING, PARAGRAPH_SPACING, PARAGRAPH_INDENT. Scopes only control where the variable appears in Figma's variable pickers; they do not block API bindings.",
     schema: external_exports.object({
       variableId: external_exports.string(),
       name: external_exports.string().optional(),
@@ -24389,13 +24399,15 @@ var TOOLS = [
   },
   {
     name: "list_fonts",
-    description: "List fonts available in this editor. Optional case-insensitive family filter.",
-    schema: external_exports.object({ family: external_exports.string().optional() })
+    description: "List fonts available in this editor. Optional case-insensitive family filter. axesFor:<family> returns that family's variable-font axes instead.",
+    detail: "Default: [{family, style}]. With axesFor:'<exact family>' (case-insensitive) returns ONE object {family, available, variable, axes, styles}: axes = OpenType axis tags from figma.getFontFamilyVariationAxes (e.g. ['wght','wdth','slnt','opsz']; null for a static family), variable = axes!==null, styles = the family's named instances. Tags only \u2014 no min/max/default ranges are exposed by the API. If the API is missing (Figma older than update 138) or the family is unknown, returns {available:false, axes:null, variable:null, styles, error}. Use the tags as keys of fontName.variationSettings.",
+    schema: external_exports.object({ family: external_exports.string().optional(), axesFor: external_exports.string().optional() })
   },
   {
     name: "load_font",
-    description: "Pre-load a font so subsequent text writes do not throw. Style defaults to Regular.",
-    schema: external_exports.object({ family: external_exports.string(), style: external_exports.string().optional() })
+    description: "Pre-load a font so subsequent text writes do not throw. Omit style: loads all.",
+    detail: "Shape {family, style?, variationSettings?}. With style: loads that one style -> {success, family, style}. Without style: loads EVERY style of the family (variable and static families; Figma FontNameInput) -> {success, family, style:null, allStyles:true}; if the client rejects a style-less load it falls back to the legacy 'Regular' default -> {success, family, style:'Regular', allStyles:false}. variationSettings (e.g. {wght:550}) is accepted for symmetry with node.fontName but ignored by loading (it affects rendering only) and echoed back when style is omitted. set_node_property fontName, set_text_range_property fontName and set_style TEXT already auto-load what they need.",
+    schema: external_exports.object({ family: external_exports.string(), style: external_exports.string().optional(), variationSettings: external_exports.record(external_exports.number()).optional() })
   },
   {
     name: "set_reactions",
@@ -24612,8 +24624,8 @@ var TOOLS = [
   {
     name: "component_property",
     category: "components",
-    description: "Add, edit, or delete a COMPONENT/COMPONENT_SET property definition. `op`: add ({componentId, name, type, defaultValue, preferredValues?}) | edit ({componentId, propertyName, newName?, defaultValue?, preferredValues?}) | delete ({componentId, propertyName}). Call grip_capabilities {tool:'component_property'} for per-op params.",
-    detail: "op=add: add a property to a COMPONENT or COMPONENT_SET (was add_component_property) \u2014 {componentId, name, type: VARIANT|TEXT|BOOLEAN|INSTANCE_SWAP, defaultValue, preferredValues?}. op=edit: rename or change defaults on a component's property; propertyName matches Figma's `name#hash` (was edit_component_property) \u2014 {componentId, propertyName, newName?, defaultValue?, preferredValues?}. op=delete: remove a property from a component / component set (was delete_component_property) \u2014 {componentId, propertyName}.",
+    description: "Add, edit, or delete a COMPONENT/COMPONENT_SET property definition. `op`: add ({componentId, name, type, defaultValue, preferredValues?, description?, slotSettings?}) | edit ({componentId, propertyName, newName?, defaultValue?, preferredValues?, description?, slotSettings?}) | delete ({componentId, propertyName}). Call grip_capabilities {tool:'component_property'} for per-op params.",
+    detail: "op=add: add a property to a COMPONENT or COMPONENT_SET (was add_component_property) \u2014 {componentId, name, type: VARIANT|TEXT|BOOLEAN|INSTANCE_SWAP|SLOT, defaultValue (omit for SLOT), preferredValues?, description? (SLOT only), slotSettings? (SLOT only)}. op=edit: rename or change defaults on a component's property; propertyName matches Figma's `name#hash` (was edit_component_property) \u2014 {componentId, propertyName, newName?, defaultValue?, preferredValues?, description? (SLOT only), slotSettings? (SLOT only)}. op=delete: remove a property from a component / component set (was delete_component_property) \u2014 {componentId, propertyName}. slotSettings (SLOT properties; unknown keys rejected): {minChildren?: int|null, maxChildren?: int|null (null clears the limit), stretchChildOnInsert?: bool, displayEmptyByDefault?: bool, allowPreferredValuesOnly?: bool}. Reads: get_node/get_components componentPropertyDefinitions carry slotSettings on SLOT properties; a SLOT node serializes limitViolations (BELOW_MIN|ABOVE_MAX|HAS_NON_PREFERRED, [] when within limits).",
     schema: external_exports.object({ op: external_exports.enum(["add", "edit", "delete"]) }).passthrough()
   },
   {
@@ -24817,19 +24829,38 @@ var TOOLS = [
   { name: "extend_library_collection_by_key", description: "Extend a remote variable collection (from team library) into this file by its key.", schema: external_exports.object({ key: external_exports.string() }) },
   { name: "request_variable_to_be_enabled", description: "Request that a library variable be enabled in this file.", schema: external_exports.object({ variableId: external_exports.string() }) },
   { name: "request_variable_to_be_disabled", description: "Request that a library variable be disabled in this file.", schema: external_exports.object({ variableId: external_exports.string() }) },
-  { name: "create_slot", description: "Create a SLOT inside a COMPONENT (used for slot-based variant authoring).", schema: external_exports.object({ componentId: external_exports.string(), name: external_exports.string().optional() }) },
+  {
+    name: "create_slot",
+    description: "Create a SLOT inside a COMPONENT (used for slot-based variant authoring). Optional slotSettings/preferredValues/description configure its SLOT property; see detail.",
+    detail: "{componentId, name?, slotSettings?: {minChildren?: int|null, maxChildren?: int|null, stretchChildOnInsert?: bool, displayEmptyByDefault?: bool, allowPreferredValuesOnly?: bool}, preferredValues?: [{type:'COMPONENT'|'COMPONENT_SET', key}], description?, propertyName?}. createSlot() itself takes no arguments, so the settings are applied afterwards with editComponentProperty to the SLOT property the call just created (auto-detected as the one new SLOT key in componentPropertyDefinitions; pass propertyName to target one explicitly). Returns {id, name, type} plus, when settings were requested, {propertyName, slotSettingsApplied:true} \u2014 or slotSettingsApplied:false + warning if the property could not be identified (then use component_property op=edit).",
+    schema: external_exports.object({
+      componentId: external_exports.string(),
+      name: external_exports.string().optional(),
+      slotSettings: external_exports.object({
+        minChildren: external_exports.number().int().nullable().optional(),
+        maxChildren: external_exports.number().int().nullable().optional(),
+        stretchChildOnInsert: external_exports.boolean().optional(),
+        displayEmptyByDefault: external_exports.boolean().optional(),
+        allowPreferredValuesOnly: external_exports.boolean().optional()
+      }).optional(),
+      preferredValues: external_exports.array(external_exports.object({ type: external_exports.enum(["COMPONENT", "COMPONENT_SET"]), key: external_exports.string() })).optional(),
+      description: external_exports.string().optional(),
+      propertyName: external_exports.string().optional()
+    })
+  },
   { name: "set_grid_child_position", description: 'Place a direct child of a GRID auto-layout frame at a 0-based (row, column) cell. Configure the grid container first via set_node_property (layoutMode="GRID", gridRowCount/gridColumnCount, gridRowGap/gridColumnGap, gridColumnSizes/gridRowSizes).', schema: external_exports.object({ nodeId: external_exports.string(), row: external_exports.number().int().nonnegative(), column: external_exports.number().int().nonnegative() }) },
+  { name: "reorder_grid_tracks", description: "Reorder rows or columns of a GRID auto-layout frame. `axis`: 'rows' | 'columns'; `fromIndices` (any order, non-contiguous OK), `insertionIndex` (0..count inclusive, against the ORIGINAL order). Returns {success, moves:[{from,to}]}; spanning children pull their tracks along. Call grip_capabilities {tool:'reorder_grid_tracks'} for details.", detail: "Wraps GridLayoutMixin.reorderRows/reorderColumns (Figma 1.142). The node must be a frame with layoutMode:'GRID'. Example: axis:'rows', fromIndices:[0], insertionIndex:3 on a 3-row grid moves row 0 to the end. A TABLE node does not have this method \u2014 FigJam tables use table_op move_row/move_column.", schema: external_exports.object({ nodeId: external_exports.string(), axis: external_exports.enum(["rows", "columns"]), fromIndices: external_exports.array(external_exports.number().int().nonnegative()).min(1), insertionIndex: external_exports.number().int().nonnegative() }) },
   { name: "list_shaders", description: 'List shaders available to this file (Figma shader subsystem). Returns an array of shader descriptors (empty if the file has none). Use a returned id with import_shader, then apply via set_node_property fills/effects with {type:"SHADER", shaderId}.', schema: external_exports.object({}) },
   { name: "import_shader", description: "Materialize a shader into this file by id (get the id from list_shaders). Returns the imported shader descriptor. Required before a SHADER paint/effect referencing it can be applied.", schema: external_exports.object({ shaderId: external_exports.string() }) },
   // ---------- Motion (native keyframe/timeline animation, distinct from prototype reactions) ----------
-  { name: "list_animation_styles", description: "List Figma Motion built-in animation presets (Position, Scale, Rotation, Size, Opacity, Path). Each returns {styleId, name, description, props}. NOTE: `props` is a human/type DESCRIPTOR of the preset, not the exact applyAnimationStyle input schema (which is stricter and validated by Figma) \u2014 start minimal (e.g. {duration}) and read Figma's error to refine.", schema: external_exports.object({}) },
+  { name: "list_animation_styles", description: "List Figma Motion built-in animation presets (Position, Scale, Rotation, Size, Opacity, Path). Each returns {styleId, name, description, props}. NOTE: `props` is a human/type DESCRIPTOR of the preset, not the exact applyAnimationStyle input schema (which is stricter and validated by Figma) \u2014 start minimal (e.g. {duration}) and read Figma's error to refine. Custom (user-made) styles: animation_style op=list_local.", schema: external_exports.object({}) },
   { name: "get_animations", description: "Read a node's Motion data: {animationStyles, animations, manualKeyframeTracks, timelines}. Dedicated read tool (not part of get_node) to avoid bloating every node read.", schema: external_exports.object({ nodeId: external_exports.string() }) },
   {
     name: "animation_style",
     category: "motion",
-    description: "Apply or remove a Figma Motion built-in preset on a node. `op`: apply ({nodeId, styleId, props?}) | remove ({nodeId, id}). Call grip_capabilities {tool:'animation_style'} for per-op params.",
-    detail: "op=apply: apply a Figma Motion preset to a node; styleId from list_animation_styles, props is the preset data forwarded verbatim to node.applyAnimationStyle (Figma validates per-preset) \u2014 was apply_animation_style \u2014 {nodeId, styleId, props?}. op=remove: remove an applied Motion preset from a node; `id` is the applied-instance id (animationStyles[].id from get_animations), NOT the preset styleId \u2014 was remove_animation_style \u2014 {nodeId, id}.",
-    schema: external_exports.object({ op: external_exports.enum(["apply", "remove"]) }).passthrough()
+    description: "Apply/remove Figma Motion animation styles on a node, and create/edit/reorder CUSTOM animation styles. `op`: apply | remove | create | list_local | update | move_style | move_folder | add_entry | remove_entry. Call grip_capabilities {tool:'animation_style'} for per-op params.",
+    detail: 'op=apply: apply a style to a node \u2014 {nodeId, styleId, props?}. For a Figma preset, styleId from list_animation_styles and props is the preset data forwarded verbatim to node.applyAnimationStyle (Figma validates per-preset). For a CUSTOM style (styleId = id from create/list_local), type:"CUSTOM" is added automatically; optional props:{timelineOffset:<sec>}. Returns {success, id} where id is the applied-instance id. op=remove: remove an applied style from a node \u2014 {nodeId, id}; `id` is the applied-instance id (animationStyles[].id from get_animations), NOT the style id. op=create: create a custom animation style (a named bundle of Figma animations) \u2014 {name?, description?, entries?:[{styleId, props?}]}; each entry styleId is a preset from list_animation_styles; a "Folder/Name" name puts it in a folder; returns {id,key,name,description,type:"CUSTOM_ANIMATION",remote,animationEntries}. The new style is removed again if an entry fails. op=list_local: list local custom animation styles, same shape \u2014 {}. op=update: rename/redescribe \u2014 {styleId, name?, description?}. op=move_style: reorder within its folder \u2014 {styleId, afterStyleId?} (omit afterStyleId = first); both must be local custom styles in the same folder. op=move_folder: reorder a folder \u2014 {folder, afterFolder?} using the full "/"-delimited folder name; same parent folder required. op=add_entry: add a Figma animation to a custom style \u2014 {styleId, entryStyleId, props?}; throws if the style is remote or the preset cannot be added programmatically; returns {entry, style}. op=remove_entry: {styleId, entryId} (entryId = animationEntries[].id); returns the updated style. Delete a custom style with delete_style {styleId}. Applied custom styles also show in get_animations.animationStyles (type:"CUSTOM").',
+    schema: external_exports.object({ op: external_exports.enum(["apply", "remove", "create", "list_local", "update", "move_style", "move_folder", "add_entry", "remove_entry"]) }).passthrough()
   },
   {
     name: "manual_keyframe_track",
@@ -24872,6 +24903,7 @@ var TOOLS = [
   {
     name: "set_text_range_property",
     description: "Apply a per-range property to part of a TEXT node. property: fills, fontName, fontSize, fontWeight, lineHeight, letterSpacing, textCase, textDecoration, hyperlink, listOptions, paragraphSpacing, paragraphIndent.",
+    detail: "Calls Figma's setRange<Property>(start,end,value) after loading the range's fonts. Also: property 'textWrapStyle' -> 'AUTO'|'BALANCE'|'PRETTY' (applies to the paragraph(s) containing the range; validated). property 'fontName' -> {family, style?, variationSettings?}: the target font is auto-loaded; omit style to get the named instance nearest the axes (e.g. {family:'Inter', variationSettings:{wght:650}}); unknown axis tags throw (see list_fonts {axesFor}). Read back per range with get_styled_text_segments fields ['fontName','textWrapStyle'].",
     schema: external_exports.object({
       nodeId: external_exports.string(),
       start: external_exports.number().int().nonnegative(),
@@ -24889,6 +24921,14 @@ var TOOLS = [
     subscription: true
   }
 ];
+var EXTRA_DETAIL = {
+  set_node_property: ' Auto-layout enums (passthrough): primaryAxisAlignItems "MIN"|"CENTER"|"MAX"|"SPACE_BETWEEN"|"SPACE_EVENLY"|"SPACE_AROUND" (SPACE_EVENLY: equal gaps before first, between and after last; SPACE_AROUND: equal gaps between, half-gaps at the ends); layoutWrap "NO_WRAP"|"WRAP" \u2014 WRAP now works on layoutMode "VERTICAL" as well as "HORIZONTAL" (set layoutMode first). Effects: a NOISE effect round-trips noiseSizeVector {x,y} (x must equal noiseSize).',
+  set_variable_value: " EASING variables (motion): a type name 'EASE_IN'|'EASE_OUT'|'EASE_IN_AND_OUT'|'LINEAR'|'EASE_IN_BACK'|'EASE_OUT_BACK'|'EASE_IN_AND_OUT_BACK'|'GENTLE'|'QUICK'|'BOUNCY'|'SLOW'|'HOLD', or {type, easingFunctionCubicBezier?:{x1,y1,x2,y2}, easingFunctionSpring?:{bounce}}; shorthand {type:'CUSTOM_CUBIC_BEZIER', x1,y1,x2,y2} and {type:'CUSTOM_SPRING', bounce} also accepted. Reads return the plain MotionEasing object. TIMING variables: a number of seconds (>= 0). Both also accept an alias."
+};
+for (const [toolName, extra] of Object.entries(EXTRA_DETAIL)) {
+  const t = TOOLS.find((x) => x.name === toolName);
+  if (t) t.detail = (t.detail ?? "") + extra;
+}
 var richReadProps = {
   depth: { type: "integer", description: "1..N, -1 for full tree. Default 12 for node reads." },
   maxNodes: { type: "integer", description: "Max nodes to walk before children collapse to stubs + truncated:true. Default 3000; pass 0 for unbounded (can be slow on big selections)." },
@@ -25041,6 +25081,18 @@ function toolInputSchema(name) {
           column: { type: "integer", description: "0-based grid column" }
         },
         required: ["nodeId", "row", "column"],
+        additionalProperties: false
+      };
+    case "reorder_grid_tracks":
+      return {
+        type: "object",
+        properties: {
+          nodeId: { type: "string", description: "A GRID auto-layout frame" },
+          axis: { type: "string", enum: ["rows", "columns"] },
+          fromIndices: { type: "array", items: { type: "integer" }, description: "0-based tracks to move (any order)" },
+          insertionIndex: { type: "integer", description: "0..count inclusive, against the original order" }
+        },
+        required: ["nodeId", "axis", "fromIndices", "insertionIndex"],
         additionalProperties: false
       };
     case "import_shader":
@@ -25327,7 +25379,7 @@ function toolInputSchema(name) {
         properties: {
           name: { type: "string" },
           collectionId: { type: "string" },
-          resolvedType: { type: "string", enum: ["COLOR", "FLOAT", "STRING", "BOOLEAN"] },
+          resolvedType: { type: "string", enum: ["COLOR", "FLOAT", "STRING", "BOOLEAN", "EASING", "TIMING"] },
           value: {},
           valuesByMode: { type: "object" },
           description: { type: "string" },
@@ -25440,7 +25492,7 @@ function toolInputSchema(name) {
     case "list_fonts":
       return {
         type: "object",
-        properties: { family: { type: "string" } },
+        properties: { family: { type: "string" }, axesFor: { type: "string", description: "Return this family's variable-font axes ({family,available,variable,axes,styles}) instead of the font list." } },
         additionalProperties: false
       };
     case "load_font":
@@ -25448,7 +25500,8 @@ function toolInputSchema(name) {
         type: "object",
         properties: {
           family: { type: "string" },
-          style: { type: "string" }
+          style: { type: "string", description: "Omit to load every style of the family." },
+          variationSettings: { type: "object", additionalProperties: { type: "number" }, description: "Variable-font axes, e.g. {wght:550}. Ignored by loading." }
         },
         required: ["family"],
         additionalProperties: false

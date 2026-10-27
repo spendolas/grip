@@ -1,6 +1,6 @@
 # Grip MCP Tools
 
-151 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
+152 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
 
 Phase 3 merged 19 clusters of "N verbs on one object" into single op-enum-dispatched tools — the former per-verb tools no longer exist as standalone entries below; call them via the merged tool's `op`/`target` discriminator (e.g. `group {op:'group'|'ungroup', nodeId(s)}`, `bind_to_variable {target:'property'|'paint'|'effect'|'layout_grid', ...}`, `timer {op:'start'|'stop'|'pause'|'resume'}`). Per-op params are in `grip_capabilities {tool:'<name>'}`.
 
@@ -520,7 +520,6 @@ Merged: insert/remove/move/resize/read rows and columns of a FigJam TABLE, dispa
 - `op: 'remove_row'` / `'remove_column'` — `{ op, nodeId, index }`.
 - `op: 'move_row'` / `'move_column'` — `{ op, nodeId, fromIndex, toIndex }`.
 - `op: 'resize_row'` — `{ op, nodeId, index, height }`. `op: 'resize_column'` — `{ op, nodeId, index, width }`.
-- `op: 'reorder_rows'` / `'reorder_columns'` — `{ op, nodeId, fromIndices: number[], insertionIndex: number }` → `{ success, moves: [{ from, to }] }`. Moves several tracks at once: `fromIndices` need not be sorted, contiguous or deduplicated; `insertionIndex` is evaluated against the **original** order and ranges `0..count` inclusive (e.g. rows `[0]` with `insertionIndex: 3` on a 3-row grid moves row 0 to the end). Wraps Figma's native `reorderRows`/`reorderColumns`, which the 1.142 typings declare on auto-layout **GRID frames** (`layoutMode: 'GRID'`; children spanning moved tracks drag those tracks along and appear in `moves`), not on `TableNode`. On a TABLE that lacks the method the op errors and points to `move_row`/`move_column`.
 - `op: 'cell_at'` — `{ op, nodeId, row, column }` → the cell at that position.
 
 ---
@@ -695,6 +694,8 @@ Set `layoutMode="GRID"` via `set_node_property`, then configure with more `set_n
 
 ### `set_grid_child_position` — `{ nodeId, row, column }` (0-based). Wraps `node.setGridChildPosition`.
 
+### `reorder_grid_tracks` — `{ nodeId, axis: 'rows' | 'columns', fromIndices: number[], insertionIndex }` → `{ success, moves: [{ from, to }] }`. Wraps `reorderRows` / `reorderColumns` (typings ≥ 1.142) on a GRID auto-layout frame. `fromIndices` need not be sorted or contiguous; `insertionIndex` is against the **original** order, `0..count` inclusive (rows `[0]` with `insertionIndex: 3` on a 3-row grid moves row 0 to the end). Spanning children pull their tracks along, and `moves` lists them. Not for FigJam tables — use `table_op` `move_row` / `move_column`.
+
 ## Shaders (v0.2.9)
 
 ### `list_shaders` — none. Returns shader descriptors available to the file (`[]` if none).
@@ -750,7 +751,7 @@ Applied via `set_node_property` fills/strokes/effects (fully-shaped objects pass
 
 ## Tool scoping (`GRIP_TOOLS`)
 
-By default an agent only sees the `core` scope (~35 always-useful tools), not the full 151 — this keeps per-turn schema weight small. Widen the scope per agent — at launch (below) or mid-session with `grip_load_tools {categories:['motion', …]}` (or `'all'`), and drop them again with `grip_load_tools {unload:['motion']}` (`'all'` resets to core; `core`/`meta` can't be unloaded, and tools that are also in core stay). Each change refreshes the tool list via `tools/list_changed` (applies next turn; clients that ignore the notification can still use `run_script`). Not available to restricted scopes without `run_script` (e.g. `GRIP_TOOLS=read`):
+By default an agent only sees the `core` scope (~35 always-useful tools), not the full 152 — this keeps per-turn schema weight small. Widen the scope per agent — at launch (below) or mid-session with `grip_load_tools {categories:['motion', …]}` (or `'all'`), and drop them again with `grip_load_tools {unload:['motion']}` (`'all'` resets to core; `core`/`meta` can't be unloaded, and tools that are also in core stay). Each change refreshes the tool list via `tools/list_changed` (applies next turn; clients that ignore the notification can still use `run_script`). Not available to restricted scopes without `run_script` (e.g. `GRIP_TOOLS=read`):
 
 - **stdio:** set env `GRIP_TOOLS=core,motion` on the agent process (delivered to the daemon as an IPC control frame, alongside `GRIP_FILE`).
 - **HTTP:** pass `?tools=core,motion` on the `/mcp` URL.

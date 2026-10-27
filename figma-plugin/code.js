@@ -32,6 +32,106 @@ function hexToRgb(hex) {
         b: (n & 0xff) / 255,
     };
 }
+const PLAIN_HEX_RE = /^#?(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+function utilRgba(input) {
+    const u = figma.util;
+    if (!u || typeof u.rgba !== 'function') {
+        throw new Error('color spaces / CSS color strings need figma.util.rgba (Figma update 141+) — use a #hex or {r,g,b} instead');
+    }
+    try {
+        return u.rgba(input);
+    }
+    catch (e) {
+        throw new Error(`Invalid color ${typeof input === 'string' ? JSON.stringify(input) : JSON.stringify(input)}: ${e && e.message ? e.message : e}`);
+    }
+}
+// A JSON-plain copy of a sourceColor (ColorWithColorSpace), or undefined.
+function plainSource(sc) {
+    if (!sc || typeof sc !== 'object' || typeof sc.space !== 'string')
+        return undefined;
+    const o = {};
+    for (const k of Object.keys(sc))
+        if (typeof sc[k] === 'string' || typeof sc[k] === 'number')
+            o[k] = sc[k];
+    return o;
+}
+function fromUtilRgba(d) {
+    const out = { r: d.r, g: d.g, b: d.b, a: typeof d.a === 'number' ? d.a : 1 };
+    const sc = plainSource(d.sourceColor);
+    if (sc)
+        out.sourceColor = sc;
+    return out;
+}
+function cssToParsed(s) {
+    const str = s.trim();
+    // Plain #hex / hex stays on the exact legacy path (byte-for-byte unchanged).
+    if (PLAIN_HEX_RE.test(str))
+        return Object.assign(Object.assign({}, hexToRgb(str)), { a: 1 });
+    return fromUtilRgba(utilRgba(str));
+}
+// Attach an explicit sourceColor to a base color. The sourceColor wins (full
+// precision) only if it still matches the base color to 8 bits; if the agent
+// edited hex/rgb on a read-back color the stale sourceColor is dropped.
+function reconcileSource(base, src) {
+    const sc = plainSource(src);
+    if (!sc)
+        return base;
+    let d;
+    try {
+        d = utilRgba(sc);
+    }
+    catch (_a) {
+        return base;
+    }
+    if (rgbToHex(d.r, d.g, d.b) !== rgbToHex(base.r, base.g, base.b))
+        return base;
+    return { r: d.r, g: d.g, b: d.b, a: base.a, sourceColor: sc };
+}
+function resolveColor(v) {
+    var _a, _b, _c;
+    if (typeof v === 'string')
+        return cssToParsed(v);
+    if (v && typeof v === 'object') {
+        if (typeof v.hex === 'string') {
+            const base = cssToParsed(v.hex);
+            if (typeof v.opacity === 'number')
+                base.a = v.opacity;
+            return v.sourceColor !== undefined ? reconcileSource(base, v.sourceColor) : base;
+        }
+        if (typeof v.space === 'string' && !('sourceColor' in v))
+            return fromUtilRgba(utilRgba(v));
+        if (typeof v.r === 'number' && typeof v.g === 'number' && typeof v.b === 'number') {
+            const base = { r: v.r, g: v.g, b: v.b, a: (_b = (_a = v.a) !== null && _a !== void 0 ? _a : v.opacity) !== null && _b !== void 0 ? _b : 1 };
+            return v.sourceColor !== undefined ? reconcileSource(base, v.sourceColor) : base;
+        }
+        if (v.sourceColor !== undefined) {
+            const d = fromUtilRgba(utilRgba((_c = plainSource(v.sourceColor)) !== null && _c !== void 0 ? _c : v.sourceColor));
+            if (typeof v.opacity === 'number')
+                d.a = v.opacity;
+            else if (typeof v.a === 'number')
+                d.a = v.a;
+            return d;
+        }
+    }
+    throw new Error('color expects a #hex or CSS color string, {hex, opacity}, {r,g,b,a?}, {space,...} or {sourceColor}');
+}
+// Merge a separate sourceColor field into a color input (string | object).
+function withSource(colorIn, sourceColor) {
+    if (sourceColor === undefined)
+        return colorIn;
+    if (typeof colorIn === 'string')
+        return { hex: colorIn, sourceColor };
+    if (colorIn && typeof colorIn === 'object' && colorIn.sourceColor === undefined)
+        return Object.assign(Object.assign({}, colorIn), { sourceColor });
+    return colorIn;
+}
+// RGB(A) color object (what Figma wants for paint/stop/effect colors).
+function colorObj(c, withAlpha) {
+    const o = withAlpha ? { r: c.r, g: c.g, b: c.b, a: c.a } : { r: c.r, g: c.g, b: c.b };
+    if (c.sourceColor)
+        o.sourceColor = c.sourceColor;
+    return o;
+}
 function serializePaint(paint) {
     var _a, _b;
     const base = {
@@ -42,6 +142,9 @@ function serializePaint(paint) {
     };
     if (paint.type === 'SOLID') {
         base.hex = rgbToHex(paint.color.r, paint.color.g, paint.color.b);
+        const psc = plainSource(paint.color.sourceColor);
+        if (psc)
+            base.sourceColor = psc;
         if ((_b = paint.boundVariables) === null || _b === void 0 ? void 0 : _b.color) {
             base.boundVariable = paint.boundVariables.color;
         }
@@ -50,11 +153,15 @@ function serializePaint(paint) {
         const g = paint;
         base.stops = g.gradientStops.map((s) => {
             var _a;
-            return ({
+            const stop = {
                 position: s.position,
                 hex: rgbToHex(s.color.r, s.color.g, s.color.b),
                 opacity: (_a = s.color.a) !== null && _a !== void 0 ? _a : 1,
-            });
+            };
+            const ssc = plainSource(s.color.sourceColor);
+            if (ssc)
+                stop.sourceColor = ssc;
+            return stop;
         });
         base.transform = g.gradientTransform;
     }
@@ -110,7 +217,11 @@ function serializeEffectValue(v) {
         return v;
     // RGBA color → hex + opacity
     if (typeof v.r === 'number' && typeof v.g === 'number' && typeof v.b === 'number') {
-        return { hex: rgbToHex(v.r, v.g, v.b), opacity: typeof v.a === 'number' ? v.a : 1 };
+        const col = { hex: rgbToHex(v.r, v.g, v.b), opacity: typeof v.a === 'number' ? v.a : 1 };
+        const csc = plainSource(v.sourceColor);
+        if (csc)
+            col.sourceColor = csc;
+        return col;
     }
     // Vector
     if (typeof v.x === 'number' && typeof v.y === 'number' && Object.keys(v).length === 2) {
@@ -146,6 +257,29 @@ function plainData(v) {
     }
     return o;
 }
+// Custom animation styles (Motion): BaseStyleMixin fields + animationEntries.
+function serializeCustomAnimationStyle(s) {
+    var _a;
+    return {
+        id: s.id,
+        key: s.key,
+        name: s.name,
+        description: s.description,
+        type: s.type,
+        remote: !!s.remote,
+        animationEntries: (_a = plainData(s.animationEntries)) !== null && _a !== void 0 ? _a : [],
+    };
+}
+async function getCustomAnimationStyle(id) {
+    if (typeof id !== 'string' || !id)
+        throw new Error("'styleId' (a custom animation style id) is required");
+    const s = await figma.getStyleByIdAsync(id);
+    if (!s)
+        throw new Error(`Style not found: ${id}`);
+    if (s.type !== 'CUSTOM_ANIMATION')
+        throw new Error(`Style ${id} is ${s.type}, not a CUSTOM_ANIMATION style`);
+    return s;
+}
 const _libScans = new Map();
 let _libScanSeq = 0;
 // Inverse of serializeEffectValue — accept the shapes our reads emit so a
@@ -160,17 +294,37 @@ function rehydrateValue(v) {
     if (Array.isArray(v))
         return v.map(rehydrateValue);
     // {hex, opacity} → RGBA (only when it isn't already an {r,g,b} color).
+    // hex may also be any CSS color string; an optional sourceColor rides along.
     if (typeof v.hex === 'string' && !('r' in v)) {
-        const rgb = hexToRgb(v.hex);
-        return { r: rgb.r, g: rgb.g, b: rgb.b, a: typeof v.opacity === 'number' ? v.opacity : 1 };
+        return colorObj(resolveColor(v), true);
+    }
+    // {sourceColor, opacity?} with no hex → derive RGBA from the color space.
+    if (v.sourceColor !== undefined && typeof v.hex !== 'string' && !('r' in v)) {
+        return colorObj(resolveColor(v), true);
     }
     // Our serialized alias shape → Figma's alias shape.
     if (v.type === 'VARIABLE_ALIAS' && typeof v.variableId === 'string' && !('id' in v)) {
         return { type: 'VARIABLE_ALIAS', id: v.variableId };
     }
     const out = {};
-    for (const k of Object.keys(v))
-        out[k] = rehydrateValue(v[k]);
+    for (const k of Object.keys(v)) {
+        const x = v[k];
+        // A color given as a CSS string / {space,...} under a color key (effect
+        // color, duotone secondaryColor, …) → RGBA (+ sourceColor).
+        if ((k === 'color' || k === 'secondaryColor') &&
+            x &&
+            (typeof x === 'string' || (typeof x === 'object' && typeof x.space === 'string'))) {
+            try {
+                out[k] = colorObj(resolveColor(x), true);
+                continue;
+            }
+            catch (e) {
+                if (typeof x === 'object')
+                    throw e;
+            }
+        }
+        out[k] = rehydrateValue(x);
+    }
     return out;
 }
 function hasFills(node) {
@@ -357,6 +511,10 @@ async function serializeNode(node, optsOrDepth, maxDepth, includeChildren) {
             out.textAutoResize = t.textAutoResize;
         if (want('textCase') && t.textCase !== figma.mixed)
             out.textCase = t.textCase;
+        // Figma update 134. Omitted when mixed across ranges (read per-range with
+        // get_styled_text_segments fields:['textWrapStyle']) or on older clients.
+        if (want('textWrapStyle') && t.textWrapStyle !== undefined && t.textWrapStyle !== figma.mixed)
+            out.textWrapStyle = t.textWrapStyle;
         if (want('textDecoration') && t.textDecoration !== figma.mixed)
             out.textDecoration = t.textDecoration;
         if (want('lineHeight') && t.lineHeight !== figma.mixed)
@@ -397,6 +555,22 @@ async function serializeNode(node, optsOrDepth, maxDepth, includeChildren) {
             out.exposedInstances = (_b = inst.exposedInstances) === null || _b === void 0 ? void 0 : _b.map((x) => ({ id: x.id, name: x.name }));
         if (want('isExposedInstance'))
             out.isExposedInstance = inst.isExposedInstance;
+    }
+    // A SLOT's current contents vs the limits set on its SLOT property's slotSettings.
+    if (node.type === 'SLOT') {
+        maybe(out, opts, 'limitViolations', () => {
+            var _a;
+            try {
+                return Array.from((_a = node.limitViolations) !== null && _a !== void 0 ? _a : []);
+            }
+            catch (_b) {
+                return undefined;
+            }
+        });
+    }
+    // Page dividers are PAGE nodes whose name is all '*' / '–' / '—' / spaces.
+    if (node.type === 'PAGE') {
+        maybe(out, opts, 'isPageDivider', () => node.isPageDivider === true);
     }
     if (node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') {
         const c = node;
@@ -597,7 +771,7 @@ function inspectScript(code) {
     return null;
 }
 async function handle(method, params, reqId) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, _17, _18, _19, _20, _21, _22, _23, _24, _25, _26, _27, _28, _29, _30, _31, _32, _33, _34, _35, _36, _37, _38, _39, _40, _41, _42, _43, _44, _45, _46, _47, _48;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, _17, _18, _19, _20, _21, _22, _23, _24, _25, _26, _27, _28, _29, _30, _31, _32, _33, _34, _35, _36, _37, _38, _39, _40, _41, _42, _43, _44, _45, _46, _47, _48, _49, _50;
     switch (method) {
         case 'get_document': {
             await figma.loadAllPagesAsync();
@@ -608,6 +782,7 @@ async function handle(method, params, reqId) {
                 pages: figma.root.children.map((p) => ({
                     id: p.id,
                     name: p.name,
+                    isPageDivider: p.isPageDivider === true,
                     nodeCount: countNodes(p),
                 })),
             };
@@ -709,6 +884,7 @@ async function handle(method, params, reqId) {
                         letterSpacing: s.letterSpacing,
                         textCase: s.textCase,
                         textDecoration: s.textDecoration,
+                        textWrapStyle: s.textWrapStyle,
                     },
                 })),
                 effect: effects.map((s) => ({
@@ -901,7 +1077,7 @@ async function handle(method, params, reqId) {
                         try {
                             candidates = pg.findAllWithCriteria({ types });
                         }
-                        catch (_49) {
+                        catch (_51) {
                             candidates = null;
                         }
                     }
@@ -950,7 +1126,7 @@ async function handle(method, params, reqId) {
                     try {
                         candidates = root.findAllWithCriteria({ types });
                     }
-                    catch (_50) {
+                    catch (_52) {
                         candidates = null;
                     }
                 }
@@ -1097,7 +1273,7 @@ async function handle(method, params, reqId) {
             return s;
         }
         case 'list_pages': {
-            return { pages: figma.root.children.map((p) => ({ id: p.id, name: p.name, current: p.id === figma.currentPage.id })) };
+            return { pages: figma.root.children.map((p) => ({ id: p.id, name: p.name, current: p.id === figma.currentPage.id, isPageDivider: p.isPageDivider === true })) };
         }
         case 'export_node': {
             const node = await getNode(params.nodeId);
@@ -1696,6 +1872,29 @@ async function handle(method, params, reqId) {
         }
         case 'list_fonts': {
             const fonts = await figma.listAvailableFontsAsync();
+            // axesFor: variable-font axis discovery for ONE family (exact match,
+            // case-insensitive against the available fonts). Returns an object, not
+            // the usual [{family,style}] list.
+            if (params.axesFor !== undefined && params.axesFor !== null && params.axesFor !== '') {
+                const want = String(params.axesFor);
+                const match = fonts.find((f) => f.fontName.family.toLowerCase() === want.toLowerCase());
+                const family = match ? match.fontName.family : want;
+                const styles = fonts.filter((f) => f.fontName.family === family).map((f) => f.fontName.style);
+                if (typeof figma.getFontFamilyVariationAxes !== 'function') {
+                    return { family, available: false, axes: null, variable: null, styles, error: 'getFontFamilyVariationAxes is not available in this Figma version (variable-font API, update 138)' };
+                }
+                if (!match) {
+                    return { family, available: false, axes: null, variable: null, styles, error: `Family not available in this editor: ${want} (use list_fonts {family} to search)` };
+                }
+                let axes;
+                try {
+                    axes = figma.getFontFamilyVariationAxes(family);
+                }
+                catch (e) {
+                    return { family, available: false, axes: null, variable: null, styles, error: String((_2 = e === null || e === void 0 ? void 0 : e.message) !== null && _2 !== void 0 ? _2 : e) };
+                }
+                return { family, available: true, variable: axes !== null, axes, styles };
+            }
             const filterFamily = params.family ? String(params.family).toLowerCase() : null;
             const filtered = filterFamily
                 ? fonts.filter((f) => f.fontName.family.toLowerCase().includes(filterFamily))
@@ -1703,9 +1902,27 @@ async function handle(method, params, reqId) {
             return filtered.map((f) => ({ family: f.fontName.family, style: f.fontName.style }));
         }
         case 'load_font': {
-            const fn = { family: String(params.family), style: String((_2 = params.style) !== null && _2 !== void 0 ? _2 : 'Regular') };
-            await figma.loadFontAsync(fn);
-            return { success: true, family: fn.family, style: fn.style };
+            const family = String(params.family);
+            const vs = coerce(params.variationSettings);
+            const hasStyle = params.style !== undefined && params.style !== null && params.style !== '';
+            if (hasStyle) {
+                // variationSettings is ignored by loadFontAsync (affects rendering, not loading).
+                const fn = { family, style: String(params.style) };
+                await figma.loadFontAsync(fn);
+                return { success: true, family: fn.family, style: fn.style };
+            }
+            // No style: load EVERY style of the family (FontNameInput, update 138).
+            // Older clients reject a style-less input -> fall back to the legacy
+            // "Regular" default so existing callers keep working.
+            try {
+                await figma.loadFontAsync({ family });
+                return Object.assign({ success: true, family, style: null, allStyles: true }, (vs ? { variationSettings: vs } : {}));
+            }
+            catch (e) {
+                const fn = { family, style: 'Regular' };
+                await figma.loadFontAsync(fn);
+                return { success: true, family: fn.family, style: fn.style, allStyles: false };
+            }
         }
         case 'set_reactions': {
             const node = await getNode(params.nodeId);
@@ -2048,7 +2265,20 @@ async function handle(method, params, reqId) {
                 throw new Error(`add_component_property: ${n.type} not allowed`);
             }
             const c = n;
-            const propName = c.addComponentProperty(String(params.name), params.type, params.defaultValue, params.preferredValues ? { preferredValues: params.preferredValues } : undefined);
+            const isSlot = params.type === 'SLOT';
+            const opts = {};
+            if (params.preferredValues)
+                opts.preferredValues = coerce(params.preferredValues);
+            if (typeof params.description === 'string')
+                opts.description = params.description;
+            if (params.slotSettings !== undefined) {
+                if (!isSlot)
+                    throw new Error("slotSettings is only supported for type 'SLOT' properties");
+                opts.slotSettings = toSlotSettings(params.slotSettings);
+            }
+            const propName = c.addComponentProperty(String(params.name), params.type, 
+            // A SLOT has no default value; accept it omitted.
+            ((_15 = params.defaultValue) !== null && _15 !== void 0 ? _15 : (isSlot ? '' : undefined)), Object.keys(opts).length ? opts : undefined);
             return { propertyName: propName };
         }
         case 'edit_component_property': {
@@ -2057,11 +2287,17 @@ async function handle(method, params, reqId) {
                 throw new Error(`edit_component_property: ${n.type} not allowed`);
             }
             const c = n;
-            const newName = c.editComponentProperty(String(params.propertyName), {
+            const patch = {
                 name: params.newName,
                 defaultValue: params.defaultValue,
                 preferredValues: params.preferredValues,
-            });
+            };
+            // SLOT-only fields (Figma rejects them on other property types).
+            if (typeof params.description === 'string')
+                patch.description = params.description;
+            if (params.slotSettings !== undefined)
+                patch.slotSettings = toSlotSettings(params.slotSettings);
+            const newName = c.editComponentProperty(String(params.propertyName), patch);
             return { propertyName: newName };
         }
         case 'delete_component_property': {
@@ -2092,7 +2328,7 @@ async function handle(method, params, reqId) {
             if (params.sharedPluginData)
                 criteria.sharedPluginData = params.sharedPluginData;
             const out = scope.findAllWithCriteria(criteria);
-            const max = (_15 = params.maxResults) !== null && _15 !== void 0 ? _15 : 200;
+            const max = (_16 = params.maxResults) !== null && _16 !== void 0 ? _16 : 200;
             return out.slice(0, max).map((n) => {
                 var _a, _b;
                 return ({
@@ -2214,7 +2450,7 @@ async function handle(method, params, reqId) {
             return { id: lp.id, type: lp.type };
         }
         case 'create_page_divider': {
-            const d = figma.createPageDivider((_16 = params.name) !== null && _16 !== void 0 ? _16 : '---');
+            const d = figma.createPageDivider((_17 = params.name) !== null && _17 !== void 0 ? _17 : '---');
             return { id: d.id, name: d.name, type: d.type };
         }
         case 'create_slide': {
@@ -2246,7 +2482,7 @@ async function handle(method, params, reqId) {
             const t = figma.timer;
             if (!t)
                 throw new Error('Timer only available in FigJam');
-            t.start(Number((_17 = params.seconds) !== null && _17 !== void 0 ? _17 : 60));
+            t.start(Number((_18 = params.seconds) !== null && _18 !== void 0 ? _18 : 60));
             return { state: t.state, remaining: t.remaining };
         }
         case 'timer_stop': {
@@ -2271,7 +2507,7 @@ async function handle(method, params, reqId) {
             return { state: t.state, remaining: t.remaining };
         }
         case 'get_active_users': {
-            const users = (_18 = figma.activeUsers) !== null && _18 !== void 0 ? _18 : [];
+            const users = (_19 = figma.activeUsers) !== null && _19 !== void 0 ? _19 : [];
             return users.map((u) => ({
                 id: u.id,
                 name: u.name,
@@ -2397,8 +2633,8 @@ async function handle(method, params, reqId) {
             const start = await getNode(params.startNodeId);
             const end = await getNode(params.endNodeId);
             const m = await figma.annotations.addMeasurementAsync({
-                start: { node: start, side: (_19 = params.startSide) !== null && _19 !== void 0 ? _19 : 'TOP' },
-                end: { node: end, side: (_20 = params.endSide) !== null && _20 !== void 0 ? _20 : 'TOP' },
+                start: { node: start, side: (_20 = params.startSide) !== null && _20 !== void 0 ? _20 : 'TOP' },
+                end: { node: end, side: (_21 = params.endSide) !== null && _21 !== void 0 ? _21 : 'TOP' },
                 offset: coerce(params.offset),
                 freeText: params.freeText,
             });
@@ -2498,23 +2734,43 @@ async function handle(method, params, reqId) {
             n.moveColumn(Number(params.fromIndex), Number(params.toIndex));
             return { success: true };
         }
+        case 'reorder_grid_tracks': {
+            // Multi-track reorder on a GRID auto-layout frame (GridLayoutMixin).
+            // insertionIndex is evaluated against the ORIGINAL order (0..count inclusive).
+            const axis = params.axis === 'columns' ? 'columns' : params.axis === 'rows' ? 'rows' : null;
+            if (!axis)
+                throw new Error("axis must be 'rows' or 'columns'");
+            const fn = axis === 'rows' ? 'reorderRows' : 'reorderColumns';
+            const n = await getNode(params.nodeId);
+            const from = asIndexList(params.fromIndices, 'fromIndices');
+            const ins = Number(params.insertionIndex);
+            if (!Number.isInteger(ins) || ins < 0)
+                throw new Error('insertionIndex must be a non-negative integer');
+            if (typeof n[fn] !== 'function') {
+                throw new Error(n.type === 'TABLE'
+                    ? `${fn} is for GRID auto-layout frames — use table_op move_${axis === 'rows' ? 'row' : 'column'} for FigJam tables`
+                    : `${fn} requires a frame with layoutMode 'GRID', got ${n.type}`);
+            }
+            const moves = n[fn]({ fromIndices: from, insertionIndex: ins });
+            return { success: true, moves: Array.from(moves !== null && moves !== void 0 ? moves : []).map((m) => ({ from: m.from, to: m.to })) };
+        }
         case 'table_cell_at': {
             const n = await getNode(params.nodeId);
             if (n.type !== 'TABLE')
                 throw new Error(`Not a TABLE: ${params.nodeId}`);
             const cell = n.cellAt(Number(params.row), Number(params.column));
-            return { id: (_21 = cell.id) !== null && _21 !== void 0 ? _21 : null, type: (_22 = cell.type) !== null && _22 !== void 0 ? _22 : 'TABLE_CELL', text: (_23 = cell.text) === null || _23 === void 0 ? void 0 : _23.characters };
+            return { id: (_22 = cell.id) !== null && _22 !== void 0 ? _22 : null, type: (_23 = cell.type) !== null && _23 !== void 0 ? _23 : 'TABLE_CELL', text: (_24 = cell.text) === null || _24 === void 0 ? void 0 : _24.characters };
         }
         case 'slides_get_canvas_grid': {
-            const grid = (_25 = (_24 = figma).getCanvasGrid) === null || _25 === void 0 ? void 0 : _25.call(_24);
+            const grid = (_26 = (_25 = figma).getCanvasGrid) === null || _26 === void 0 ? void 0 : _26.call(_25);
             return grid !== null && grid !== void 0 ? grid : null;
         }
         case 'slides_set_canvas_grid': {
-            (_27 = (_26 = figma).setCanvasGrid) === null || _27 === void 0 ? void 0 : _27.call(_26, coerce(params.grid));
+            (_28 = (_27 = figma).setCanvasGrid) === null || _28 === void 0 ? void 0 : _28.call(_27, coerce(params.grid));
             return { success: true };
         }
         case 'slides_create_canvas_row': {
-            const r = (_29 = (_28 = figma).createCanvasRow) === null || _29 === void 0 ? void 0 : _29.call(_28);
+            const r = (_30 = (_29 = figma).createCanvasRow) === null || _30 === void 0 ? void 0 : _30.call(_29);
             return r ? { id: r.id, type: r.type } : null;
         }
         case 'slides_move_nodes_to_coord': {
@@ -2525,7 +2781,7 @@ async function handle(method, params, reqId) {
                 if ('parent' in node)
                     nodes.push(node);
             }
-            (_31 = (_30 = figma).moveNodesToCoord) === null || _31 === void 0 ? void 0 : _31.call(_30, nodes, { row: params.row, column: params.column });
+            (_32 = (_31 = figma).moveNodesToCoord) === null || _32 === void 0 ? void 0 : _32.call(_31, nodes, { row: params.row, column: params.column });
             return { success: true };
         }
         case 'set_slide_transition': {
@@ -2566,11 +2822,11 @@ async function handle(method, params, reqId) {
         }
         case 'get_relaunch_data': {
             const n = await getNode(params.nodeId);
-            return (_34 = (_33 = (_32 = n).getRelaunchData) === null || _33 === void 0 ? void 0 : _33.call(_32)) !== null && _34 !== void 0 ? _34 : {};
+            return (_35 = (_34 = (_33 = n).getRelaunchData) === null || _34 === void 0 ? void 0 : _34.call(_33)) !== null && _35 !== void 0 ? _35 : {};
         }
         case 'get_top_level_frame': {
             const n = await getNode(params.nodeId);
-            const top = (_36 = (_35 = n).getTopLevelFrame) === null || _36 === void 0 ? void 0 : _36.call(_35);
+            const top = (_37 = (_36 = n).getTopLevelFrame) === null || _37 === void 0 ? void 0 : _37.call(_36);
             return top ? { id: top.id, name: top.name, type: top.type } : null;
         }
         case 'get_text_content': {
@@ -2616,18 +2872,18 @@ async function handle(method, params, reqId) {
             try {
                 target = await figma.getStyleByIdAsync(id);
             }
-            catch (_51) { }
+            catch (_53) { }
             if (!target) {
                 try {
                     target = await figma.variables.getVariableByIdAsync(id);
                 }
-                catch (_52) { }
+                catch (_54) { }
             }
             if (!target) {
                 try {
                     target = await figma.variables.getVariableCollectionByIdAsync(id);
                 }
-                catch (_53) { }
+                catch (_55) { }
             }
             if (!target)
                 throw new Error(`No style or variable found for id: ${id}`);
@@ -2678,7 +2934,7 @@ async function handle(method, params, reqId) {
         }
         case 'get_attached_connectors': {
             const n = await getNode(params.nodeId);
-            const list = (_37 = n.attachedConnectors) !== null && _37 !== void 0 ? _37 : [];
+            const list = (_38 = n.attachedConnectors) !== null && _38 !== void 0 ? _38 : [];
             return list.map((c) => ({ id: c.id, name: c.name }));
         }
         case 'set_skip_invisible_instance_children': {
@@ -2690,7 +2946,7 @@ async function handle(method, params, reqId) {
             return n ? { id: n.id, name: n.name, type: n.type } : null;
         }
         case 'load_brushes': {
-            const list = await ((_39 = (_38 = figma).loadBrushesAsync) === null || _39 === void 0 ? void 0 : _39.call(_38));
+            const list = await ((_40 = (_39 = figma).loadBrushesAsync) === null || _40 === void 0 ? void 0 : _40.call(_39));
             return list !== null && list !== void 0 ? list : [];
         }
         // ---------- tier 7 ----------
@@ -2730,10 +2986,45 @@ async function handle(method, params, reqId) {
             const c = await getNode(params.componentId);
             if (c.type !== 'COMPONENT')
                 throw new Error(`createSlot requires COMPONENT, got ${c.type}`);
-            const slot = c.createSlot();
+            const comp = c;
+            const slotKeys = () => {
+                var _a;
+                try {
+                    return Object.entries((_a = comp.componentPropertyDefinitions) !== null && _a !== void 0 ? _a : {})
+                        .filter(([, d]) => (d === null || d === void 0 ? void 0 : d.type) === 'SLOT').map(([k]) => k);
+                }
+                catch (_b) {
+                    return [];
+                }
+            };
+            const before = new Set(slotKeys());
+            const slot = comp.createSlot();
             if (params.name)
                 slot.name = params.name;
-            return { id: slot.id, name: slot.name, type: slot.type };
+            const out = { id: slot.id, name: slot.name, type: slot.type };
+            // Optional SLOT-property config, applied to the property createSlot() just made.
+            const wantEdit = params.slotSettings !== undefined || params.preferredValues !== undefined || typeof params.description === 'string';
+            if (wantEdit) {
+                const fresh = slotKeys().filter((k) => !before.has(k));
+                const propName = typeof params.propertyName === 'string' ? params.propertyName
+                    : (fresh.length === 1 ? fresh[0] : (_41 = slot.componentPropertyReferences) === null || _41 === void 0 ? void 0 : _41.slot);
+                if (!propName) {
+                    out.slotSettingsApplied = false;
+                    out.warning = 'slot created, but its SLOT property could not be identified — call component_property op=edit with the propertyName from get_node componentPropertyDefinitions';
+                }
+                else {
+                    const patch = {};
+                    if (params.slotSettings !== undefined)
+                        patch.slotSettings = toSlotSettings(params.slotSettings);
+                    if (params.preferredValues !== undefined)
+                        patch.preferredValues = coerce(params.preferredValues);
+                    if (typeof params.description === 'string')
+                        patch.description = params.description;
+                    out.propertyName = comp.editComponentProperty(propName, patch);
+                    out.slotSettingsApplied = true;
+                }
+            }
+            return out;
         }
         case 'set_grid_child_position': {
             const n = await getNode(params.nodeId);
@@ -2769,7 +3060,7 @@ async function handle(method, params, reqId) {
                     throw new Error('map_nodes swap needs `componentKey` or `componentId`.');
                 const resolved = sw.componentKey ? await figma.importComponentByKeyAsync(sw.componentKey) : await getNode(sw.componentId);
                 if (resolved.type !== 'COMPONENT')
-                    throw new Error(`Swap target not a COMPONENT: ${(_40 = sw.componentKey) !== null && _40 !== void 0 ? _40 : sw.componentId}`);
+                    throw new Error(`Swap target not a COMPONENT: ${(_42 = sw.componentKey) !== null && _42 !== void 0 ? _42 : sw.componentId}`);
                 swapTarget = resolved;
             }
             let applied = 0;
@@ -2882,8 +3173,19 @@ async function handle(method, params, reqId) {
                 throw new Error(`Node ${params.nodeId} (${n.type}) is not animatable`);
             // Forward presetData verbatim — Figma validates it per-preset and its
             // error is surfaced to the caller.
-            n.applyAnimationStyle(params.styleId, (_41 = coerce(params.props)) !== null && _41 !== void 0 ? _41 : {});
-            return { success: true };
+            const cfg = (_43 = coerce(params.props)) !== null && _43 !== void 0 ? _43 : {};
+            // A CUSTOM animation style (create op) is applied with {type:'CUSTOM'}.
+            // Inject it when the caller passed a custom style id and no explicit type.
+            if (cfg && typeof cfg === 'object' && cfg.type === undefined && typeof params.styleId === 'string' && params.styleId.startsWith('S:')) {
+                try {
+                    const st = await figma.getStyleByIdAsync(params.styleId);
+                    if (st && st.type === 'CUSTOM_ANIMATION')
+                        cfg.type = 'CUSTOM';
+                }
+                catch (_56) { }
+            }
+            const appliedId = n.applyAnimationStyle(params.styleId, cfg);
+            return { success: true, id: appliedId };
         }
         case 'remove_animation_style': {
             const n = (await getNode(params.nodeId));
@@ -2891,6 +3193,69 @@ async function handle(method, params, reqId) {
             // not the preset styleId passed to apply_animation_style.
             n.removeAnimationStyle(params.id);
             return { success: true };
+        }
+        // ---------- Motion: custom animation styles (Figma update 140) ----------
+        case 'create_custom_animation_style': {
+            const style = figma.createCustomAnimationStyle();
+            // Roll the half-built style back if any step fails, so errors don't leave orphans.
+            try {
+                if (typeof params.name === 'string')
+                    style.name = params.name;
+                if (typeof params.description === 'string')
+                    style.description = params.description;
+                const entries = Array.isArray(params.entries) ? params.entries : [];
+                for (const e of entries) {
+                    const entryStyleId = typeof e === 'string' ? e : e === null || e === void 0 ? void 0 : e.styleId;
+                    if (typeof entryStyleId !== 'string')
+                        throw new Error('create: each entries[] item needs a styleId (from list_animation_styles)');
+                    await style.addAnimationEntryAsync(entryStyleId, typeof e === 'string' ? undefined : coerce(e.props));
+                }
+            }
+            catch (err) {
+                try {
+                    style.remove();
+                }
+                catch (_57) { }
+                throw err;
+            }
+            return serializeCustomAnimationStyle(style);
+        }
+        case 'list_custom_animation_styles': {
+            const styles = await figma.getLocalCustomAnimationStylesAsync();
+            return (styles !== null && styles !== void 0 ? styles : []).map(serializeCustomAnimationStyle);
+        }
+        case 'update_custom_animation_style': {
+            const style = await getCustomAnimationStyle(params.styleId);
+            if (typeof params.name === 'string')
+                style.name = params.name;
+            if (typeof params.description === 'string')
+                style.description = params.description;
+            return serializeCustomAnimationStyle(style);
+        }
+        case 'move_custom_animation_style': {
+            const style = await getCustomAnimationStyle(params.styleId);
+            const after = params.afterStyleId ? await getCustomAnimationStyle(params.afterStyleId) : null;
+            // Target and reference must live in the same folder; null → first in folder.
+            figma.moveLocalCustomAnimationStyleAfter(style, after);
+            return { success: true };
+        }
+        case 'move_custom_animation_folder': {
+            if (typeof params.folder !== 'string' || !params.folder)
+                throw new Error("move_folder: 'folder' (full '/'-delimited folder name) is required");
+            figma.moveLocalCustomAnimationFolderAfter(params.folder, params.afterFolder ? String(params.afterFolder) : null);
+            return { success: true };
+        }
+        case 'add_animation_entry': {
+            const style = await getCustomAnimationStyle(params.styleId);
+            if (typeof params.entryStyleId !== 'string' || !params.entryStyleId)
+                throw new Error("add_entry: 'entryStyleId' (a styleId from list_animation_styles) is required");
+            const entry = await style.addAnimationEntryAsync(params.entryStyleId, coerce(params.props));
+            return { entry: plainData(entry), style: serializeCustomAnimationStyle(style) };
+        }
+        case 'remove_animation_entry': {
+            const style = await getCustomAnimationStyle(params.styleId);
+            style.removeAnimationEntry(String(params.entryId));
+            return serializeCustomAnimationStyle(style);
         }
         case 'apply_manual_keyframe_track': {
             const n = (await getNode(params.nodeId));
@@ -3059,7 +3424,7 @@ async function handle(method, params, reqId) {
             //   coerce(v) / asIds(v)— sanitize string-ish inputs
             //   log(...args)        — collected, returned alongside result
             //   getNode(id)         — async lookup helper
-            const code = String((_42 = params.code) !== null && _42 !== void 0 ? _42 : '');
+            const code = String((_44 = params.code) !== null && _44 !== void 0 ? _44 : '');
             // Inspect the submitted code and push back on patterns that would freeze
             // Figma's single main thread — with a message that teaches the better way.
             const rejection = inspectScript(code);
@@ -3107,12 +3472,12 @@ async function handle(method, params, reqId) {
         }
         case 'set_buzz_asset_type': {
             const n = await getNode(params.nodeId);
-            (_44 = (_43 = figma).setBuzzAssetTypeForNode) === null || _44 === void 0 ? void 0 : _44.call(_43, n, params.assetType);
+            (_46 = (_45 = figma).setBuzzAssetTypeForNode) === null || _46 === void 0 ? void 0 : _46.call(_45, n, params.assetType);
             return { success: true };
         }
         case 'get_buzz_asset_type': {
             const n = await getNode(params.nodeId);
-            const t = (_46 = (_45 = figma).getBuzzAssetTypeForNode) === null || _46 === void 0 ? void 0 : _46.call(_45, n);
+            const t = (_48 = (_47 = figma).getBuzzAssetTypeForNode) === null || _48 === void 0 ? void 0 : _48.call(_47, n);
             return { assetType: t !== null && t !== void 0 ? t : null };
         }
         case 'move_local_style': {
@@ -3155,7 +3520,7 @@ async function handle(method, params, reqId) {
             }
             const parent = params.parentId
                 ? (await getNode(params.parentId))
-                : (_47 = comps[0].parent) !== null && _47 !== void 0 ? _47 : figma.currentPage;
+                : (_49 = comps[0].parent) !== null && _49 !== void 0 ? _49 : figma.currentPage;
             const set = typeof params.index === 'number'
                 ? figma.combineAsVariants(comps, parent, params.index)
                 : figma.combineAsVariants(comps, parent);
@@ -3179,7 +3544,7 @@ async function handle(method, params, reqId) {
             const idx = typeof params.paintIndex === 'number' ? params.paintIndex : 0;
             if (idx < 0 || idx >= paints.length)
                 throw new Error(`paintIndex ${idx} out of range (have ${paints.length})`);
-            const field = ((_48 = params.field) !== null && _48 !== void 0 ? _48 : 'color');
+            const field = ((_50 = params.field) !== null && _50 !== void 0 ? _50 : 'color');
             const updated = figma.variables.setBoundVariableForPaint(paints[idx], field, v);
             const next = paints.slice();
             next[idx] = updated;
@@ -3199,6 +3564,16 @@ async function handle(method, params, reqId) {
             // Range setters require the relevant fonts loaded.
             const fonts = t.getRangeAllFontNames(start, end);
             await Promise.all(fonts.map((f) => figma.loadFontAsync(f)));
+            // Setting fontName on a range: the TARGET font must be loaded too
+            // (style may be omitted / variationSettings given — variable fonts).
+            if (prop === 'fontName' && value && typeof value === 'object') {
+                const target = { family: String(value.family) };
+                if (value.style !== undefined && value.style !== null)
+                    target.style = String(value.style);
+                await figma.loadFontAsync(target);
+            }
+            if (prop === 'textWrapStyle')
+                assertTextWrapStyle(value);
             const setter = `setRange${prop[0].toUpperCase()}${prop.slice(1)}`;
             const fn = t[setter];
             if (typeof fn !== 'function')
@@ -3285,11 +3660,91 @@ function serializeVarValues(v) {
             const c = raw;
             out[modeId] = { color: serializeVarPart(c.color), opacity: serializeVarPart(c.opacity) };
         }
+        else if (v.resolvedType === 'EASING' && raw && typeof raw === 'object' && raw.type !== 'VARIABLE_ALIAS') {
+            // MotionEasing → plain JSON ({type, easingFunctionCubicBezier?, easingFunctionSpring?}).
+            out[modeId] = plainData(raw);
+        }
         else {
             out[modeId] = serializeVarPart(raw);
         }
     }
     return out;
+}
+const MOTION_EASING_TYPES = new Set([
+    'EASE_IN', 'EASE_OUT', 'EASE_IN_AND_OUT', 'LINEAR', 'EASE_IN_BACK', 'EASE_OUT_BACK',
+    'EASE_IN_AND_OUT_BACK', 'CUSTOM_CUBIC_BEZIER', 'GENTLE', 'QUICK', 'BOUNCY', 'SLOW',
+    'CUSTOM_SPRING', 'HOLD',
+]);
+// EASING variable value -> MotionEasing. Accepts a bare type name ('EASE_IN'), the
+// full Figma shape, or flat shorthands for the custom curves:
+//   {type:'CUSTOM_CUBIC_BEZIER', x1,y1,x2,y2}   (or easingFunctionCubicBezier:{x1,y1,x2,y2})
+//   {type:'CUSTOM_SPRING', bounce}              (or easingFunctionSpring:{bounce})
+function toMotionEasing(raw) {
+    var _a, _b;
+    const v = coerce(raw);
+    const obj = typeof v === 'string' ? { type: v } : v;
+    if (!obj || typeof obj !== 'object' || typeof obj.type !== 'string') {
+        throw new Error('EASING value expects a type name or {type, easingFunctionCubicBezier?, easingFunctionSpring?} — type one of ' + Array.from(MOTION_EASING_TYPES).join('|'));
+    }
+    if (!MOTION_EASING_TYPES.has(obj.type))
+        throw new Error(`Unknown easing type '${obj.type}' — one of ${Array.from(MOTION_EASING_TYPES).join('|')}`);
+    const out = { type: obj.type };
+    if (obj.type === 'CUSTOM_CUBIC_BEZIER') {
+        const b = (_a = obj.easingFunctionCubicBezier) !== null && _a !== void 0 ? _a : obj;
+        const nums = [b.x1, b.y1, b.x2, b.y2].map(Number);
+        if (nums.some((n) => !Number.isFinite(n)))
+            throw new Error('CUSTOM_CUBIC_BEZIER needs numeric x1, y1, x2, y2 (or easingFunctionCubicBezier:{x1,y1,x2,y2})');
+        out.easingFunctionCubicBezier = { x1: nums[0], y1: nums[1], x2: nums[2], y2: nums[3] };
+    }
+    else if (obj.type === 'CUSTOM_SPRING') {
+        const sp = (_b = obj.easingFunctionSpring) !== null && _b !== void 0 ? _b : obj;
+        const bounce = Number(sp.bounce);
+        if (!Number.isFinite(bounce))
+            throw new Error('CUSTOM_SPRING needs a numeric bounce 0..1 (or easingFunctionSpring:{bounce})');
+        out.easingFunctionSpring = { bounce };
+    }
+    return out;
+}
+// TIMING variable value -> number of SECONDS (Motion durations are in seconds
+// everywhere in the Plugin API; the typings don't state a unit for TIMING variables).
+function toTimingSeconds(raw) {
+    const n = Number(coerce(raw));
+    if (!Number.isFinite(n) || n < 0)
+        throw new Error('TIMING value expects a finite, non-negative number of seconds');
+    return n;
+}
+// SLOT property settings -> SlotSettings. Validates known keys only; min/maxChildren
+// accept null to clear a limit. Unknown keys are rejected so typos don't no-op silently.
+function toSlotSettings(raw) {
+    const v = coerce(raw);
+    if (!v || typeof v !== 'object' || Array.isArray(v))
+        throw new Error('slotSettings expects an object: {minChildren?, maxChildren?, stretchChildOnInsert?, displayEmptyByDefault?, allowPreferredValuesOnly?}');
+    const out = {};
+    for (const [k, val] of Object.entries(v)) {
+        if (k === 'stretchChildOnInsert' || k === 'displayEmptyByDefault' || k === 'allowPreferredValuesOnly') {
+            if (typeof val !== 'boolean')
+                throw new Error(`slotSettings.${k} must be a boolean`);
+            out[k] = val;
+        }
+        else if (k === 'minChildren' || k === 'maxChildren') {
+            if (val !== null && (typeof val !== 'number' || !Number.isInteger(val) || val < 0))
+                throw new Error(`slotSettings.${k} must be a non-negative integer or null`);
+            out[k] = val;
+        }
+        else {
+            throw new Error(`Unknown slotSettings key '${k}' — allowed: minChildren, maxChildren, stretchChildOnInsert, displayEmptyByDefault, allowPreferredValuesOnly`);
+        }
+    }
+    return out;
+}
+// Index list for table/grid reorder (accepts a JSON-stringified array).
+function asIndexList(v, label) {
+    const a = coerce(v);
+    const list = Array.isArray(a) ? a : (typeof a === 'number' ? [a] : null);
+    if (!list || !list.length || list.some((x) => typeof x !== 'number' || !Number.isInteger(x) || x < 0)) {
+        throw new Error(`${label} must be a non-empty array of non-negative integers`);
+    }
+    return list;
 }
 function bytesToString(bytes) {
     let s = '';
@@ -3443,7 +3898,17 @@ async function applyProperty(node, property, value) {
             const t = node;
             let fn;
             if (property === 'fontName' && value && typeof value === 'object') {
-                fn = { family: String(value.family), style: String(value.style) };
+                // FontNameInput: style optional (Figma resolves the closest named
+                // instance), variationSettings optional (variable-font axes).
+                const v = coerce(value);
+                const input = { family: String(v.family) };
+                if (v.style !== undefined && v.style !== null)
+                    input.style = String(v.style);
+                if (v.variationSettings && typeof v.variationSettings === 'object')
+                    input.variationSettings = v.variationSettings;
+                await figma.loadFontAsync(input);
+                t.fontName = input;
+                return;
             }
             else {
                 const cur = t.fontName === figma.mixed ? { family: 'Inter', style: 'Regular' } : t.fontName;
@@ -3453,6 +3918,21 @@ async function applyProperty(node, property, value) {
             }
             await figma.loadFontAsync(fn);
             t.fontName = fn;
+            return;
+        }
+        case 'textWrapStyle': {
+            requireText();
+            const t = node;
+            assertTextWrapStyle(value);
+            // The setter needs every font in the node loaded.
+            if (t.characters.length > 0) {
+                const fonts = t.getRangeAllFontNames(0, t.characters.length);
+                await Promise.all(fonts.map((f) => figma.loadFontAsync(f)));
+            }
+            else if (t.fontName !== figma.mixed) {
+                await figma.loadFontAsync(t.fontName);
+            }
+            t.textWrapStyle = value;
             return;
         }
         case 'fontSize': {
@@ -3535,6 +4015,11 @@ async function applyProperty(node, property, value) {
     }
     throw new Error(`Property '${property}' not supported on node type ${node.type}`);
 }
+function assertTextWrapStyle(v) {
+    if (v !== 'AUTO' && v !== 'BALANCE' && v !== 'PRETTY') {
+        throw new Error(`textWrapStyle must be 'AUTO' | 'BALANCE' | 'PRETTY', got ${JSON.stringify(v)}`);
+    }
+}
 function paintsFromInput(rawInput) {
     const input = coerce(rawInput);
     if (!Array.isArray(input))
@@ -3543,16 +4028,23 @@ function paintsFromInput(rawInput) {
         var _a, _b, _c, _d, _e, _f, _g, _h;
         // Shorthand: bare hex string in the array → solid paint.
         if (typeof p === 'string') {
-            return { type: 'SOLID', color: hexToRgb(p), opacity: 1, visible: true };
+            const pc = resolveColor(p);
+            return { type: 'SOLID', color: colorObj(pc, false), opacity: pc.a < 1 ? pc.a : 1, visible: true };
         }
         const type = (_a = p.type) !== null && _a !== void 0 ? _a : 'SOLID';
         if (type === 'SOLID') {
-            const hex = (_c = (_b = p.hex) !== null && _b !== void 0 ? _b : p.color) !== null && _c !== void 0 ? _c : '#000000';
-            const rgb = hexToRgb(hex);
+            // hex | color: any CSS color string / {r,g,b,sourceColor} / {space,...};
+            // sourceColor (what reads emit) may also sit beside hex.
+            let colorIn = (_b = p.hex) !== null && _b !== void 0 ? _b : p.color;
+            if (colorIn === undefined)
+                colorIn = p.sourceColor !== undefined ? { sourceColor: p.sourceColor } : '#000000';
+            else
+                colorIn = withSource(colorIn, p.sourceColor);
+            const pc = resolveColor(colorIn);
             const out = {
                 type: 'SOLID',
-                color: rgb,
-                opacity: (_d = p.opacity) !== null && _d !== void 0 ? _d : 1,
+                color: colorObj(pc, false),
+                opacity: (_c = p.opacity) !== null && _c !== void 0 ? _c : (pc.a < 1 ? pc.a : 1),
                 visible: p.visible !== false,
                 blendMode: p.blendMode,
             };
@@ -3560,13 +4052,14 @@ function paintsFromInput(rawInput) {
         }
         // GRADIENT_*, IMAGE — accept either a fully-shaped Paint, or an
         // expanded shape with hex stops which we collapse to RGBA.
-        if (type.startsWith('GRADIENT_') && Array.isArray(p.stops) && ((_e = p.stops[0]) === null || _e === void 0 ? void 0 : _e.hex)) {
+        if (type.startsWith('GRADIENT_') &&
+            Array.isArray(p.stops) &&
+            (((_d = p.stops[0]) === null || _d === void 0 ? void 0 : _d.hex) || ((_e = p.stops[0]) === null || _e === void 0 ? void 0 : _e.sourceColor) !== undefined)) {
             const stops = p.stops.map((s) => {
-                var _a;
-                return ({
-                    position: s.position,
-                    color: Object.assign(Object.assign({}, hexToRgb(s.hex)), { a: (_a = s.opacity) !== null && _a !== void 0 ? _a : 1 }),
-                });
+                var _a, _b;
+                const base = (_a = s.hex) !== null && _a !== void 0 ? _a : s.color;
+                const sc = resolveColor(base !== undefined ? withSource(base, s.sourceColor) : { sourceColor: s.sourceColor });
+                return { position: s.position, color: colorObj(Object.assign(Object.assign({}, sc), { a: (_b = s.opacity) !== null && _b !== void 0 ? _b : sc.a }), true) };
             });
             return {
                 type,
@@ -3672,14 +4165,14 @@ function toVarAlias(v) {
     return typeof id === 'string' ? { type: 'VARIABLE_ALIAS', id } : null;
 }
 function toRgba(v) {
-    var _a, _b;
-    if (typeof v === 'string')
-        return Object.assign(Object.assign({}, hexToRgb(v)), { a: 1 });
-    if (v && typeof v === 'object' && 'hex' in v)
-        return Object.assign(Object.assign({}, hexToRgb(v.hex)), { a: (_a = v.opacity) !== null && _a !== void 0 ? _a : 1 });
-    if (v && typeof v === 'object' && 'r' in v && 'g' in v && 'b' in v)
-        return { r: v.r, g: v.g, b: v.b, a: (_b = v.a) !== null && _b !== void 0 ? _b : 1 };
-    throw new Error('color expects hex string, {hex, opacity}, {r,g,b,a?} or {aliasOf}');
+    // Hex, CSS color strings, {hex,opacity}, {r,g,b,a?}, {space,...}, {sourceColor}
+    // all go through resolveColor. Variable values carry no sourceColor, so only
+    // the RGBA is returned.
+    if (typeof v === 'string' || (v && typeof v === 'object' && ('hex' in v || 'r' in v || 'space' in v || 'sourceColor' in v))) {
+        const c = resolveColor(v);
+        return { r: c.r, g: c.g, b: c.b, a: c.a };
+    }
+    throw new Error('color expects a #hex or CSS color string (oklch()/hsl()/lab()/rgb()), {hex, opacity}, {r,g,b,a?}, {space,...} or {aliasOf}');
 }
 function coerceVarValue(type, value) {
     var _a, _b;
@@ -3706,6 +4199,10 @@ function coerceVarValue(type, value) {
         return Boolean(value);
     if (type === 'STRING')
         return String(value);
+    if (type === 'EASING')
+        return toMotionEasing(value);
+    if (type === 'TIMING')
+        return toTimingSeconds(value);
     return value;
 }
 async function upsertStyle(params) {
@@ -3737,7 +4234,8 @@ async function upsertStyle(params) {
             style = figma.createEffectStyle();
         }
         style.name = params.name;
-        style.effects = params.value;
+        // rehydrate: read-back {hex,opacity,sourceColor} / CSS-string colors write back.
+        style.effects = rehydrateValue(coerce(params.value));
         return { id: style.id, name: style.name };
     }
     if (params.type === 'TEXT') {
@@ -3753,8 +4251,15 @@ async function upsertStyle(params) {
         }
         style.name = params.name;
         if (params.value.fontName) {
-            await figma.loadFontAsync(params.value.fontName);
-            style.fontName = params.value.fontName;
+            // FontNameInput: style optional, variationSettings optional (variable fonts).
+            const fnIn = coerce(params.value.fontName);
+            const input = { family: String(fnIn.family) };
+            if (fnIn.style !== undefined && fnIn.style !== null)
+                input.style = String(fnIn.style);
+            if (fnIn.variationSettings && typeof fnIn.variationSettings === 'object')
+                input.variationSettings = fnIn.variationSettings;
+            await figma.loadFontAsync(input);
+            style.fontName = input;
         }
         if (typeof params.value.fontSize === 'number')
             style.fontSize = params.value.fontSize;
@@ -3766,6 +4271,10 @@ async function upsertStyle(params) {
             style.textCase = params.value.textCase;
         if (params.value.textDecoration)
             style.textDecoration = params.value.textDecoration;
+        if (params.value.textWrapStyle !== undefined) {
+            assertTextWrapStyle(params.value.textWrapStyle);
+            style.textWrapStyle = params.value.textWrapStyle;
+        }
         if (typeof params.value.paragraphSpacing === 'number')
             style.paragraphSpacing = params.value.paragraphSpacing;
         if (typeof params.value.paragraphIndent === 'number')
@@ -3838,6 +4347,7 @@ const READ_ONLY_METHODS = new Set([
     // listings + loaders that don't change the canvas
     'list_fonts', 'load_font', 'load_brushes', 'list_shaders',
     'list_animation_styles', 'get_animations', 'spring_to_normalized', 'get_library_usage',
+    'list_custom_animation_styles',
     // exports + transient UI
     'export_node', 'notify',
     // subscribe just flips a flag; no document mutation

@@ -142,8 +142,6 @@ type ToolMethod =
   | 'table_remove_column'
   | 'table_move_row'
   | 'table_move_column'
-  | 'table_reorder_rows'
-  | 'table_reorder_columns'
   | 'table_cell_at'
   | 'slides_get_canvas_grid'
   | 'slides_set_canvas_grid'
@@ -179,6 +177,7 @@ type ToolMethod =
   | 'table_resize_column'
   | 'create_slot'
   | 'set_grid_child_position'
+  | 'reorder_grid_tracks'
   | 'list_shaders'
   | 'import_shader'
   | 'list_animation_styles'
@@ -2695,24 +2694,20 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       (n as TableNode).moveColumn(Number(params.fromIndex), Number(params.toIndex));
       return { success: true };
     }
-    case 'table_reorder_rows':
-    case 'table_reorder_columns': {
-      // Multi-track reorder: {fromIndices:number[], insertionIndex:number}.
+    case 'reorder_grid_tracks': {
+      // Multi-track reorder on a GRID auto-layout frame (GridLayoutMixin).
       // insertionIndex is evaluated against the ORIGINAL order (0..count inclusive).
-      // 1.142.0 typings declare reorderRows/reorderColumns on GridLayoutMixin
-      // (auto-layout frames with layoutMode 'GRID'), NOT on TableNode — so use
-      // the native method wherever the node exposes it, and fail with a pointer
-      // to move_row/move_column when a TABLE lacks it.
-      const isRows = method === 'table_reorder_rows';
-      const fn = isRows ? 'reorderRows' : 'reorderColumns';
+      const axis = params.axis === 'columns' ? 'columns' : params.axis === 'rows' ? 'rows' : null;
+      if (!axis) throw new Error("axis must be 'rows' or 'columns'");
+      const fn = axis === 'rows' ? 'reorderRows' : 'reorderColumns';
       const n = await getNode(params.nodeId);
       const from = asIndexList(params.fromIndices, 'fromIndices');
       const ins = Number(params.insertionIndex);
       if (!Number.isInteger(ins) || ins < 0) throw new Error('insertionIndex must be a non-negative integer');
       if (typeof (n as any)[fn] !== 'function') {
         throw new Error(n.type === 'TABLE'
-          ? `${fn} is not available on TABLE nodes in this Figma version — use op=${isRows ? 'move_row' : 'move_column'} one track at a time`
-          : `${fn} requires a FigJam TABLE or an auto-layout frame with layoutMode 'GRID', got ${n.type}`);
+          ? `${fn} is for GRID auto-layout frames — use table_op move_${axis === 'rows' ? 'row' : 'column'} for FigJam tables`
+          : `${fn} requires a frame with layoutMode 'GRID', got ${n.type}`);
       }
       const moves = (n as any)[fn]({ fromIndices: from, insertionIndex: ins });
       return { success: true, moves: Array.from(moves ?? []).map((m: any) => ({ from: m.from, to: m.to })) };
