@@ -1786,26 +1786,33 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       if (!c) throw new Error(`Collection not found: ${params.collectionId}`);
       const type = params.resolvedType as VariableResolvedDataType;
       const v = figma.variables.createVariable(String(params.name), c, type);
-      // Optional initial values per mode. Caller-controlled mode → value map.
-      const valsByMode = coerce<Record<string, unknown> | undefined>(params.valuesByMode);
-      if (valsByMode && typeof valsByMode === 'object') {
-        for (const [modeId, raw] of Object.entries(valsByMode)) {
-          v.setValueForMode(modeId, coerceVarValue(type, raw));
+      // Any failure after creation (bad value, invalid scope, …) removes the
+      // half-built variable so a rejected call leaves nothing behind.
+      try {
+        // Optional initial values per mode. Caller-controlled mode → value map.
+        const valsByMode = coerce<Record<string, unknown> | undefined>(params.valuesByMode);
+        if (valsByMode && typeof valsByMode === 'object') {
+          for (const [modeId, raw] of Object.entries(valsByMode)) {
+            v.setValueForMode(modeId, coerceVarValue(type, raw));
+          }
+        } else if (params.value !== undefined) {
+          v.setValueForMode(c.defaultModeId, coerceVarValue(type, params.value));
         }
-      } else if (params.value !== undefined) {
-        v.setValueForMode(c.defaultModeId, coerceVarValue(type, params.value));
-      }
-      if (typeof params.description === 'string') v.description = params.description;
-      const scopes = coerce<unknown>(params.scopes);
-      if (Array.isArray(scopes)) v.scopes = scopes as VariableScope[];
-      const codeSyntax = coerce<Record<string, unknown> | undefined>(params.codeSyntax);
-      if (codeSyntax && typeof codeSyntax === 'object') {
-        for (const [platform, code] of Object.entries(codeSyntax)) {
-          v.setVariableCodeSyntax(platform as CodeSyntaxPlatform, String(code));
+        if (typeof params.description === 'string') v.description = params.description;
+        const scopes = coerce<unknown>(params.scopes);
+        if (Array.isArray(scopes)) v.scopes = scopes as VariableScope[];
+        const codeSyntax = coerce<Record<string, unknown> | undefined>(params.codeSyntax);
+        if (codeSyntax && typeof codeSyntax === 'object') {
+          for (const [platform, code] of Object.entries(codeSyntax)) {
+            v.setVariableCodeSyntax(platform as CodeSyntaxPlatform, String(code));
+          }
         }
+        if (typeof params.hiddenFromPublishing === 'boolean') v.hiddenFromPublishing = params.hiddenFromPublishing;
+        return { id: v.id, name: v.name, resolvedType: v.resolvedType };
+      } catch (err) {
+        try { v.remove(); } catch { /* already gone */ }
+        throw err;
       }
-      if (typeof params.hiddenFromPublishing === 'boolean') v.hiddenFromPublishing = params.hiddenFromPublishing;
-      return { id: v.id, name: v.name, resolvedType: v.resolvedType };
     }
     case 'delete_variable': {
       const v = await figma.variables.getVariableByIdAsync(params.variableId);

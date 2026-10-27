@@ -1717,30 +1717,41 @@ async function handle(method, params, reqId) {
                 throw new Error(`Collection not found: ${params.collectionId}`);
             const type = params.resolvedType;
             const v = figma.variables.createVariable(String(params.name), c, type);
-            // Optional initial values per mode. Caller-controlled mode → value map.
-            const valsByMode = coerce(params.valuesByMode);
-            if (valsByMode && typeof valsByMode === 'object') {
-                for (const [modeId, raw] of Object.entries(valsByMode)) {
-                    v.setValueForMode(modeId, coerceVarValue(type, raw));
+            // Any failure after creation (bad value, invalid scope, …) removes the
+            // half-built variable so a rejected call leaves nothing behind.
+            try {
+                // Optional initial values per mode. Caller-controlled mode → value map.
+                const valsByMode = coerce(params.valuesByMode);
+                if (valsByMode && typeof valsByMode === 'object') {
+                    for (const [modeId, raw] of Object.entries(valsByMode)) {
+                        v.setValueForMode(modeId, coerceVarValue(type, raw));
+                    }
                 }
-            }
-            else if (params.value !== undefined) {
-                v.setValueForMode(c.defaultModeId, coerceVarValue(type, params.value));
-            }
-            if (typeof params.description === 'string')
-                v.description = params.description;
-            const scopes = coerce(params.scopes);
-            if (Array.isArray(scopes))
-                v.scopes = scopes;
-            const codeSyntax = coerce(params.codeSyntax);
-            if (codeSyntax && typeof codeSyntax === 'object') {
-                for (const [platform, code] of Object.entries(codeSyntax)) {
-                    v.setVariableCodeSyntax(platform, String(code));
+                else if (params.value !== undefined) {
+                    v.setValueForMode(c.defaultModeId, coerceVarValue(type, params.value));
                 }
+                if (typeof params.description === 'string')
+                    v.description = params.description;
+                const scopes = coerce(params.scopes);
+                if (Array.isArray(scopes))
+                    v.scopes = scopes;
+                const codeSyntax = coerce(params.codeSyntax);
+                if (codeSyntax && typeof codeSyntax === 'object') {
+                    for (const [platform, code] of Object.entries(codeSyntax)) {
+                        v.setVariableCodeSyntax(platform, String(code));
+                    }
+                }
+                if (typeof params.hiddenFromPublishing === 'boolean')
+                    v.hiddenFromPublishing = params.hiddenFromPublishing;
+                return { id: v.id, name: v.name, resolvedType: v.resolvedType };
             }
-            if (typeof params.hiddenFromPublishing === 'boolean')
-                v.hiddenFromPublishing = params.hiddenFromPublishing;
-            return { id: v.id, name: v.name, resolvedType: v.resolvedType };
+            catch (err) {
+                try {
+                    v.remove();
+                }
+                catch ( /* already gone */_53) { /* already gone */ }
+                throw err;
+            }
         }
         case 'delete_variable': {
             const v = await figma.variables.getVariableByIdAsync(params.variableId);
@@ -2872,18 +2883,18 @@ async function handle(method, params, reqId) {
             try {
                 target = await figma.getStyleByIdAsync(id);
             }
-            catch (_53) { }
+            catch (_54) { }
             if (!target) {
                 try {
                     target = await figma.variables.getVariableByIdAsync(id);
                 }
-                catch (_54) { }
+                catch (_55) { }
             }
             if (!target) {
                 try {
                     target = await figma.variables.getVariableCollectionByIdAsync(id);
                 }
-                catch (_55) { }
+                catch (_56) { }
             }
             if (!target)
                 throw new Error(`No style or variable found for id: ${id}`);
@@ -3182,7 +3193,7 @@ async function handle(method, params, reqId) {
                     if (st && st.type === 'CUSTOM_ANIMATION')
                         cfg.type = 'CUSTOM';
                 }
-                catch (_56) { }
+                catch (_57) { }
             }
             const appliedId = n.applyAnimationStyle(params.styleId, cfg);
             return { success: true, id: appliedId };
@@ -3215,7 +3226,7 @@ async function handle(method, params, reqId) {
                 try {
                     style.remove();
                 }
-                catch (_57) { }
+                catch (_58) { }
                 throw err;
             }
             return serializeCustomAnimationStyle(style);

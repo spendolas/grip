@@ -137,7 +137,7 @@ Set any one property on a node.
   - **Boolean:** `visible`, `locked`, `isMask`, `clipsContent`, `expanded`, `itemReverseZIndex`, `strokesIncludedInLayout`, `constrainProportions`.
   - **Passthrough (string/enum/object):** `name`, `blendMode`, `strokeAlign`, `strokeJoin`, `strokeCap`, `dashPattern`, `layoutMode`, `layoutWrap`, `layoutAlign`, `layoutPositioning`, `layoutSizingHorizontal`, `layoutSizingVertical`, `primaryAxisSizingMode`, `counterAxisSizingMode`, `primaryAxisAlignItems`, `counterAxisAlignItems`, `constraints`, `exportSettings`, `overflowDirection`, `textAlignHorizontal`, `textAlignVertical`, `textCase`, `textDecoration`, `textAutoResize`, `lineHeight`, `letterSpacing`, `hyperlink`, `listOptions`, `fillStyleId`, `strokeStyleId`, `effectStyleId`, `gridStyleId`, `textStyleId`, `componentProperties`, `overrides`.
   - **Special:**
-    - `textWrapStyle` (TEXT) — `'AUTO' | 'BALANCE' | 'PRETTY'`, node-wide, validated; all fonts in the node are auto-loaded first. Per-range: `set_text_range_property`. Included in text node reads.
+    - `textWrapStyle` (TEXT) — `'AUTO' | 'BALANCE' | 'PRETTY'`, node-wide, validated; all fonts in the node are auto-loaded first. Per-range: `set_text_range_property` (Figma applies wrap style per paragraph, so a sub-range sets its whole paragraph). Included in text node reads.
     - `fontName` (TEXT) — `{ family, style?, variationSettings? }`: omit `style` to let Figma pick the named instance nearest the axes; `variationSettings` e.g. `{ wght: 550 }` (axis tags via `list_fonts { axesFor }`; unknown axes throw). The font is auto-loaded. Reads return `fontName` including `variationSettings` for variable fonts.
     - `width`, `height` — call `node.resize()` (preserves the other axis).
     - `characters` — TEXT only; loads the current font first.
@@ -285,7 +285,7 @@ Merged: set/clear a node's explicit mode override for a collection, dispatched o
 ### `set_variable_meta`
 Update a variable's metadata. Values not touched — use `set_variable_value` for those.
 - Params: `variableId`, optional `name`, `description`, `scopes`, `codeSyntax`, `hiddenFromPublishing`.
-- `scopes` values: `ALL_SCOPES`, `TEXT_CONTENT`, `CORNER_RADIUS`, `WIDTH_HEIGHT`, `GAP`, `ALL_FILLS`, `FRAME_FILL`, `SHAPE_FILL`, `TEXT_FILL`, `STROKE_COLOR`, `STROKE_FLOAT`, `EFFECT_FLOAT`, `EFFECT_COLOR`, `OPACITY`, `COLOR_OPACITY` (the opacity part of a composed color; Update 139), `FONT_FAMILY`, `FONT_STYLE`, `FONT_WEIGHT`, `FONT_SIZE`, `LINE_HEIGHT`, `LETTER_SPACING`, `PARAGRAPH_SPACING`, `PARAGRAPH_INDENT`. Scopes only control where the variable shows in Figma's pickers; they don't block API bindings.
+- `scopes` values: `ALL_SCOPES`, `TEXT_CONTENT`, `CORNER_RADIUS`, `WIDTH_HEIGHT`, `GAP`, `ALL_FILLS`, `FRAME_FILL`, `SHAPE_FILL`, `TEXT_FILL`, `STROKE_COLOR`, `STROKE_FLOAT`, `EFFECT_FLOAT`, `EFFECT_COLOR`, `OPACITY`, `COLOR_OPACITY` (**FLOAT variables only** — setting it on a COLOR variable is rejected by Figma; it marks a number variable usable as a composed color's opacity; Update 139), `FONT_FAMILY`, `FONT_STYLE`, `FONT_WEIGHT`, `FONT_SIZE`, `LINE_HEIGHT`, `LETTER_SPACING`, `PARAGRAPH_SPACING`, `PARAGRAPH_INDENT`. Scopes only control where the variable shows in Figma's pickers; they don't block API bindings.
 - Returns: `{ success: true }`.
 
 ---
@@ -569,7 +569,7 @@ Merged: manage component property definitions, dispatched on `op`.
 - `op: 'add'` — `{ op, componentId, name, type ('VARIANT'|'TEXT'|'BOOLEAN'|'INSTANCE_SWAP'|'SLOT'), defaultValue (omit for SLOT), preferredValues?, description? (SLOT only), slotSettings? (SLOT only) }` → `{ propertyName }` — Figma appends `#<hash>` to the name.
 - `op: 'edit'` — `{ op, componentId, propertyName, newName?, defaultValue?, preferredValues?, description? (SLOT only), slotSettings? (SLOT only) }` → `{ propertyName }`.
 - `slotSettings` (SLOT properties): `{ minChildren?: int|null, maxChildren?: int|null (null clears a limit), stretchChildOnInsert?: bool, displayEmptyByDefault?: bool, allowPreferredValuesOnly?: bool }`. Unknown keys / wrong types are rejected before calling Figma; `slotSettings` on a non-SLOT type is an error on `add`.
-- Reads: `componentPropertyDefinitions` (on `get_node` for COMPONENT/COMPONENT_SET, and `get_components`) carries `slotSettings` on SLOT properties. A SLOT node serializes `limitViolations` — `[]` when within limits, else any of `'BELOW_MIN'|'ABOVE_MAX'|'HAS_NON_PREFERRED'` (the last when `allowPreferredValuesOnly` and a child isn't a preferred value).
+- Reads: `componentPropertyDefinitions` (on `get_node` for COMPONENT/COMPONENT_SET, and `get_components`) carries `slotSettings` on SLOT properties. A SLOT node serializes `limitViolations` — `[]` when within limits, else any of `'BELOW_MIN'|'ABOVE_MAX'|'HAS_NON_PREFERRED'` (the last when `allowPreferredValuesOnly` and a child isn't a preferred value). Observed live: a component's own SLOT stays `[]` even over `maxChildren` — violations appear to be evaluated on instances.
 - `op: 'delete'` — `{ op, componentId, propertyName }` → `{ success: true }`.
 
 ### `create_slot`
@@ -732,7 +732,7 @@ Merged: apply/remove a manual keyframe track, dispatched on `op`.
 - Newer auto-layout enum values (all plain passthrough, no special handling):
   - `primaryAxisAlignItems`: `'MIN'|'CENTER'|'MAX'|'SPACE_BETWEEN'|'SPACE_EVENLY'|'SPACE_AROUND'` — `SPACE_EVENLY` spaces children evenly with equal gaps before the first, between each pair and after the last (Update 137); `SPACE_AROUND` makes the gaps between children equal with half-size gaps at both ends.
   - `layoutWrap`: `'NO_WRAP'|'WRAP'` — `WRAP` is valid on `layoutMode: 'VERTICAL'` (Update 140) as well as `'HORIZONTAL'`; set `layoutMode` first (Figma throws if the frame has no HORIZONTAL/VERTICAL auto-layout).
-  - `NOISE`/`TEXTURE` effects carry an optional read-only-in-practice `noiseSizeVector: { x, y }` (per-axis size; `x` must equal `noiseSize`). The generic effect serializer already emits it as `{x, y}`.
+  - `NOISE`/`TEXTURE` effects carry an optional read-only-in-practice `noiseSizeVector: { x, y }` (per-axis size; `x` must equal `noiseSize`). The generic effect serializer already emits it as `{x, y}`. A NOISE effect needs `noiseSize` (a number); `noiseSizeVector` can be set alongside it, and `blendMode`/`opacity` are rejected on NOISE.
 ### `transform_group` — `{ nodeIds, parentId?, index?, transformModifiers? }`. Wraps nodes in a `TRANSFORM_GROUP`; `transformModifiers` is an array (default `[]`).
 
 ## Color spaces (Figma update 141)
