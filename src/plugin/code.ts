@@ -245,6 +245,103 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
   };
 }
 
+// ---- shared color input/output helpers (color spaces, Figma update 141) ----
+// ONE entry point for "a color the agent gave us": hex (unchanged fast path),
+// any CSS color string (via figma.util.rgba), {hex, opacity}, {r,g,b,a?},
+// a ColorWithColorSpace ({space:'OKLCH',l,c,h} …), each optionally carrying a
+// `sourceColor` (the authoring color space) that reads emit and writes accept.
+interface ParsedColor { r: number; g: number; b: number; a: number; sourceColor?: any }
+
+const PLAIN_HEX_RE = /^#?(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+
+function utilRgba(input: any): any {
+  const u: any = (figma as any).util;
+  if (!u || typeof u.rgba !== 'function') {
+    throw new Error('color spaces / CSS color strings need figma.util.rgba (Figma update 141+) — use a #hex or {r,g,b} instead');
+  }
+  try {
+    return u.rgba(input);
+  } catch (e: any) {
+    throw new Error(`Invalid color ${typeof input === 'string' ? JSON.stringify(input) : JSON.stringify(input)}: ${e && e.message ? e.message : e}`);
+  }
+}
+
+// A JSON-plain copy of a sourceColor (ColorWithColorSpace), or undefined.
+function plainSource(sc: any): any {
+  if (!sc || typeof sc !== 'object' || typeof sc.space !== 'string') return undefined;
+  const o: any = {};
+  for (const k of Object.keys(sc)) if (typeof sc[k] === 'string' || typeof sc[k] === 'number') o[k] = sc[k];
+  return o;
+}
+
+function fromUtilRgba(d: any): ParsedColor {
+  const out: ParsedColor = { r: d.r, g: d.g, b: d.b, a: typeof d.a === 'number' ? d.a : 1 };
+  const sc = plainSource(d.sourceColor);
+  if (sc) out.sourceColor = sc;
+  return out;
+}
+
+function cssToParsed(s: string): ParsedColor {
+  const str = s.trim();
+  // Plain #hex / hex stays on the exact legacy path (byte-for-byte unchanged).
+  if (PLAIN_HEX_RE.test(str)) return { ...hexToRgb(str), a: 1 };
+  return fromUtilRgba(utilRgba(str));
+}
+
+// Attach an explicit sourceColor to a base color. The sourceColor wins (full
+// precision) only if it still matches the base color to 8 bits; if the agent
+// edited hex/rgb on a read-back color the stale sourceColor is dropped.
+function reconcileSource(base: ParsedColor, src: any): ParsedColor {
+  const sc = plainSource(src);
+  if (!sc) return base;
+  let d: any;
+  try {
+    d = utilRgba(sc);
+  } catch {
+    return base;
+  }
+  if (rgbToHex(d.r, d.g, d.b) !== rgbToHex(base.r, base.g, base.b)) return base;
+  return { r: d.r, g: d.g, b: d.b, a: base.a, sourceColor: sc };
+}
+
+function resolveColor(v: any): ParsedColor {
+  if (typeof v === 'string') return cssToParsed(v);
+  if (v && typeof v === 'object') {
+    if (typeof v.hex === 'string') {
+      const base = cssToParsed(v.hex);
+      if (typeof v.opacity === 'number') base.a = v.opacity;
+      return v.sourceColor !== undefined ? reconcileSource(base, v.sourceColor) : base;
+    }
+    if (typeof v.space === 'string' && !('sourceColor' in v)) return fromUtilRgba(utilRgba(v));
+    if (typeof v.r === 'number' && typeof v.g === 'number' && typeof v.b === 'number') {
+      const base: ParsedColor = { r: v.r, g: v.g, b: v.b, a: v.a ?? v.opacity ?? 1 };
+      return v.sourceColor !== undefined ? reconcileSource(base, v.sourceColor) : base;
+    }
+    if (v.sourceColor !== undefined) {
+      const d = fromUtilRgba(utilRgba(plainSource(v.sourceColor) ?? v.sourceColor));
+      if (typeof v.opacity === 'number') d.a = v.opacity;
+      else if (typeof v.a === 'number') d.a = v.a;
+      return d;
+    }
+  }
+  throw new Error('color expects a #hex or CSS color string, {hex, opacity}, {r,g,b,a?}, {space,...} or {sourceColor}');
+}
+
+// Merge a separate sourceColor field into a color input (string | object).
+function withSource(colorIn: any, sourceColor: any): any {
+  if (sourceColor === undefined) return colorIn;
+  if (typeof colorIn === 'string') return { hex: colorIn, sourceColor };
+  if (colorIn && typeof colorIn === 'object' && colorIn.sourceColor === undefined) return { ...colorIn, sourceColor };
+  return colorIn;
+}
+
+// RGB(A) color object (what Figma wants for paint/stop/effect colors).
+function colorObj(c: ParsedColor, withAlpha: boolean): any {
+  const o: any = withAlpha ? { r: c.r, g: c.g, b: c.b, a: c.a } : { r: c.r, g: c.g, b: c.b };
+  if (c.sourceColor) o.sourceColor = c.sourceColor;
+  return o;
+}
+
 function serializePaint(paint: Paint): any {
   const base: any = {
     type: paint.type,
@@ -254,16 +351,23 @@ function serializePaint(paint: Paint): any {
   };
   if (paint.type === 'SOLID') {
     base.hex = rgbToHex(paint.color.r, paint.color.g, paint.color.b);
+    const psc = plainSource((paint.color as any).sourceColor);
+    if (psc) base.sourceColor = psc;
     if ((paint as SolidPaint).boundVariables?.color) {
       base.boundVariable = (paint as any).boundVariables.color;
     }
   } else if (paint.type.startsWith('GRADIENT_')) {
     const g = paint as GradientPaint;
-    base.stops = g.gradientStops.map((s) => ({
-      position: s.position,
-      hex: rgbToHex(s.color.r, s.color.g, s.color.b),
-      opacity: s.color.a ?? 1,
-    }));
+    base.stops = g.gradientStops.map((s) => {
+      const stop: any = {
+        position: s.position,
+        hex: rgbToHex(s.color.r, s.color.g, s.color.b),
+        opacity: s.color.a ?? 1,
+      };
+      const ssc = plainSource((s.color as any).sourceColor);
+      if (ssc) stop.sourceColor = ssc;
+      return stop;
+    });
     base.transform = g.gradientTransform;
   } else if (paint.type === 'IMAGE') {
     const ip = paint as ImagePaint;
@@ -310,7 +414,10 @@ function serializeEffectValue(v: any): any {
   if (typeof v !== 'object') return v;
   // RGBA color → hex + opacity
   if (typeof v.r === 'number' && typeof v.g === 'number' && typeof v.b === 'number') {
-    return { hex: rgbToHex(v.r, v.g, v.b), opacity: typeof v.a === 'number' ? v.a : 1 };
+    const col: any = { hex: rgbToHex(v.r, v.g, v.b), opacity: typeof v.a === 'number' ? v.a : 1 };
+    const csc = plainSource(v.sourceColor);
+    if (csc) col.sourceColor = csc;
+    return col;
   }
   // Vector
   if (typeof v.x === 'number' && typeof v.y === 'number' && Object.keys(v).length === 2) {
@@ -381,16 +488,37 @@ function rehydrateValue(v: any): any {
   if (v == null || typeof v !== 'object') return v;
   if (Array.isArray(v)) return v.map(rehydrateValue);
   // {hex, opacity} → RGBA (only when it isn't already an {r,g,b} color).
+  // hex may also be any CSS color string; an optional sourceColor rides along.
   if (typeof v.hex === 'string' && !('r' in v)) {
-    const rgb = hexToRgb(v.hex);
-    return { r: rgb.r, g: rgb.g, b: rgb.b, a: typeof v.opacity === 'number' ? v.opacity : 1 };
+    return colorObj(resolveColor(v), true);
+  }
+  // {sourceColor, opacity?} with no hex → derive RGBA from the color space.
+  if (v.sourceColor !== undefined && typeof v.hex !== 'string' && !('r' in v)) {
+    return colorObj(resolveColor(v), true);
   }
   // Our serialized alias shape → Figma's alias shape.
   if (v.type === 'VARIABLE_ALIAS' && typeof v.variableId === 'string' && !('id' in v)) {
     return { type: 'VARIABLE_ALIAS', id: v.variableId };
   }
   const out: any = {};
-  for (const k of Object.keys(v)) out[k] = rehydrateValue(v[k]);
+  for (const k of Object.keys(v)) {
+    const x = v[k];
+    // A color given as a CSS string / {space,...} under a color key (effect
+    // color, duotone secondaryColor, …) → RGBA (+ sourceColor).
+    if (
+      (k === 'color' || k === 'secondaryColor') &&
+      x &&
+      (typeof x === 'string' || (typeof x === 'object' && typeof x.space === 'string'))
+    ) {
+      try {
+        out[k] = colorObj(resolveColor(x), true);
+        continue;
+      } catch (e) {
+        if (typeof x === 'object') throw e;
+      }
+    }
+    out[k] = rehydrateValue(x);
+  }
   return out;
 }
 
@@ -3590,16 +3718,21 @@ function paintsFromInput(rawInput: any): Paint[] {
   return input.map((p): Paint => {
     // Shorthand: bare hex string in the array → solid paint.
     if (typeof p === 'string') {
-      return { type: 'SOLID', color: hexToRgb(p), opacity: 1, visible: true } as SolidPaint;
+      const pc = resolveColor(p);
+      return { type: 'SOLID', color: colorObj(pc, false), opacity: pc.a < 1 ? pc.a : 1, visible: true } as SolidPaint;
     }
     const type = p.type ?? 'SOLID';
     if (type === 'SOLID') {
-      const hex = p.hex ?? p.color ?? '#000000';
-      const rgb = hexToRgb(hex);
+      // hex | color: any CSS color string / {r,g,b,sourceColor} / {space,...};
+      // sourceColor (what reads emit) may also sit beside hex.
+      let colorIn: any = p.hex ?? p.color;
+      if (colorIn === undefined) colorIn = p.sourceColor !== undefined ? { sourceColor: p.sourceColor } : '#000000';
+      else colorIn = withSource(colorIn, p.sourceColor);
+      const pc = resolveColor(colorIn);
       const out: SolidPaint = {
         type: 'SOLID',
-        color: rgb,
-        opacity: p.opacity ?? 1,
+        color: colorObj(pc, false),
+        opacity: p.opacity ?? (pc.a < 1 ? pc.a : 1),
         visible: p.visible !== false,
         blendMode: p.blendMode,
       };
@@ -3607,11 +3740,16 @@ function paintsFromInput(rawInput: any): Paint[] {
     }
     // GRADIENT_*, IMAGE — accept either a fully-shaped Paint, or an
     // expanded shape with hex stops which we collapse to RGBA.
-    if (type.startsWith('GRADIENT_') && Array.isArray(p.stops) && p.stops[0]?.hex) {
-      const stops = p.stops.map((s: any) => ({
-        position: s.position,
-        color: { ...hexToRgb(s.hex), a: s.opacity ?? 1 },
-      }));
+    if (
+      type.startsWith('GRADIENT_') &&
+      Array.isArray(p.stops) &&
+      (p.stops[0]?.hex || p.stops[0]?.sourceColor !== undefined)
+    ) {
+      const stops = p.stops.map((s: any) => {
+        const base = s.hex ?? s.color;
+        const sc = resolveColor(base !== undefined ? withSource(base, s.sourceColor) : { sourceColor: s.sourceColor });
+        return { position: s.position, color: colorObj({ ...sc, a: s.opacity ?? sc.a }, true) };
+      });
       return {
         type,
         gradientStops: stops,
@@ -3716,10 +3854,14 @@ function toVarAlias(v: any): VariableAlias | null {
 }
 
 function toRgba(v: any): RGBA {
-  if (typeof v === 'string') return { ...hexToRgb(v), a: 1 };
-  if (v && typeof v === 'object' && 'hex' in v) return { ...hexToRgb(v.hex), a: v.opacity ?? 1 };
-  if (v && typeof v === 'object' && 'r' in v && 'g' in v && 'b' in v) return { r: v.r, g: v.g, b: v.b, a: v.a ?? 1 };
-  throw new Error('color expects hex string, {hex, opacity}, {r,g,b,a?} or {aliasOf}');
+  // Hex, CSS color strings, {hex,opacity}, {r,g,b,a?}, {space,...}, {sourceColor}
+  // all go through resolveColor. Variable values carry no sourceColor, so only
+  // the RGBA is returned.
+  if (typeof v === 'string' || (v && typeof v === 'object' && ('hex' in v || 'r' in v || 'space' in v || 'sourceColor' in v))) {
+    const c = resolveColor(v);
+    return { r: c.r, g: c.g, b: c.b, a: c.a };
+  }
+  throw new Error('color expects a #hex or CSS color string (oklch()/hsl()/lab()/rgb()), {hex, opacity}, {r,g,b,a?}, {space,...} or {aliasOf}');
 }
 
 function coerceVarValue(type: VariableResolvedDataType, value: any): VariableValue {
@@ -3769,7 +3911,8 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
       style = figma.createEffectStyle();
     }
     style.name = params.name;
-    style.effects = params.value as Effect[];
+    // rehydrate: read-back {hex,opacity,sourceColor} / CSS-string colors write back.
+    style.effects = rehydrateValue(coerce<Effect[]>(params.value)) as Effect[];
     return { id: style.id, name: style.name };
   }
   if (params.type === 'TEXT') {

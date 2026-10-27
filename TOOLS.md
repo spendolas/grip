@@ -142,8 +142,8 @@ Set any one property on a node.
     - `width`, `height` — call `node.resize()` (preserves the other axis).
     - `characters` — TEXT only; loads the current font first.
     - `fontName`, `fontFamily`, `fontWeight`, `fontSize` — TEXT only; loads font.
-    - `fills`, `strokes` — array of `{ type, hex, opacity }` or bare hex strings; gradients accept `{ type, stops: [{ position, hex, opacity }], transform }`.
-    - `effects` — `Effect[]` (Figma shape).
+    - `fills`, `strokes` — array of `{ type, hex, opacity, sourceColor? }` or bare color strings; gradients accept `{ type, stops: [{ position, hex, opacity, sourceColor? }], transform }`. See **Color spaces** below.
+    - `effects` — `Effect[]` (Figma shape); colors may be given as `{ hex, opacity, sourceColor? }` (what reads emit), a CSS color string, or `{ space, ... }`.
     - `layoutGrids` — `LayoutGrid[]`.
     - `componentProperties` — INSTANCE only; `Record<string, string|boolean>`.
 - Returns: `{ success: true }`.
@@ -234,7 +234,7 @@ Merge ≥2 COMPONENT nodes into one COMPONENT_SET (variant set). Same as Cmd+Opt
 ### `set_style`
 Create or update a local style. Omit `styleId` to create.
 - Params: `styleId`, `name` (req), `type` (req: `PAINT | TEXT | EFFECT | GRID`), `value` (req — shape varies by type), `description`.
-- PAINT `value` = `Paint[]`. EFFECT `value` = `Effect[]`. GRID `value` = `LayoutGrid[]`. TEXT `value` = `{ fontName, fontSize, lineHeight, letterSpacing, textCase, textDecoration, textWrapStyle, paragraphSpacing, paragraphIndent }`.
+- PAINT `value` = `Paint[]` (same shapes as `set_node_property` fills, incl. CSS color strings and `sourceColor`). EFFECT `value` = `Effect[]` (read-back `{ hex, opacity, sourceColor? }` colors are accepted). GRID `value` = `LayoutGrid[]`. TEXT `value` = `{ fontName, fontSize, lineHeight, letterSpacing, textCase, textDecoration, textWrapStyle, paragraphSpacing, paragraphIndent }`.
 - TEXT `textWrapStyle`: `'AUTO' | 'BALANCE' | 'PRETTY'` (validated). TEXT `fontName` is `{ family, style?, variationSettings? }` — omit `style` to let Figma resolve the named instance nearest `variationSettings` (e.g. `{ wght: 550 }`); the font is auto-loaded. `get_styles` text entries return `textWrapStyle` and `fontName` (with `variationSettings` for variable fonts).
 - Returns: `{ id, name }`.
 
@@ -245,7 +245,7 @@ Bind a node property to a local style.
 
 ### `set_variable_value`
 Set a variable's value for a mode.
-- Params: `variableId`, `modeId`, `value`. COLOR accepts `'#hex'`, `{ hex, opacity }`, `{ r, g, b, a? }`, an alias, or a composed color. FLOAT/BOOLEAN/STRING are coerced, or may be an alias.
+- Params: `variableId`, `modeId`, `value`. COLOR accepts `'#hex'`, any CSS color string (`'oklch(0.7 0.1 200)'`, `'hsl(...)'`, `'lab(...)'`, `'rgb(...)'` — string alpha becomes `a`), `{ hex, opacity }`, `{ r, g, b, a? }`, `{ space, ... }` (a `ColorWithColorSpace`), an alias, or a composed color. Non-hex input is converted to sRGB RGBA via `figma.util.rgba` (Figma update 141+); variable values don't keep the authoring color space, so reads stay `{ hex, opacity }`. FLOAT/BOOLEAN/STRING are coerced, or may be an alias.
 - **Alias** (any type): `{ aliasOf: '<variableId>' }` — the shape `get_variables` emits (`{ variableId }` and Figma's `{ type: 'VARIABLE_ALIAS', id }` are also accepted).
 - **Composed color** (COLOR only — needs Figma typings ≥ 1.142): a color plus a separate opacity, where the color **or** the opacity (or both) is an alias: `{ color: <'#hex' | { hex, opacity } | { r,g,b,a? } | { aliasOf }>, opacity: <0–1 number | { aliasOf }> }`. Neither part aliased is rejected — use `{ hex, opacity }`. `get_variables` returns the same shape. Also accepted by variable create (`value` / `valuesByMode`).
 - Returns: `{ success: true }`.
@@ -715,6 +715,14 @@ Merged: apply/remove a manual keyframe track, dispatched on `op`.
 
 - Dynamic strokes via `set_node_property` (passthrough + serialized): `complexStrokeProperties` (brush/stretch/scatter), `variableWidthStrokeProperties`.
 ### `transform_group` — `{ nodeIds, parentId?, index?, transformModifiers? }`. Wraps nodes in a `TRANSFORM_GROUP`; `transformModifiers` is an array (default `[]`).
+
+## Color spaces (Figma update 141)
+
+Figma can author colors in a color space; the sRGB result is the paint's `color`, and the authored value is its `sourceColor`.
+- **Reads** — SOLID paints emit `hex`, `opacity` **and** `sourceColor` (when the color was authored in a space); gradient `stops[]` and effect colors (`color`, `secondaryColor`) likewise emit `{ hex, opacity, sourceColor? }`. `sourceColor` is a `ColorWithColorSpace`: `{ space: 'SRGB'|'DISPLAY_P3', r, g, b }`, `{ space: 'HSL', h, s, l }`, `{ space: 'HSB', h, s, b }`, `{ space: 'OKLAB', l, a, b }`, or `{ space: 'OKLCH', l, c, h }`. Pass it back unchanged to round-trip.
+- **Writes** — everywhere a hex string is accepted for a color (fills/strokes shorthand and `hex`/`color`, gradient stop `hex`/`color`, effect colors, `set_style` PAINT/EFFECT, variable COLOR values) you may instead pass any CSS color string (`'oklch(0.7 0.1 200)'`, `'hsl(220 90% 50%)'`, `'lab(...)'`, `'rgb(...)'`, `#RRGGBBAA`) or a `{ space, ... }` object. Parsing goes through one helper using `figma.util.rgba`; plain `#hex` keeps the original parser. A CSS-string alpha becomes the paint `opacity` (unless `opacity` is given) or the color's `a`. A paint can be `{ type:'SOLID', sourceColor:{space:'OKLCH',l,c,h}, opacity }` with no hex.
+- **Stale sourceColor** — if `hex` and `sourceColor` are both given and disagree (you edited `hex` on a read-back paint), `hex` wins and `sourceColor` is dropped.
+- Non-hex input requires a Figma build exposing `figma.util.rgba` (update 141+); otherwise a clear error is thrown.
 
 ## New paint / effect variants (v0.2.8)
 
