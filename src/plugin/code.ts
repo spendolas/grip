@@ -142,6 +142,8 @@ type ToolMethod =
   | 'table_remove_column'
   | 'table_move_row'
   | 'table_move_column'
+  | 'table_reorder_rows'
+  | 'table_reorder_columns'
   | 'table_cell_at'
   | 'slides_get_canvas_grid'
   | 'slides_set_canvas_grid'
@@ -735,6 +737,16 @@ async function serializeNode(
     if (want('exposedInstances')) out.exposedInstances = inst.exposedInstances?.map((x) => ({ id: x.id, name: x.name }));
     if (want('isExposedInstance')) out.isExposedInstance = inst.isExposedInstance;
   }
+  // A SLOT's current contents vs the limits set on its SLOT property's slotSettings.
+  if (node.type === 'SLOT') {
+    maybe(out, opts, 'limitViolations', () => {
+      try { return Array.from((node as any).limitViolations ?? []); } catch { return undefined; }
+    });
+  }
+  // Page dividers are PAGE nodes whose name is all '*' / '–' / '—' / spaces.
+  if (node.type === 'PAGE') {
+    maybe(out, opts, 'isPageDivider', () => (node as PageNode).isPageDivider === true);
+  }
   if (node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') {
     const c = node as ComponentNode | ComponentSetNode;
     if (want('key')) out.key = c.key;
@@ -956,6 +968,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         pages: figma.root.children.map((p) => ({
           id: p.id,
           name: p.name,
+          isPageDivider: p.isPageDivider === true,
           nodeCount: countNodes(p),
         })),
       };
@@ -1375,7 +1388,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       return s;
     }
     case 'list_pages': {
-      return { pages: figma.root.children.map((p) => ({ id: p.id, name: p.name, current: p.id === figma.currentPage.id })) };
+      return { pages: figma.root.children.map((p) => ({ id: p.id, name: p.name, current: p.id === figma.currentPage.id, isPageDivider: p.isPageDivider === true })) };
     }
     case 'export_node': {
       const node = await getNode(params.nodeId);
@@ -2262,11 +2275,20 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         throw new Error(`add_component_property: ${n.type} not allowed`);
       }
       const c = n as ComponentNode | ComponentSetNode;
+      const isSlot = params.type === 'SLOT';
+      const opts: Record<string, unknown> = {};
+      if (params.preferredValues) opts.preferredValues = coerce(params.preferredValues);
+      if (typeof params.description === 'string') opts.description = params.description;
+      if (params.slotSettings !== undefined) {
+        if (!isSlot) throw new Error("slotSettings is only supported for type 'SLOT' properties");
+        opts.slotSettings = toSlotSettings(params.slotSettings);
+      }
       const propName = c.addComponentProperty(
         String(params.name),
         params.type as ComponentPropertyType,
-        params.defaultValue as never,
-        params.preferredValues ? { preferredValues: params.preferredValues } as any : undefined,
+        // A SLOT has no default value; accept it omitted.
+        (params.defaultValue ?? (isSlot ? '' : undefined)) as never,
+        Object.keys(opts).length ? opts as any : undefined,
       );
       return { propertyName: propName };
     }
@@ -2276,11 +2298,15 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         throw new Error(`edit_component_property: ${n.type} not allowed`);
       }
       const c = n as ComponentNode | ComponentSetNode;
-      const newName = c.editComponentProperty(String(params.propertyName), {
+      const patch: Record<string, unknown> = {
         name: params.newName,
         defaultValue: params.defaultValue,
         preferredValues: params.preferredValues,
-      });
+      };
+      // SLOT-only fields (Figma rejects them on other property types).
+      if (typeof params.description === 'string') patch.description = params.description;
+      if (params.slotSettings !== undefined) patch.slotSettings = toSlotSettings(params.slotSettings);
+      const newName = c.editComponentProperty(String(params.propertyName), patch as any);
       return { propertyName: newName };
     }
     case 'delete_component_property': {
@@ -2669,6 +2695,28 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       (n as TableNode).moveColumn(Number(params.fromIndex), Number(params.toIndex));
       return { success: true };
     }
+    case 'table_reorder_rows':
+    case 'table_reorder_columns': {
+      // Multi-track reorder: {fromIndices:number[], insertionIndex:number}.
+      // insertionIndex is evaluated against the ORIGINAL order (0..count inclusive).
+      // 1.142.0 typings declare reorderRows/reorderColumns on GridLayoutMixin
+      // (auto-layout frames with layoutMode 'GRID'), NOT on TableNode — so use
+      // the native method wherever the node exposes it, and fail with a pointer
+      // to move_row/move_column when a TABLE lacks it.
+      const isRows = method === 'table_reorder_rows';
+      const fn = isRows ? 'reorderRows' : 'reorderColumns';
+      const n = await getNode(params.nodeId);
+      const from = asIndexList(params.fromIndices, 'fromIndices');
+      const ins = Number(params.insertionIndex);
+      if (!Number.isInteger(ins) || ins < 0) throw new Error('insertionIndex must be a non-negative integer');
+      if (typeof (n as any)[fn] !== 'function') {
+        throw new Error(n.type === 'TABLE'
+          ? `${fn} is not available on TABLE nodes in this Figma version — use op=${isRows ? 'move_row' : 'move_column'} one track at a time`
+          : `${fn} requires a FigJam TABLE or an auto-layout frame with layoutMode 'GRID', got ${n.type}`);
+      }
+      const moves = (n as any)[fn]({ fromIndices: from, insertionIndex: ins });
+      return { success: true, moves: Array.from(moves ?? []).map((m: any) => ({ from: m.from, to: m.to })) };
+    }
     case 'table_cell_at': {
       const n = await getNode(params.nodeId);
       if (n.type !== 'TABLE') throw new Error(`Not a TABLE: ${params.nodeId}`);
@@ -2875,9 +2923,36 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
     case 'create_slot': {
       const c = await getNode(params.componentId);
       if (c.type !== 'COMPONENT') throw new Error(`createSlot requires COMPONENT, got ${c.type}`);
-      const slot = (c as any).createSlot();
+      const comp = c as ComponentNode;
+      const slotKeys = (): string[] => {
+        try {
+          return Object.entries((comp as any).componentPropertyDefinitions ?? {})
+            .filter(([, d]: [string, any]) => d?.type === 'SLOT').map(([k]) => k);
+        } catch { return []; }
+      };
+      const before = new Set(slotKeys());
+      const slot = comp.createSlot() as any;
       if (params.name) slot.name = params.name;
-      return { id: slot.id, name: slot.name, type: slot.type };
+      const out: any = { id: slot.id, name: slot.name, type: slot.type };
+      // Optional SLOT-property config, applied to the property createSlot() just made.
+      const wantEdit = params.slotSettings !== undefined || params.preferredValues !== undefined || typeof params.description === 'string';
+      if (wantEdit) {
+        const fresh = slotKeys().filter((k) => !before.has(k));
+        const propName = typeof params.propertyName === 'string' ? params.propertyName
+          : (fresh.length === 1 ? fresh[0] : (slot.componentPropertyReferences?.slot as string | undefined));
+        if (!propName) {
+          out.slotSettingsApplied = false;
+          out.warning = 'slot created, but its SLOT property could not be identified — call component_property op=edit with the propertyName from get_node componentPropertyDefinitions';
+        } else {
+          const patch: Record<string, unknown> = {};
+          if (params.slotSettings !== undefined) patch.slotSettings = toSlotSettings(params.slotSettings);
+          if (params.preferredValues !== undefined) patch.preferredValues = coerce(params.preferredValues);
+          if (typeof params.description === 'string') patch.description = params.description;
+          out.propertyName = comp.editComponentProperty(propName, patch as any);
+          out.slotSettingsApplied = true;
+        }
+      }
+      return out;
     }
     case 'set_grid_child_position': {
       const n = await getNode(params.nodeId);
@@ -3445,11 +3520,84 @@ function serializeVarValues(v: Variable): Record<string, any> {
     if (v.resolvedType === 'COLOR' && raw && typeof raw === 'object' && 'color' in (raw as any) && 'opacity' in (raw as any)) {
       const c = raw as VariableComposedColor;
       out[modeId] = { color: serializeVarPart(c.color), opacity: serializeVarPart(c.opacity) };
+    } else if (v.resolvedType === 'EASING' && raw && typeof raw === 'object' && (raw as any).type !== 'VARIABLE_ALIAS') {
+      // MotionEasing → plain JSON ({type, easingFunctionCubicBezier?, easingFunctionSpring?}).
+      out[modeId] = plainData(raw);
     } else {
       out[modeId] = serializeVarPart(raw);
     }
   }
   return out;
+}
+
+const MOTION_EASING_TYPES = new Set([
+  'EASE_IN', 'EASE_OUT', 'EASE_IN_AND_OUT', 'LINEAR', 'EASE_IN_BACK', 'EASE_OUT_BACK',
+  'EASE_IN_AND_OUT_BACK', 'CUSTOM_CUBIC_BEZIER', 'GENTLE', 'QUICK', 'BOUNCY', 'SLOW',
+  'CUSTOM_SPRING', 'HOLD',
+]);
+
+// EASING variable value -> MotionEasing. Accepts a bare type name ('EASE_IN'), the
+// full Figma shape, or flat shorthands for the custom curves:
+//   {type:'CUSTOM_CUBIC_BEZIER', x1,y1,x2,y2}   (or easingFunctionCubicBezier:{x1,y1,x2,y2})
+//   {type:'CUSTOM_SPRING', bounce}              (or easingFunctionSpring:{bounce})
+function toMotionEasing(raw: any): MotionEasing {
+  const v = coerce<any>(raw);
+  const obj = typeof v === 'string' ? { type: v } : v;
+  if (!obj || typeof obj !== 'object' || typeof obj.type !== 'string') {
+    throw new Error('EASING value expects a type name or {type, easingFunctionCubicBezier?, easingFunctionSpring?} — type one of ' + Array.from(MOTION_EASING_TYPES).join('|'));
+  }
+  if (!MOTION_EASING_TYPES.has(obj.type)) throw new Error(`Unknown easing type '${obj.type}' — one of ${Array.from(MOTION_EASING_TYPES).join('|')}`);
+  const out: any = { type: obj.type };
+  if (obj.type === 'CUSTOM_CUBIC_BEZIER') {
+    const b = obj.easingFunctionCubicBezier ?? obj;
+    const nums = [b.x1, b.y1, b.x2, b.y2].map(Number);
+    if (nums.some((n) => !Number.isFinite(n))) throw new Error('CUSTOM_CUBIC_BEZIER needs numeric x1, y1, x2, y2 (or easingFunctionCubicBezier:{x1,y1,x2,y2})');
+    out.easingFunctionCubicBezier = { x1: nums[0], y1: nums[1], x2: nums[2], y2: nums[3] };
+  } else if (obj.type === 'CUSTOM_SPRING') {
+    const sp = obj.easingFunctionSpring ?? obj;
+    const bounce = Number(sp.bounce);
+    if (!Number.isFinite(bounce)) throw new Error('CUSTOM_SPRING needs a numeric bounce 0..1 (or easingFunctionSpring:{bounce})');
+    out.easingFunctionSpring = { bounce };
+  }
+  return out as MotionEasing;
+}
+
+// TIMING variable value -> number of SECONDS (Motion durations are in seconds
+// everywhere in the Plugin API; the typings don't state a unit for TIMING variables).
+function toTimingSeconds(raw: any): number {
+  const n = Number(coerce<any>(raw));
+  if (!Number.isFinite(n) || n < 0) throw new Error('TIMING value expects a finite, non-negative number of seconds');
+  return n;
+}
+
+// SLOT property settings -> SlotSettings. Validates known keys only; min/maxChildren
+// accept null to clear a limit. Unknown keys are rejected so typos don't no-op silently.
+function toSlotSettings(raw: unknown): SlotSettings {
+  const v = coerce<any>(raw);
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('slotSettings expects an object: {minChildren?, maxChildren?, stretchChildOnInsert?, displayEmptyByDefault?, allowPreferredValuesOnly?}');
+  const out: SlotSettings = {};
+  for (const [k, val] of Object.entries(v)) {
+    if (k === 'stretchChildOnInsert' || k === 'displayEmptyByDefault' || k === 'allowPreferredValuesOnly') {
+      if (typeof val !== 'boolean') throw new Error(`slotSettings.${k} must be a boolean`);
+      out[k] = val;
+    } else if (k === 'minChildren' || k === 'maxChildren') {
+      if (val !== null && (typeof val !== 'number' || !Number.isInteger(val) || val < 0)) throw new Error(`slotSettings.${k} must be a non-negative integer or null`);
+      out[k] = val as number | null;
+    } else {
+      throw new Error(`Unknown slotSettings key '${k}' — allowed: minChildren, maxChildren, stretchChildOnInsert, displayEmptyByDefault, allowPreferredValuesOnly`);
+    }
+  }
+  return out;
+}
+
+// Index list for table/grid reorder (accepts a JSON-stringified array).
+function asIndexList(v: unknown, label: string): number[] {
+  const a = coerce<unknown>(v);
+  const list = Array.isArray(a) ? a : (typeof a === 'number' ? [a] : null);
+  if (!list || !list.length || list.some((x) => typeof x !== 'number' || !Number.isInteger(x) || x < 0)) {
+    throw new Error(`${label} must be a non-empty array of non-negative integers`);
+  }
+  return list as number[];
 }
 
 function bytesToString(bytes: Uint8Array): string {
@@ -3883,6 +4031,8 @@ function coerceVarValue(type: VariableResolvedDataType, value: any): VariableVal
   if (type === 'FLOAT') return Number(value);
   if (type === 'BOOLEAN') return Boolean(value);
   if (type === 'STRING') return String(value);
+  if (type === 'EASING') return toMotionEasing(value);
+  if (type === 'TIMING') return toTimingSeconds(value);
   return value;
 }
 

@@ -31,12 +31,12 @@ Pin this MCP session to a specific connected plugin.
 ### `get_document`
 File metadata + page list.
 - Params: none.
-- Returns: `{ name, id, currentPageId, pages: [{ id, name, nodeCount }] }`. `nodeCount` is top-level children only.
+- Returns: `{ name, id, currentPageId, pages: [{ id, name, isPageDivider, nodeCount }] }`. `nodeCount` is top-level children only.
 
 ### `list_pages`
 Enumerate pages (id, name, current) WITHOUT loading their contents — cheap even on a 97-page file, unlike `get_document`.
 - Params: none.
-- Returns: `{ pages: [{ id, name, current }] }`. Use to build pageIds for a batched `search_nodes`.
+- Returns: `{ pages: [{ id, name, current, isPageDivider }] }`. `isPageDivider` is true for page dividers (PAGE nodes named all `*`, `–`, `—` or spaces). Use to build pageIds for a batched `search_nodes`. `get_document` pages and PAGE serialization (`get_page`) carry `isPageDivider` too.
 
 ### `get_audit`
 One-pass document audit: counts by type, fill-source breakdown (styled vs variable-bound vs hardcoded color), fonts used, and defined styles/variables. Numbers, not trees.
@@ -264,7 +264,11 @@ Merged: create/delete a local variable collection, dispatched on `op`.
 
 ### `variable`
 Merged: create/delete a variable, dispatched on `op`.
-- `op: 'create'` — `{ op, name, collectionId, resolvedType ('COLOR'|'FLOAT'|'STRING'|'BOOLEAN'), value? (sets default mode) or valuesByMode: { [modeId]: value }, description?, scopes?, codeSyntax?: { web, iOS, androidstudio }, hiddenFromPublishing? }` → `{ id, name, resolvedType }`.
+- `op: 'create'` — `{ op, name, collectionId, resolvedType ('COLOR'|'FLOAT'|'STRING'|'BOOLEAN'|'EASING'|'TIMING'), value? (sets default mode) or valuesByMode: { [modeId]: value }, description?, scopes?, codeSyntax?: { web, iOS, androidstudio }, hiddenFromPublishing? }` → `{ id, name, resolvedType }`.
+- **Motion variable value shapes** (create `value`/`valuesByMode` and `set_variable_value`; any of them may instead be an alias `{ aliasOf: '<variableId>' }`):
+  - `EASING` — a `MotionEasing`: a bare type name (`'EASE_IN'|'EASE_OUT'|'EASE_IN_AND_OUT'|'LINEAR'|'EASE_IN_BACK'|'EASE_OUT_BACK'|'EASE_IN_AND_OUT_BACK'|'GENTLE'|'QUICK'|'BOUNCY'|'SLOW'|'HOLD'`) or `{ type, easingFunctionCubicBezier?: { x1, y1, x2, y2 }, easingFunctionSpring?: { bounce } }`. Custom curves also accept flat shorthands: `{ type: 'CUSTOM_CUBIC_BEZIER', x1, y1, x2, y2 }` and `{ type: 'CUSTOM_SPRING', bounce }` (bounce 0..1). Unknown types / missing numbers are rejected.
+  - `TIMING` — a number of **seconds** (finite, >= 0). (The typings don't state the unit; seconds matches every other Motion duration in the Plugin API.)
+  - Reads (`get_variables` `valuesByMode`) return EASING as the plain `MotionEasing` object (`{ type, easingFunctionCubicBezier?, easingFunctionSpring? }`) and TIMING as the number; aliases as `{ aliasOf }`.
 - `op: 'delete'` — `{ op, variableId }` → `{ success: true }`.
 
 ### `variable_mode`
@@ -281,6 +285,7 @@ Merged: set/clear a node's explicit mode override for a collection, dispatched o
 ### `set_variable_meta`
 Update a variable's metadata. Values not touched — use `set_variable_value` for those.
 - Params: `variableId`, optional `name`, `description`, `scopes`, `codeSyntax`, `hiddenFromPublishing`.
+- `scopes` values: `ALL_SCOPES`, `TEXT_CONTENT`, `CORNER_RADIUS`, `WIDTH_HEIGHT`, `GAP`, `ALL_FILLS`, `FRAME_FILL`, `SHAPE_FILL`, `TEXT_FILL`, `STROKE_COLOR`, `STROKE_FLOAT`, `EFFECT_FLOAT`, `EFFECT_COLOR`, `OPACITY`, `COLOR_OPACITY` (the opacity part of a composed color; Update 139), `FONT_FAMILY`, `FONT_STYLE`, `FONT_WEIGHT`, `FONT_SIZE`, `LINE_HEIGHT`, `LETTER_SPACING`, `PARAGRAPH_SPACING`, `PARAGRAPH_INDENT`. Scopes only control where the variable shows in Figma's pickers; they don't block API bindings.
 - Returns: `{ success: true }`.
 
 ---
@@ -515,6 +520,7 @@ Merged: insert/remove/move/resize/read rows and columns of a FigJam TABLE, dispa
 - `op: 'remove_row'` / `'remove_column'` — `{ op, nodeId, index }`.
 - `op: 'move_row'` / `'move_column'` — `{ op, nodeId, fromIndex, toIndex }`.
 - `op: 'resize_row'` — `{ op, nodeId, index, height }`. `op: 'resize_column'` — `{ op, nodeId, index, width }`.
+- `op: 'reorder_rows'` / `'reorder_columns'` — `{ op, nodeId, fromIndices: number[], insertionIndex: number }` → `{ success, moves: [{ from, to }] }`. Moves several tracks at once: `fromIndices` need not be sorted, contiguous or deduplicated; `insertionIndex` is evaluated against the **original** order and ranges `0..count` inclusive (e.g. rows `[0]` with `insertionIndex: 3` on a 3-row grid moves row 0 to the end). Wraps Figma's native `reorderRows`/`reorderColumns`, which the 1.142 typings declare on auto-layout **GRID frames** (`layoutMode: 'GRID'`; children spanning moved tracks drag those tracks along and appear in `moves`), not on `TableNode`. On a TABLE that lacks the method the op errors and points to `move_row`/`move_column`.
 - `op: 'cell_at'` — `{ op, nodeId, row, column }` → the cell at that position.
 
 ---
@@ -561,9 +567,17 @@ Build a shareable `figma.com` URL to a node.
 
 ### `component_property`
 Merged: manage component property definitions, dispatched on `op`.
-- `op: 'add'` — `{ op, componentId, name, type ('VARIANT'|'TEXT'|'BOOLEAN'|'INSTANCE_SWAP'), defaultValue, preferredValues? }` → `{ propertyName }` — Figma appends `#<hash>` to the name.
-- `op: 'edit'` — `{ op, componentId, propertyName, newName?, defaultValue?, preferredValues? }` → `{ propertyName }`.
+- `op: 'add'` — `{ op, componentId, name, type ('VARIANT'|'TEXT'|'BOOLEAN'|'INSTANCE_SWAP'|'SLOT'), defaultValue (omit for SLOT), preferredValues?, description? (SLOT only), slotSettings? (SLOT only) }` → `{ propertyName }` — Figma appends `#<hash>` to the name.
+- `op: 'edit'` — `{ op, componentId, propertyName, newName?, defaultValue?, preferredValues?, description? (SLOT only), slotSettings? (SLOT only) }` → `{ propertyName }`.
+- `slotSettings` (SLOT properties): `{ minChildren?: int|null, maxChildren?: int|null (null clears a limit), stretchChildOnInsert?: bool, displayEmptyByDefault?: bool, allowPreferredValuesOnly?: bool }`. Unknown keys / wrong types are rejected before calling Figma; `slotSettings` on a non-SLOT type is an error on `add`.
+- Reads: `componentPropertyDefinitions` (on `get_node` for COMPONENT/COMPONENT_SET, and `get_components`) carries `slotSettings` on SLOT properties. A SLOT node serializes `limitViolations` — `[]` when within limits, else any of `'BELOW_MIN'|'ABOVE_MAX'|'HAS_NON_PREFERRED'` (the last when `allowPreferredValuesOnly` and a child isn't a preferred value).
 - `op: 'delete'` — `{ op, componentId, propertyName }` → `{ success: true }`.
+
+### `create_slot`
+Create a SLOT inside a COMPONENT.
+- Params: `componentId`, optional `name`, `slotSettings` (same shape as `component_property`), `preferredValues` (`[{ type: 'COMPONENT'|'COMPONENT_SET', key }]`), `description`, `propertyName`.
+- `createSlot()` takes no arguments, so settings are applied after creation with `editComponentProperty` on the SLOT property the call just created (auto-detected as the single new SLOT key in `componentPropertyDefinitions`; pass `propertyName` to target one explicitly).
+- Returns `{ id, name, type }`, plus `{ propertyName, slotSettingsApplied: true }` when settings were requested — or `slotSettingsApplied: false` + `warning` if the property couldn't be identified (then use `component_property` `op: 'edit'`).
 
 ### `reset_instance_overrides`
 Reset all overrides on an INSTANCE.
@@ -714,6 +728,10 @@ Merged: apply/remove a manual keyframe track, dispatched on `op`.
 ## Figma Draw strokes / transform groups (v0.2.11)
 
 - Dynamic strokes via `set_node_property` (passthrough + serialized): `complexStrokeProperties` (brush/stretch/scatter), `variableWidthStrokeProperties`.
+- Newer auto-layout enum values (all plain passthrough, no special handling):
+  - `primaryAxisAlignItems`: `'MIN'|'CENTER'|'MAX'|'SPACE_BETWEEN'|'SPACE_EVENLY'|'SPACE_AROUND'` — `SPACE_EVENLY` spaces children evenly with equal gaps before the first, between each pair and after the last (Update 137); `SPACE_AROUND` makes the gaps between children equal with half-size gaps at both ends.
+  - `layoutWrap`: `'NO_WRAP'|'WRAP'` — `WRAP` is valid on `layoutMode: 'VERTICAL'` (Update 140) as well as `'HORIZONTAL'`; set `layoutMode` first (Figma throws if the frame has no HORIZONTAL/VERTICAL auto-layout).
+  - `NOISE`/`TEXTURE` effects carry an optional read-only-in-practice `noiseSizeVector: { x, y }` (per-axis size; `x` must equal `noiseSize`). The generic effect serializer already emits it as `{x, y}`.
 ### `transform_group` — `{ nodeIds, parentId?, index?, transformModifiers? }`. Wraps nodes in a `TRANSFORM_GROUP`; `transformModifiers` is an array (default `[]`).
 
 ## Color spaces (Figma update 141)

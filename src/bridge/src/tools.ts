@@ -128,6 +128,7 @@ export const MERGED_TOOLS: Record<string, {
     remove_row: 'table_remove_row', remove_column: 'table_remove_column',
     move_row: 'table_move_row', move_column: 'table_move_column',
     resize_row: 'table_resize_row', resize_column: 'table_resize_column',
+    reorder_rows: 'table_reorder_rows', reorder_columns: 'table_reorder_columns',
     cell_at: 'table_cell_at' } },
   timer: { discriminator: 'op', category: 'figjam', map: {
     start: 'timer_start', stop: 'timer_stop', pause: 'timer_pause', resume: 'timer_resume' } },
@@ -456,7 +457,7 @@ export const TOOLS: ToolDef[] = [
     name: 'list_pages',
     category: 'read',
     description:
-      'List all pages (id, name, current) WITHOUT loading their contents — cheap even on a 97-page file, unlike get_document. Use to enumerate pageIds for a batched search_nodes.',
+      'List all pages (id, name, current, isPageDivider) WITHOUT loading their contents — cheap even on a 97-page file, unlike get_document. Use to enumerate pageIds for a batched search_nodes.',
     schema: z.object({}),
   },
   {
@@ -735,8 +736,8 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'variable', category: 'variables',
-    description: "Create or delete a variable. `op`: create ({name, collectionId, resolvedType, value?/valuesByMode?, ...}) | delete ({variableId}). Call grip_capabilities {tool:'variable'} for per-op params.",
-    detail: "op=create: create a new variable in a collection (was create_variable) — {name, collectionId, resolvedType: COLOR|FLOAT|STRING|BOOLEAN, value?, valuesByMode?, description?, scopes?, codeSyntax?, hiddenFromPublishing?}. op=delete: delete a variable (was delete_variable) — {variableId}.",
+    description: "Create or delete a variable. `op`: create ({name, collectionId, resolvedType COLOR|FLOAT|STRING|BOOLEAN|EASING|TIMING, value?/valuesByMode?, ...}) | delete ({variableId}). Call grip_capabilities {tool:'variable'} for per-op params.",
+    detail: "op=create: create a new variable in a collection (was create_variable) — {name, collectionId, resolvedType: COLOR|FLOAT|STRING|BOOLEAN|EASING|TIMING, value?, valuesByMode?, description?, scopes?, codeSyntax?, hiddenFromPublishing?}. EASING value (motion easing): a type name ('EASE_IN'|'EASE_OUT'|'EASE_IN_AND_OUT'|'LINEAR'|'EASE_IN_BACK'|'EASE_OUT_BACK'|'EASE_IN_AND_OUT_BACK'|'GENTLE'|'QUICK'|'BOUNCY'|'SLOW'|'HOLD') or {type, ...}; custom curves: {type:'CUSTOM_CUBIC_BEZIER', x1,y1,x2,y2} (or easingFunctionCubicBezier:{x1,y1,x2,y2}) and {type:'CUSTOM_SPRING', bounce:0..1} (or easingFunctionSpring:{bounce}). TIMING value: a number of seconds (>= 0). Either may also be an alias {aliasOf}. Reads return EASING as the plain MotionEasing object and TIMING as the number. op=delete: delete a variable (was delete_variable) — {variableId}.",
     schema: z.object({ op: z.enum(['create', 'delete']) }).passthrough(),
   },
   {
@@ -748,6 +749,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'set_variable_meta',
     description: "Update a variable's metadata (name, description, scopes, codeSyntax, hiddenFromPublishing). Values are unchanged — use set_variable_value for those.",
+    detail: "scopes accepts any of: ALL_SCOPES, TEXT_CONTENT, CORNER_RADIUS, WIDTH_HEIGHT, GAP, ALL_FILLS, FRAME_FILL, SHAPE_FILL, TEXT_FILL, STROKE_COLOR, STROKE_FLOAT, EFFECT_FLOAT, EFFECT_COLOR, OPACITY, COLOR_OPACITY (the opacity part of a composed color; Update 139), FONT_FAMILY, FONT_STYLE, FONT_WEIGHT, FONT_SIZE, LINE_HEIGHT, LETTER_SPACING, PARAGRAPH_SPACING, PARAGRAPH_INDENT. Scopes only control where the variable appears in Figma's variable pickers; they do not block API bindings.",
     schema: z.object({
       variableId: z.string(),
       name: z.string().optional(),
@@ -864,9 +866,9 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'table_op', category: 'figjam',
-    description: "Insert, remove, move, resize, or read rows/columns of a FigJam TABLE. `op`: insert_row ({nodeId, index?}) | insert_column ({nodeId, index?}) | remove_row ({nodeId, index}) | remove_column ({nodeId, index}) | move_row ({nodeId, fromIndex, toIndex}) | move_column ({nodeId, fromIndex, toIndex}) | resize_row ({nodeId, index, height}) | resize_column ({nodeId, index, width}) | cell_at ({nodeId, row, column}). Call grip_capabilities {tool:'table_op'} for per-op params.",
-    detail: "op=insert_row: insert a row into a TABLE, index defaults to end (was table_insert_row) — {nodeId, index?}. op=insert_column: insert a column into a TABLE (was table_insert_column) — {nodeId, index?}. op=remove_row: remove a row (was table_remove_row) — {nodeId, index}. op=remove_column: remove a column (was table_remove_column) — {nodeId, index}. op=move_row: move a row (was table_move_row) — {nodeId, fromIndex, toIndex}. op=move_column: move a column (was table_move_column) — {nodeId, fromIndex, toIndex}. op=resize_row: set a TABLE row's height (was table_resize_row) — {nodeId, index, height}. op=resize_column: set a TABLE column's width (was table_resize_column) — {nodeId, index, width}. op=cell_at: read the table cell at (row, column) (was table_cell_at) — {nodeId, row, column}.",
-    schema: z.object({ op: z.enum(['insert_row', 'insert_column', 'remove_row', 'remove_column', 'move_row', 'move_column', 'resize_row', 'resize_column', 'cell_at']) }).passthrough(),
+    description: "Insert, remove, move, resize, or read rows/columns of a FigJam TABLE. `op`: insert_row ({nodeId, index?}) | insert_column ({nodeId, index?}) | remove_row ({nodeId, index}) | remove_column ({nodeId, index}) | move_row ({nodeId, fromIndex, toIndex}) | move_column ({nodeId, fromIndex, toIndex}) | resize_row ({nodeId, index, height}) | resize_column ({nodeId, index, width}) | reorder_rows ({nodeId, fromIndices, insertionIndex}) | reorder_columns ({nodeId, fromIndices, insertionIndex}) | cell_at ({nodeId, row, column}). Call grip_capabilities {tool:'table_op'} for per-op params.",
+    detail: "op=insert_row: insert a row into a TABLE, index defaults to end (was table_insert_row) — {nodeId, index?}. op=insert_column: insert a column into a TABLE (was table_insert_column) — {nodeId, index?}. op=remove_row: remove a row (was table_remove_row) — {nodeId, index}. op=remove_column: remove a column (was table_remove_column) — {nodeId, index}. op=move_row: move a row (was table_move_row) — {nodeId, fromIndex, toIndex}. op=move_column: move a column (was table_move_column) — {nodeId, fromIndex, toIndex}. op=resize_row: set a TABLE row's height (was table_resize_row) — {nodeId, index, height}. op=resize_column: set a TABLE column's width (was table_resize_column) — {nodeId, index, width}. op=reorder_rows: move several rows at once — {nodeId, fromIndices: number[] (unsorted/non-contiguous OK), insertionIndex: number (0..numRows inclusive, against the ORIGINAL order)} → {success, moves:[{from,to}]}. op=reorder_columns: same for columns (insertionIndex 0..numColumns). Uses Figma's native reorderRows/reorderColumns, which the 1.142 typings declare on auto-layout GRID frames (layoutMode:'GRID'; spanning children pull their spanned tracks along, moves lists them); on a TABLE node that lacks the method it errors — use move_row/move_column. op=cell_at: read the table cell at (row, column) (was table_cell_at) — {nodeId, row, column}.",
+    schema: z.object({ op: z.enum(['insert_row', 'insert_column', 'remove_row', 'remove_column', 'move_row', 'move_column', 'resize_row', 'resize_column', 'reorder_rows', 'reorder_columns', 'cell_at']) }).passthrough(),
   },
   {
     name: 'import_component_by_key',
@@ -1025,8 +1027,8 @@ export const TOOLS: ToolDef[] = [
   // ---------- tier 4 ----------
   {
     name: 'component_property', category: 'components',
-    description: "Add, edit, or delete a COMPONENT/COMPONENT_SET property definition. `op`: add ({componentId, name, type, defaultValue, preferredValues?}) | edit ({componentId, propertyName, newName?, defaultValue?, preferredValues?}) | delete ({componentId, propertyName}). Call grip_capabilities {tool:'component_property'} for per-op params.",
-    detail: "op=add: add a property to a COMPONENT or COMPONENT_SET (was add_component_property) — {componentId, name, type: VARIANT|TEXT|BOOLEAN|INSTANCE_SWAP, defaultValue, preferredValues?}. op=edit: rename or change defaults on a component's property; propertyName matches Figma's `name#hash` (was edit_component_property) — {componentId, propertyName, newName?, defaultValue?, preferredValues?}. op=delete: remove a property from a component / component set (was delete_component_property) — {componentId, propertyName}.",
+    description: "Add, edit, or delete a COMPONENT/COMPONENT_SET property definition. `op`: add ({componentId, name, type, defaultValue, preferredValues?, description?, slotSettings?}) | edit ({componentId, propertyName, newName?, defaultValue?, preferredValues?, description?, slotSettings?}) | delete ({componentId, propertyName}). Call grip_capabilities {tool:'component_property'} for per-op params.",
+    detail: "op=add: add a property to a COMPONENT or COMPONENT_SET (was add_component_property) — {componentId, name, type: VARIANT|TEXT|BOOLEAN|INSTANCE_SWAP|SLOT, defaultValue (omit for SLOT), preferredValues?, description? (SLOT only), slotSettings? (SLOT only)}. op=edit: rename or change defaults on a component's property; propertyName matches Figma's `name#hash` (was edit_component_property) — {componentId, propertyName, newName?, defaultValue?, preferredValues?, description? (SLOT only), slotSettings? (SLOT only)}. op=delete: remove a property from a component / component set (was delete_component_property) — {componentId, propertyName}. slotSettings (SLOT properties; unknown keys rejected): {minChildren?: int|null, maxChildren?: int|null (null clears the limit), stretchChildOnInsert?: bool, displayEmptyByDefault?: bool, allowPreferredValuesOnly?: bool}. Reads: get_node/get_components componentPropertyDefinitions carry slotSettings on SLOT properties; a SLOT node serializes limitViolations (BELOW_MIN|ABOVE_MAX|HAS_NON_PREFERRED, [] when within limits).",
     schema: z.object({ op: z.enum(['add', 'edit', 'delete']) }).passthrough(),
   },
   {
@@ -1226,7 +1228,25 @@ export const TOOLS: ToolDef[] = [
   { name: 'extend_library_collection_by_key', description: 'Extend a remote variable collection (from team library) into this file by its key.', schema: z.object({ key: z.string() }) },
   { name: 'request_variable_to_be_enabled', description: 'Request that a library variable be enabled in this file.', schema: z.object({ variableId: z.string() }) },
   { name: 'request_variable_to_be_disabled', description: 'Request that a library variable be disabled in this file.', schema: z.object({ variableId: z.string() }) },
-  { name: 'create_slot', description: 'Create a SLOT inside a COMPONENT (used for slot-based variant authoring).', schema: z.object({ componentId: z.string(), name: z.string().optional() }) },
+  {
+    name: 'create_slot',
+    description: "Create a SLOT inside a COMPONENT (used for slot-based variant authoring). Optional slotSettings/preferredValues/description configure its SLOT property; see detail.",
+    detail: "{componentId, name?, slotSettings?: {minChildren?: int|null, maxChildren?: int|null, stretchChildOnInsert?: bool, displayEmptyByDefault?: bool, allowPreferredValuesOnly?: bool}, preferredValues?: [{type:'COMPONENT'|'COMPONENT_SET', key}], description?, propertyName?}. createSlot() itself takes no arguments, so the settings are applied afterwards with editComponentProperty to the SLOT property the call just created (auto-detected as the one new SLOT key in componentPropertyDefinitions; pass propertyName to target one explicitly). Returns {id, name, type} plus, when settings were requested, {propertyName, slotSettingsApplied:true} — or slotSettingsApplied:false + warning if the property could not be identified (then use component_property op=edit).",
+    schema: z.object({
+      componentId: z.string(),
+      name: z.string().optional(),
+      slotSettings: z.object({
+        minChildren: z.number().int().nullable().optional(),
+        maxChildren: z.number().int().nullable().optional(),
+        stretchChildOnInsert: z.boolean().optional(),
+        displayEmptyByDefault: z.boolean().optional(),
+        allowPreferredValuesOnly: z.boolean().optional(),
+      }).optional(),
+      preferredValues: z.array(z.object({ type: z.enum(['COMPONENT', 'COMPONENT_SET']), key: z.string() })).optional(),
+      description: z.string().optional(),
+      propertyName: z.string().optional(),
+    }),
+  },
   { name: 'set_grid_child_position', description: 'Place a direct child of a GRID auto-layout frame at a 0-based (row, column) cell. Configure the grid container first via set_node_property (layoutMode="GRID", gridRowCount/gridColumnCount, gridRowGap/gridColumnGap, gridColumnSizes/gridRowSizes).', schema: z.object({ nodeId: z.string(), row: z.number().int().nonnegative(), column: z.number().int().nonnegative() }) },
   { name: 'list_shaders', description: 'List shaders available to this file (Figma shader subsystem). Returns an array of shader descriptors (empty if the file has none). Use a returned id with import_shader, then apply via set_node_property fills/effects with {type:"SHADER", shaderId}.', schema: z.object({}) },
   { name: 'import_shader', description: 'Materialize a shader into this file by id (get the id from list_shaders). Returns the imported shader descriptor. Required before a SHADER paint/effect referencing it can be applied.', schema: z.object({ shaderId: z.string() }) },
@@ -1302,6 +1322,19 @@ export const TOOLS: ToolDef[] = [
     subscription: true,
   },
 ];
+
+// Extra `detail` appended to core tools (their `description` is byte-budgeted).
+// Kept here, apart from the long literals above, so independent edits don't collide.
+const EXTRA_DETAIL: Record<string, string> = {
+  set_node_property:
+    ' Auto-layout enums (passthrough): primaryAxisAlignItems "MIN"|"CENTER"|"MAX"|"SPACE_BETWEEN"|"SPACE_EVENLY"|"SPACE_AROUND" (SPACE_EVENLY: equal gaps before first, between and after last; SPACE_AROUND: equal gaps between, half-gaps at the ends); layoutWrap "NO_WRAP"|"WRAP" — WRAP now works on layoutMode "VERTICAL" as well as "HORIZONTAL" (set layoutMode first). Effects: a NOISE effect round-trips noiseSizeVector {x,y} (x must equal noiseSize).',
+  set_variable_value:
+    ' EASING variables (motion): a type name \'EASE_IN\'|\'EASE_OUT\'|\'EASE_IN_AND_OUT\'|\'LINEAR\'|\'EASE_IN_BACK\'|\'EASE_OUT_BACK\'|\'EASE_IN_AND_OUT_BACK\'|\'GENTLE\'|\'QUICK\'|\'BOUNCY\'|\'SLOW\'|\'HOLD\', or {type, easingFunctionCubicBezier?:{x1,y1,x2,y2}, easingFunctionSpring?:{bounce}}; shorthand {type:\'CUSTOM_CUBIC_BEZIER\', x1,y1,x2,y2} and {type:\'CUSTOM_SPRING\', bounce} also accepted. Reads return the plain MotionEasing object. TIMING variables: a number of seconds (>= 0). Both also accept an alias.',
+};
+for (const [toolName, extra] of Object.entries(EXTRA_DETAIL)) {
+  const t = TOOLS.find((x) => x.name === toolName);
+  if (t) t.detail = (t.detail ?? '') + extra;
+}
 
 // JSON-Schema friendly enough for MCP listTools.
 const richReadProps = {
@@ -1743,7 +1776,7 @@ export function toolInputSchema(name: string): Record<string, unknown> {
         properties: {
           name: { type: 'string' },
           collectionId: { type: 'string' },
-          resolvedType: { type: 'string', enum: ['COLOR', 'FLOAT', 'STRING', 'BOOLEAN'] },
+          resolvedType: { type: 'string', enum: ['COLOR', 'FLOAT', 'STRING', 'BOOLEAN', 'EASING', 'TIMING'] },
           value: {},
           valuesByMode: { type: 'object' },
           description: { type: 'string' },
