@@ -453,7 +453,7 @@ export function createSession(bridge: PluginBridge): LiveSession {
 
     // Export defaults to disk. A raster/video export returns base64 in `data`;
     // that base64 lands in the MCP tool_result and accumulates IRREVERSIBLY in
-    // the consuming agent's context — 94 inline exports once made a resumed Hub
+    // the consuming agent's context — 94 inline exports once made a resumed agent
     // session 39MB (82% base64), re-cached every turn until the watchdog killed
     // it. So the bridge writes bytes to disk itself and returns a tiny
     // {path, format, bytes, width?, height?}; the agent Reads the file only if

@@ -4,8 +4,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { createSession, destroySession, type LiveSession } from './mcp-server.js';
 import type { PluginBridge } from './ws-server.js';
 
-// Direct HTTP MCP transport for the daemon. Clients (Claude Hub, Claude
-// Code) connect to http://127.0.0.1:<port>/mcp by URL — NO per-process shim,
+// Direct HTTP MCP transport for the daemon. Clients (Claude Code, desktop
+// agent apps, any MCP client) connect to http://127.0.0.1:<port>/mcp by URL — NO per-process shim,
 // NO IPC hop. This removes the class of stall where a shim died mid-call and
 // the agent hung with no counterparty to emit an error: over HTTP the client
 // talks to the long-lived daemon directly, and a dead daemon is an instant

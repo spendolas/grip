@@ -24068,7 +24068,7 @@ var TOOLS = [
   {
     name: "export_node",
     description: "Export a node. Formats: SVG, PNG, JPG, PDF, CSS, JSON, video MP4/GIF/WEBM. Constraint SCALE/WIDTH/HEIGHT. Raster/video are WRITTEN TO DISK and return {path, format, bytes, width?, height?} \u2014 never inline base64. Pass `path` for a location, else a temp file is used; Read it only if you need pixels. SVG/CSS/JSON return inline. `inline:true` forces base64 (not for video). Call grip_capabilities {tool:'export_node'} for video rules and the response-cap lever.",
-    detail: "Raster (PNG/JPG/PDF) and video (MP4/GIF/WEBM) default to disk \u2014 no base64 crosses MCP unless you set inline:true (raster only). This is deliberate: inline image base64 in tool_results is re-cached every turn of a resumed session and once bloated a Hub session to 39MB. Video works only on an ANIMATED top-level frame (uses Figma Motion) and takes fps / quality (MP4/WEBM) / loopCount (GIF); a large video may exceed the 8MB WS response cap \u2014 raise GRIP_RESPONSE_CAP_BYTES if so.",
+    detail: "Raster (PNG/JPG/PDF) and video (MP4/GIF/WEBM) default to disk \u2014 no base64 crosses MCP unless you set inline:true (raster only). This is deliberate: inline image base64 in tool_results is re-cached every turn of a resumed session and once bloated a resumed agent session to 39MB. Video works only on an ANIMATED top-level frame (uses Figma Motion) and takes fps / quality (MP4/WEBM) / loopCount (GIF); a large video may exceed the 8MB WS response cap \u2014 raise GRIP_RESPONSE_CAP_BYTES if so.",
     schema: external_exports.object({
       nodeId: external_exports.string(),
       format: external_exports.enum(["SVG", "PNG", "JPG", "PDF", "CSS", "JSON", "MP4", "GIF", "WEBM"]),

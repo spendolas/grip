@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install grip's bridge as a launchd LaunchAgent — one long-lived daemon
 # (WS :7777 + IPC socket + HTTP :7778) that starts at login and respawns on
-# crash. This is what makes the HTTP transport reliable for Claude Hub:
+# crash. This is what makes the HTTP transport reliable for any MCP client:
 # clients connect directly by URL with no per-process shim to die mid-call.
 #
 # After running this, register grip by URL:

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Install the grip daemon as a macOS **Login Item** — the same mechanism
-# Claude Hub and FigmaAgent use (a .app launched at login, reparented to
+# other local agent tools use (a .app launched at login, reparented to
 # launchd). This is what actually works on this machine: a hand-rolled
 # LaunchAgent plist `launchctl bootstrap` errored, but Login Item .apps run
-# fine from the cloud/secondary volume (Hub proves it).
+# fine from the cloud/secondary volume.
 #
 # Builds "Grip Daemon.app" in /Applications whose executable IS the
 # persistent daemon (GRIP_PERSISTENT=1 → never idle-exits), registers it as a
