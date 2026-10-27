@@ -684,9 +684,17 @@ Native Figma Motion; distinct from prototype `reactions`.
 ### `list_animation_styles` — none. Returns the 6 presets (Position, Scale, Rotation, Size, Opacity, Path) with `{ styleId, name, description, props }`. `props` is a DESCRIPTOR, not the strict `animation_style` (`op: 'apply'`) input schema.
 ### `get_animations` — `{ nodeId }`. Returns `{ animationStyles, animations, manualKeyframeTracks, timelines }`.
 ### `animation_style`
-Merged: apply/remove a Motion animation-style preset instance, dispatched on `op`.
-- `op: 'apply'` — `{ op, nodeId, styleId, props? }`. `props` forwarded verbatim (Figma validates per-preset — start minimal, e.g. `{ duration: 0.5 }`).
-- `op: 'remove'` — `{ op, nodeId, id }`. `id` = applied-instance id (`animationStyles[].id`), NOT the preset styleId.
+Merged: apply/remove Motion animation styles on a node and manage CUSTOM animation styles (Figma update 140), dispatched on `op`.
+- `op: 'apply'` — `{ op, nodeId, styleId, props? }`. For a Figma preset, `props` forwarded verbatim (Figma validates per-preset — start minimal, e.g. `{ duration: 0.5 }`). For a custom style (`styleId` = id from `create`/`list_local`), `type: 'CUSTOM'` is injected automatically; `props` may carry `{ timelineOffset }` (seconds). Returns `{ success, id }` (`id` = applied-instance id).
+- `op: 'remove'` — `{ op, nodeId, id }`. `id` = applied-instance id (`animationStyles[].id`), NOT the style id.
+- `op: 'create'` — `{ op, name?, description?, entries?: [{ styleId, props? }] }`. Creates a custom style (`figma.createCustomAnimationStyle`); each entry is a preset from `list_animation_styles` added via `addAnimationEntryAsync`. A `"Folder/Name"` name places it in a folder. Returns `{ id, key, name, description, type:'CUSTOM_ANIMATION', remote, animationEntries:[{ id, name, type:'FIGMA', duration, timelineOffset, props, ... }] }`. If an entry fails the new style is removed again.
+- `op: 'list_local'` — `{ op }`. Local custom animation styles, same shape as `create`'s result.
+- `op: 'update'` — `{ op, styleId, name?, description? }`. Returns the style.
+- `op: 'move_style'` — `{ op, styleId, afterStyleId? }`. Reorder within the folder (omit `afterStyleId` = first). Both must be local custom styles in the same folder. Returns `{ success }`.
+- `op: 'move_folder'` — `{ op, folder, afterFolder? }`. Full `/`-delimited folder names; same parent required; omit `afterFolder` = first. Returns `{ success }`.
+- `op: 'add_entry'` — `{ op, styleId, entryStyleId, props? }`. Adds a Figma animation to a custom style; returns `{ entry, style }`. Throws for remote styles / presets that cannot be added programmatically.
+- `op: 'remove_entry'` — `{ op, styleId, entryId }` (`entryId` = `animationEntries[].id`). Returns the updated style.
+- Delete a custom style with `delete_style { styleId }`. Custom styles applied to a node appear in `get_animations.animationStyles` (`type: 'CUSTOM'`).
 
 ### `manual_keyframe_track`
 Merged: apply/remove a manual keyframe track, dispatched on `op`.

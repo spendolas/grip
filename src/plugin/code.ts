@@ -183,6 +183,13 @@ type ToolMethod =
   | 'get_animations'
   | 'apply_animation_style'
   | 'remove_animation_style'
+  | 'create_custom_animation_style'
+  | 'list_custom_animation_styles'
+  | 'update_custom_animation_style'
+  | 'move_custom_animation_style'
+  | 'move_custom_animation_folder'
+  | 'add_animation_entry'
+  | 'remove_animation_entry'
   | 'apply_manual_keyframe_track'
   | 'remove_manual_keyframe_track'
   | 'set_timeline_duration'
@@ -333,6 +340,26 @@ function plainData(v: any): any {
     if (pv !== undefined) o[k] = pv;
   }
   return o;
+}
+
+// Custom animation styles (Motion): BaseStyleMixin fields + animationEntries.
+function serializeCustomAnimationStyle(s: any): any {
+  return {
+    id: s.id,
+    key: s.key,
+    name: s.name,
+    description: s.description,
+    type: s.type,
+    remote: !!s.remote,
+    animationEntries: plainData(s.animationEntries) ?? [],
+  };
+}
+async function getCustomAnimationStyle(id: any): Promise<any> {
+  if (typeof id !== 'string' || !id) throw new Error("'styleId' (a custom animation style id) is required");
+  const s: any = await figma.getStyleByIdAsync(id);
+  if (!s) throw new Error(`Style not found: ${id}`);
+  if (s.type !== 'CUSTOM_ANIMATION') throw new Error(`Style ${id} is ${s.type}, not a CUSTOM_ANIMATION style`);
+  return s;
 }
 
 // Paginated library-usage scans. A scan walks the tree ONCE (cached here as
@@ -2805,8 +2832,17 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       if (typeof n.applyAnimationStyle !== 'function') throw new Error(`Node ${params.nodeId} (${n.type}) is not animatable`);
       // Forward presetData verbatim — Figma validates it per-preset and its
       // error is surfaced to the caller.
-      n.applyAnimationStyle(params.styleId, coerce(params.props) ?? {});
-      return { success: true };
+      const cfg: any = coerce(params.props) ?? {};
+      // A CUSTOM animation style (create op) is applied with {type:'CUSTOM'}.
+      // Inject it when the caller passed a custom style id and no explicit type.
+      if (cfg && typeof cfg === 'object' && cfg.type === undefined && typeof params.styleId === 'string' && params.styleId.startsWith('S:')) {
+        try {
+          const st = await figma.getStyleByIdAsync(params.styleId);
+          if (st && (st as any).type === 'CUSTOM_ANIMATION') cfg.type = 'CUSTOM';
+        } catch {}
+      }
+      const appliedId = n.applyAnimationStyle(params.styleId, cfg);
+      return { success: true, id: appliedId };
     }
     case 'remove_animation_style': {
       const n = (await getNode(params.nodeId)) as any;
@@ -2814,6 +2850,58 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       // not the preset styleId passed to apply_animation_style.
       n.removeAnimationStyle(params.id);
       return { success: true };
+    }
+    // ---------- Motion: custom animation styles (Figma update 140) ----------
+    case 'create_custom_animation_style': {
+      const style = (figma as any).createCustomAnimationStyle();
+      // Roll the half-built style back if any step fails, so errors don't leave orphans.
+      try {
+        if (typeof params.name === 'string') style.name = params.name;
+        if (typeof params.description === 'string') style.description = params.description;
+        const entries = Array.isArray(params.entries) ? params.entries : [];
+        for (const e of entries) {
+          const entryStyleId = typeof e === 'string' ? e : e?.styleId;
+          if (typeof entryStyleId !== 'string') throw new Error('create: each entries[] item needs a styleId (from list_animation_styles)');
+          await style.addAnimationEntryAsync(entryStyleId, typeof e === 'string' ? undefined : coerce(e.props));
+        }
+      } catch (err) {
+        try { style.remove(); } catch {}
+        throw err;
+      }
+      return serializeCustomAnimationStyle(style);
+    }
+    case 'list_custom_animation_styles': {
+      const styles = await (figma as any).getLocalCustomAnimationStylesAsync();
+      return (styles ?? []).map(serializeCustomAnimationStyle);
+    }
+    case 'update_custom_animation_style': {
+      const style = await getCustomAnimationStyle(params.styleId);
+      if (typeof params.name === 'string') style.name = params.name;
+      if (typeof params.description === 'string') style.description = params.description;
+      return serializeCustomAnimationStyle(style);
+    }
+    case 'move_custom_animation_style': {
+      const style = await getCustomAnimationStyle(params.styleId);
+      const after = params.afterStyleId ? await getCustomAnimationStyle(params.afterStyleId) : null;
+      // Target and reference must live in the same folder; null → first in folder.
+      (figma as any).moveLocalCustomAnimationStyleAfter(style, after);
+      return { success: true };
+    }
+    case 'move_custom_animation_folder': {
+      if (typeof params.folder !== 'string' || !params.folder) throw new Error("move_folder: 'folder' (full '/'-delimited folder name) is required");
+      (figma as any).moveLocalCustomAnimationFolderAfter(params.folder, params.afterFolder ? String(params.afterFolder) : null);
+      return { success: true };
+    }
+    case 'add_animation_entry': {
+      const style = await getCustomAnimationStyle(params.styleId);
+      if (typeof params.entryStyleId !== 'string' || !params.entryStyleId) throw new Error("add_entry: 'entryStyleId' (a styleId from list_animation_styles) is required");
+      const entry = await style.addAnimationEntryAsync(params.entryStyleId, coerce(params.props));
+      return { entry: plainData(entry), style: serializeCustomAnimationStyle(style) };
+    }
+    case 'remove_animation_entry': {
+      const style = await getCustomAnimationStyle(params.styleId);
+      style.removeAnimationEntry(String(params.entryId));
+      return serializeCustomAnimationStyle(style);
     }
     case 'apply_manual_keyframe_track': {
       const n = (await getNode(params.nodeId)) as any;
@@ -3694,6 +3782,7 @@ const READ_ONLY_METHODS = new Set<string>([
   // listings + loaders that don't change the canvas
   'list_fonts', 'load_font', 'load_brushes', 'list_shaders',
   'list_animation_styles', 'get_animations', 'spring_to_normalized', 'get_library_usage',
+  'list_custom_animation_styles',
   // exports + transient UI
   'export_node', 'notify',
   // subscribe just flips a flag; no document mutation

@@ -132,7 +132,11 @@ export const MERGED_TOOLS: Record<string, {
   timer: { discriminator: 'op', category: 'figjam', map: {
     start: 'timer_start', stop: 'timer_stop', pause: 'timer_pause', resume: 'timer_resume' } },
   animation_style: { discriminator: 'op', category: 'motion', map: {
-    apply: 'apply_animation_style', remove: 'remove_animation_style' } },
+    apply: 'apply_animation_style', remove: 'remove_animation_style',
+    create: 'create_custom_animation_style', list_local: 'list_custom_animation_styles',
+    update: 'update_custom_animation_style', move_style: 'move_custom_animation_style',
+    move_folder: 'move_custom_animation_folder', add_entry: 'add_animation_entry',
+    remove_entry: 'remove_animation_entry' } },
   manual_keyframe_track: { discriminator: 'op', category: 'motion', map: {
     apply: 'apply_manual_keyframe_track', remove: 'remove_manual_keyframe_track' } },
   edit_characters: { discriminator: 'op', category: 'text', map: {
@@ -1220,13 +1224,13 @@ export const TOOLS: ToolDef[] = [
   { name: 'import_shader', description: 'Materialize a shader into this file by id (get the id from list_shaders). Returns the imported shader descriptor. Required before a SHADER paint/effect referencing it can be applied.', schema: z.object({ shaderId: z.string() }) },
 
   // ---------- Motion (native keyframe/timeline animation, distinct from prototype reactions) ----------
-  { name: 'list_animation_styles', description: 'List Figma Motion built-in animation presets (Position, Scale, Rotation, Size, Opacity, Path). Each returns {styleId, name, description, props}. NOTE: `props` is a human/type DESCRIPTOR of the preset, not the exact applyAnimationStyle input schema (which is stricter and validated by Figma) — start minimal (e.g. {duration}) and read Figma\'s error to refine.', schema: z.object({}) },
+  { name: 'list_animation_styles', description: 'List Figma Motion built-in animation presets (Position, Scale, Rotation, Size, Opacity, Path). Each returns {styleId, name, description, props}. NOTE: `props` is a human/type DESCRIPTOR of the preset, not the exact applyAnimationStyle input schema (which is stricter and validated by Figma) — start minimal (e.g. {duration}) and read Figma\'s error to refine. Custom (user-made) styles: animation_style op=list_local.', schema: z.object({}) },
   { name: 'get_animations', description: 'Read a node\'s Motion data: {animationStyles, animations, manualKeyframeTracks, timelines}. Dedicated read tool (not part of get_node) to avoid bloating every node read.', schema: z.object({ nodeId: z.string() }) },
   {
     name: 'animation_style', category: 'motion',
-    description: "Apply or remove a Figma Motion built-in preset on a node. `op`: apply ({nodeId, styleId, props?}) | remove ({nodeId, id}). Call grip_capabilities {tool:'animation_style'} for per-op params.",
-    detail: 'op=apply: apply a Figma Motion preset to a node; styleId from list_animation_styles, props is the preset data forwarded verbatim to node.applyAnimationStyle (Figma validates per-preset) — was apply_animation_style — {nodeId, styleId, props?}. op=remove: remove an applied Motion preset from a node; `id` is the applied-instance id (animationStyles[].id from get_animations), NOT the preset styleId — was remove_animation_style — {nodeId, id}.',
-    schema: z.object({ op: z.enum(['apply', 'remove']) }).passthrough(),
+    description: "Apply/remove Figma Motion animation styles on a node, and create/edit/reorder CUSTOM animation styles. `op`: apply | remove | create | list_local | update | move_style | move_folder | add_entry | remove_entry. Call grip_capabilities {tool:'animation_style'} for per-op params.",
+    detail: 'op=apply: apply a style to a node — {nodeId, styleId, props?}. For a Figma preset, styleId from list_animation_styles and props is the preset data forwarded verbatim to node.applyAnimationStyle (Figma validates per-preset). For a CUSTOM style (styleId = id from create/list_local), type:"CUSTOM" is added automatically; optional props:{timelineOffset:<sec>}. Returns {success, id} where id is the applied-instance id. op=remove: remove an applied style from a node — {nodeId, id}; `id` is the applied-instance id (animationStyles[].id from get_animations), NOT the style id. op=create: create a custom animation style (a named bundle of Figma animations) — {name?, description?, entries?:[{styleId, props?}]}; each entry styleId is a preset from list_animation_styles; a "Folder/Name" name puts it in a folder; returns {id,key,name,description,type:"CUSTOM_ANIMATION",remote,animationEntries}. The new style is removed again if an entry fails. op=list_local: list local custom animation styles, same shape — {}. op=update: rename/redescribe — {styleId, name?, description?}. op=move_style: reorder within its folder — {styleId, afterStyleId?} (omit afterStyleId = first); both must be local custom styles in the same folder. op=move_folder: reorder a folder — {folder, afterFolder?} using the full "/"-delimited folder name; same parent folder required. op=add_entry: add a Figma animation to a custom style — {styleId, entryStyleId, props?}; throws if the style is remote or the preset cannot be added programmatically; returns {entry, style}. op=remove_entry: {styleId, entryId} (entryId = animationEntries[].id); returns the updated style. Delete a custom style with delete_style {styleId}. Applied custom styles also show in get_animations.animationStyles (type:"CUSTOM").',
+    schema: z.object({ op: z.enum(['apply', 'remove', 'create', 'list_local', 'update', 'move_style', 'move_folder', 'add_entry', 'remove_entry']) }).passthrough(),
   },
   {
     name: 'manual_keyframe_track', category: 'motion',
