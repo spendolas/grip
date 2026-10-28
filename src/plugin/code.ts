@@ -171,6 +171,9 @@ type ToolMethod =
   | 'load_brushes'
   // tier 7
   | 'extend_library_collection_by_key'
+  | 'extend_variable_collection'
+  | 'remove_variable_overrides'
+  | 'list_library_variables'
   | 'request_variable_to_be_enabled'
   | 'request_variable_to_be_disabled'
   | 'table_resize_row'
@@ -1095,7 +1098,8 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         hiddenFromPublishing: c.hiddenFromPublishing,
         defaultModeId: c.defaultModeId,
         remote: c.remote,
-        modes: c.modes.map((m) => ({ modeId: m.modeId, name: m.name })),
+        modes: c.modes.map((m: any) => ({ modeId: m.modeId, name: m.name, ...(m.parentModeId ? { parentModeId: m.parentModeId } : {}) })),
+        ...serializeCollectionExtension(c),
         variables: allVars
           .filter((v) => v.variableCollectionId === c.id)
           .map((v) => ({
@@ -2833,7 +2837,15 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       if (!target) {
         try { target = await figma.variables.getVariableCollectionByIdAsync(id); } catch {}
       }
-      if (!target) throw new Error(`No style or variable found for id: ${id}`);
+      // Components / component sets: plain node ids ("12:34"). Other id shapes were handled above,
+      // and getNode on an unknown id burns its 8s hang-guard, so only try real node-id shapes.
+      if (!target && /^[0-9:;-]+$/.test(id)) {
+        try { target = await getNode(id); } catch {}
+      }
+      if (!target) throw new Error(`No style, variable, variable collection, component or component set found for id: ${id}`);
+      if (typeof target.getPublishStatusAsync !== 'function') {
+        throw new Error(`${target.type ?? 'This node'} has no publish status (components and component sets only)`);
+      }
       const status = await target.getPublishStatusAsync();
       return { id, status };
     }
@@ -2895,8 +2907,40 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
 
     // ---------- tier 7 ----------
     case 'extend_library_collection_by_key': {
-      const c = await (figma.variables as any).extendLibraryCollectionByKeyAsync(String(params.key));
-      return { id: c?.id, name: c?.name };
+      // The API needs (collectionKey, name); Enterprise plan only.
+      const name = typeof params.name === 'string' && params.name ? params.name : 'Extended collection';
+      const c = await (figma.variables as any).extendLibraryCollectionByKeyAsync(String(params.key), name);
+      return { id: c?.id, name: c?.name, ...serializeCollectionExtension(c) };
+    }
+    case 'extend_variable_collection': {
+      // Extend a LOCAL collection (Enterprise plan only).
+      const base = await figma.variables.getVariableCollectionByIdAsync(String(params.collectionId));
+      if (!base) throw new Error(`Collection not found: ${params.collectionId}`);
+      if (!params.name || typeof params.name !== 'string') throw new Error('name is required');
+      const c = (base as any).extend(params.name);
+      return { id: c.id, name: c.name, ...serializeCollectionExtension(c) };
+    }
+    case 'remove_variable_overrides': {
+      const c = await figma.variables.getVariableCollectionByIdAsync(String(params.collectionId));
+      if (!c) throw new Error(`Collection not found: ${params.collectionId}`);
+      if (!(c as any).isExtension) throw new Error(`Not an extended collection: ${params.collectionId} (only extended collections have overrides)`);
+      const v = await figma.variables.getVariableByIdAsync(String(params.variableId));
+      if (!v) throw new Error(`Variable not found: ${params.variableId}`);
+      (c as any).removeOverridesForVariable(v);
+      return { success: true };
+    }
+    case 'list_library_variables': {
+      // Browse connected libraries: no key -> the variable collections available to this
+      // file; with `collectionKey` -> the variables inside that collection (use their
+      // `key` with import_variable_by_key).
+      const tl = (figma as any).teamLibrary;
+      if (!tl) throw new Error('figma.teamLibrary is not available in this Figma version');
+      if (typeof params.collectionKey === 'string' && params.collectionKey) {
+        const vars = await tl.getVariablesInLibraryCollectionAsync(params.collectionKey);
+        return { collectionKey: params.collectionKey, variables: vars.map((v: any) => ({ name: v.name, key: v.key, resolvedType: v.resolvedType })) };
+      }
+      const cols = await tl.getAvailableLibraryVariableCollectionsAsync();
+      return { collections: cols.map((c: any) => ({ name: c.name, key: c.key, libraryName: c.libraryName })) };
     }
     case 'request_variable_to_be_enabled': {
       const v = await figma.variables.getVariableByIdAsync(String(params.variableId));
@@ -3532,6 +3576,34 @@ function serializeVarValues(v: Variable): Record<string, any> {
   return out;
 }
 
+// A variable value by shape (no resolvedType needed): composed color, MotionEasing, alias or RGB(A).
+function serializeOneVarValue(raw: any): any {
+  if (raw && typeof raw === 'object') {
+    if ('color' in raw && 'opacity' in raw) return { color: serializeVarPart(raw.color), opacity: serializeVarPart(raw.opacity) };
+    if (raw.type !== 'VARIABLE_ALIAS' && MOTION_EASING_TYPES.has(raw.type)) return plainData(raw);
+  }
+  return serializeVarPart(raw);
+}
+
+// Extension info for a variable collection (ExtendedVariableCollection): isExtension is always
+// present; extended collections add parent/root ids and variableOverrides
+// ({variableId: {extendedModeId: value}}) in the same value shapes get_variables emits.
+function serializeCollectionExtension(c: any): Record<string, any> {
+  if (!c?.isExtension) return { isExtension: false };
+  const overrides: Record<string, Record<string, any>> = {};
+  for (const [variableId, byMode] of Object.entries(c.variableOverrides ?? {})) {
+    const m: Record<string, any> = {};
+    for (const [modeId, val] of Object.entries(byMode as Record<string, unknown>)) m[modeId] = serializeOneVarValue(val);
+    overrides[variableId] = m;
+  }
+  return {
+    isExtension: true,
+    parentVariableCollectionId: c.parentVariableCollectionId,
+    rootVariableCollectionId: c.rootVariableCollectionId,
+    variableOverrides: overrides,
+  };
+}
+
 const MOTION_EASING_TYPES = new Set([
   'EASE_IN', 'EASE_OUT', 'EASE_IN_AND_OUT', 'LINEAR', 'EASE_IN_BACK', 'EASE_OUT_BACK',
   'EASE_IN_AND_OUT_BACK', 'CUSTOM_CUBIC_BEZIER', 'GENTLE', 'QUICK', 'BOUNCY', 'SLOW',
@@ -4164,7 +4236,7 @@ const READ_ONLY_METHODS = new Set<string>([
   'slides_get_canvas_grid', 'get_slide_transition', 'get_audit', 'list_pages',
   // listings + loaders that don't change the canvas
   'list_fonts', 'load_font', 'load_brushes', 'list_shaders',
-  'list_animation_styles', 'get_animations', 'spring_to_normalized', 'get_library_usage',
+  'list_animation_styles', 'get_animations', 'spring_to_normalized', 'get_library_usage', 'list_library_variables',
   'list_custom_animation_styles',
   // exports + transient UI
   'export_node', 'notify',

@@ -771,7 +771,7 @@ function inspectScript(code) {
     return null;
 }
 async function handle(method, params, reqId) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, _17, _18, _19, _20, _21, _22, _23, _24, _25, _26, _27, _28, _29, _30, _31, _32, _33, _34, _35, _36, _37, _38, _39, _40, _41, _42, _43, _44, _45, _46, _47, _48, _49, _50;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, _17, _18, _19, _20, _21, _22, _23, _24, _25, _26, _27, _28, _29, _30, _31, _32, _33, _34, _35, _36, _37, _38, _39, _40, _41, _42, _43, _44, _45, _46, _47, _48, _49, _50, _51;
     switch (method) {
         case 'get_document': {
             await figma.loadAllPagesAsync();
@@ -906,15 +906,7 @@ async function handle(method, params, reqId) {
         case 'get_variables': {
             const collections = await figma.variables.getLocalVariableCollectionsAsync();
             const allVars = await figma.variables.getLocalVariablesAsync();
-            return collections.map((c) => ({
-                id: c.id,
-                name: c.name,
-                key: c.key,
-                hiddenFromPublishing: c.hiddenFromPublishing,
-                defaultModeId: c.defaultModeId,
-                remote: c.remote,
-                modes: c.modes.map((m) => ({ modeId: m.modeId, name: m.name })),
-                variables: allVars
+            return collections.map((c) => (Object.assign(Object.assign({ id: c.id, name: c.name, key: c.key, hiddenFromPublishing: c.hiddenFromPublishing, defaultModeId: c.defaultModeId, remote: c.remote, modes: c.modes.map((m) => (Object.assign({ modeId: m.modeId, name: m.name }, (m.parentModeId ? { parentModeId: m.parentModeId } : {})))) }, serializeCollectionExtension(c)), { variables: allVars
                     .filter((v) => v.variableCollectionId === c.id)
                     .map((v) => ({
                     id: v.id,
@@ -927,8 +919,7 @@ async function handle(method, params, reqId) {
                     codeSyntax: v.codeSyntax,
                     remote: v.remote,
                     valuesByMode: serializeVarValues(v),
-                })),
-            }));
+                })) })));
         }
         case 'get_components': {
             const components = [];
@@ -1077,7 +1068,7 @@ async function handle(method, params, reqId) {
                         try {
                             candidates = pg.findAllWithCriteria({ types });
                         }
-                        catch (_51) {
+                        catch (_52) {
                             candidates = null;
                         }
                     }
@@ -1126,7 +1117,7 @@ async function handle(method, params, reqId) {
                     try {
                         candidates = root.findAllWithCriteria({ types });
                     }
-                    catch (_52) {
+                    catch (_53) {
                         candidates = null;
                     }
                 }
@@ -1749,7 +1740,7 @@ async function handle(method, params, reqId) {
                 try {
                     v.remove();
                 }
-                catch ( /* already gone */_53) { /* already gone */ }
+                catch ( /* already gone */_54) { /* already gone */ }
                 throw err;
             }
         }
@@ -2883,21 +2874,32 @@ async function handle(method, params, reqId) {
             try {
                 target = await figma.getStyleByIdAsync(id);
             }
-            catch (_54) { }
+            catch (_55) { }
             if (!target) {
                 try {
                     target = await figma.variables.getVariableByIdAsync(id);
                 }
-                catch (_55) { }
+                catch (_56) { }
             }
             if (!target) {
                 try {
                     target = await figma.variables.getVariableCollectionByIdAsync(id);
                 }
-                catch (_56) { }
+                catch (_57) { }
+            }
+            // Components / component sets: plain node ids ("12:34"). Other id shapes were handled above,
+            // and getNode on an unknown id burns its 8s hang-guard, so only try real node-id shapes.
+            if (!target && /^[0-9:;-]+$/.test(id)) {
+                try {
+                    target = await getNode(id);
+                }
+                catch (_58) { }
             }
             if (!target)
-                throw new Error(`No style or variable found for id: ${id}`);
+                throw new Error(`No style, variable, variable collection, component or component set found for id: ${id}`);
+            if (typeof target.getPublishStatusAsync !== 'function') {
+                throw new Error(`${(_38 = target.type) !== null && _38 !== void 0 ? _38 : 'This node'} has no publish status (components and component sets only)`);
+            }
             const status = await target.getPublishStatusAsync();
             return { id, status };
         }
@@ -2945,7 +2947,7 @@ async function handle(method, params, reqId) {
         }
         case 'get_attached_connectors': {
             const n = await getNode(params.nodeId);
-            const list = (_38 = n.attachedConnectors) !== null && _38 !== void 0 ? _38 : [];
+            const list = (_39 = n.attachedConnectors) !== null && _39 !== void 0 ? _39 : [];
             return list.map((c) => ({ id: c.id, name: c.name }));
         }
         case 'set_skip_invisible_instance_children': {
@@ -2957,13 +2959,51 @@ async function handle(method, params, reqId) {
             return n ? { id: n.id, name: n.name, type: n.type } : null;
         }
         case 'load_brushes': {
-            const list = await ((_40 = (_39 = figma).loadBrushesAsync) === null || _40 === void 0 ? void 0 : _40.call(_39));
+            const list = await ((_41 = (_40 = figma).loadBrushesAsync) === null || _41 === void 0 ? void 0 : _41.call(_40));
             return list !== null && list !== void 0 ? list : [];
         }
         // ---------- tier 7 ----------
         case 'extend_library_collection_by_key': {
-            const c = await figma.variables.extendLibraryCollectionByKeyAsync(String(params.key));
-            return { id: c === null || c === void 0 ? void 0 : c.id, name: c === null || c === void 0 ? void 0 : c.name };
+            // The API needs (collectionKey, name); Enterprise plan only.
+            const name = typeof params.name === 'string' && params.name ? params.name : 'Extended collection';
+            const c = await figma.variables.extendLibraryCollectionByKeyAsync(String(params.key), name);
+            return Object.assign({ id: c === null || c === void 0 ? void 0 : c.id, name: c === null || c === void 0 ? void 0 : c.name }, serializeCollectionExtension(c));
+        }
+        case 'extend_variable_collection': {
+            // Extend a LOCAL collection (Enterprise plan only).
+            const base = await figma.variables.getVariableCollectionByIdAsync(String(params.collectionId));
+            if (!base)
+                throw new Error(`Collection not found: ${params.collectionId}`);
+            if (!params.name || typeof params.name !== 'string')
+                throw new Error('name is required');
+            const c = base.extend(params.name);
+            return Object.assign({ id: c.id, name: c.name }, serializeCollectionExtension(c));
+        }
+        case 'remove_variable_overrides': {
+            const c = await figma.variables.getVariableCollectionByIdAsync(String(params.collectionId));
+            if (!c)
+                throw new Error(`Collection not found: ${params.collectionId}`);
+            if (!c.isExtension)
+                throw new Error(`Not an extended collection: ${params.collectionId} (only extended collections have overrides)`);
+            const v = await figma.variables.getVariableByIdAsync(String(params.variableId));
+            if (!v)
+                throw new Error(`Variable not found: ${params.variableId}`);
+            c.removeOverridesForVariable(v);
+            return { success: true };
+        }
+        case 'list_library_variables': {
+            // Browse connected libraries: no key -> the variable collections available to this
+            // file; with `collectionKey` -> the variables inside that collection (use their
+            // `key` with import_variable_by_key).
+            const tl = figma.teamLibrary;
+            if (!tl)
+                throw new Error('figma.teamLibrary is not available in this Figma version');
+            if (typeof params.collectionKey === 'string' && params.collectionKey) {
+                const vars = await tl.getVariablesInLibraryCollectionAsync(params.collectionKey);
+                return { collectionKey: params.collectionKey, variables: vars.map((v) => ({ name: v.name, key: v.key, resolvedType: v.resolvedType })) };
+            }
+            const cols = await tl.getAvailableLibraryVariableCollectionsAsync();
+            return { collections: cols.map((c) => ({ name: c.name, key: c.key, libraryName: c.libraryName })) };
         }
         case 'request_variable_to_be_enabled': {
             const v = await figma.variables.getVariableByIdAsync(String(params.variableId));
@@ -3018,7 +3058,7 @@ async function handle(method, params, reqId) {
             if (wantEdit) {
                 const fresh = slotKeys().filter((k) => !before.has(k));
                 const propName = typeof params.propertyName === 'string' ? params.propertyName
-                    : (fresh.length === 1 ? fresh[0] : (_41 = slot.componentPropertyReferences) === null || _41 === void 0 ? void 0 : _41.slot);
+                    : (fresh.length === 1 ? fresh[0] : (_42 = slot.componentPropertyReferences) === null || _42 === void 0 ? void 0 : _42.slot);
                 if (!propName) {
                     out.slotSettingsApplied = false;
                     out.warning = 'slot created, but its SLOT property could not be identified — call component_property op=edit with the propertyName from get_node componentPropertyDefinitions';
@@ -3071,7 +3111,7 @@ async function handle(method, params, reqId) {
                     throw new Error('map_nodes swap needs `componentKey` or `componentId`.');
                 const resolved = sw.componentKey ? await figma.importComponentByKeyAsync(sw.componentKey) : await getNode(sw.componentId);
                 if (resolved.type !== 'COMPONENT')
-                    throw new Error(`Swap target not a COMPONENT: ${(_42 = sw.componentKey) !== null && _42 !== void 0 ? _42 : sw.componentId}`);
+                    throw new Error(`Swap target not a COMPONENT: ${(_43 = sw.componentKey) !== null && _43 !== void 0 ? _43 : sw.componentId}`);
                 swapTarget = resolved;
             }
             let applied = 0;
@@ -3184,7 +3224,7 @@ async function handle(method, params, reqId) {
                 throw new Error(`Node ${params.nodeId} (${n.type}) is not animatable`);
             // Forward presetData verbatim — Figma validates it per-preset and its
             // error is surfaced to the caller.
-            const cfg = (_43 = coerce(params.props)) !== null && _43 !== void 0 ? _43 : {};
+            const cfg = (_44 = coerce(params.props)) !== null && _44 !== void 0 ? _44 : {};
             // A CUSTOM animation style (create op) is applied with {type:'CUSTOM'}.
             // Inject it when the caller passed a custom style id and no explicit type.
             if (cfg && typeof cfg === 'object' && cfg.type === undefined && typeof params.styleId === 'string' && params.styleId.startsWith('S:')) {
@@ -3193,7 +3233,7 @@ async function handle(method, params, reqId) {
                     if (st && st.type === 'CUSTOM_ANIMATION')
                         cfg.type = 'CUSTOM';
                 }
-                catch (_57) { }
+                catch (_59) { }
             }
             const appliedId = n.applyAnimationStyle(params.styleId, cfg);
             return { success: true, id: appliedId };
@@ -3226,7 +3266,7 @@ async function handle(method, params, reqId) {
                 try {
                     style.remove();
                 }
-                catch (_58) { }
+                catch (_60) { }
                 throw err;
             }
             return serializeCustomAnimationStyle(style);
@@ -3435,7 +3475,7 @@ async function handle(method, params, reqId) {
             //   coerce(v) / asIds(v)— sanitize string-ish inputs
             //   log(...args)        — collected, returned alongside result
             //   getNode(id)         — async lookup helper
-            const code = String((_44 = params.code) !== null && _44 !== void 0 ? _44 : '');
+            const code = String((_45 = params.code) !== null && _45 !== void 0 ? _45 : '');
             // Inspect the submitted code and push back on patterns that would freeze
             // Figma's single main thread — with a message that teaches the better way.
             const rejection = inspectScript(code);
@@ -3483,12 +3523,12 @@ async function handle(method, params, reqId) {
         }
         case 'set_buzz_asset_type': {
             const n = await getNode(params.nodeId);
-            (_46 = (_45 = figma).setBuzzAssetTypeForNode) === null || _46 === void 0 ? void 0 : _46.call(_45, n, params.assetType);
+            (_47 = (_46 = figma).setBuzzAssetTypeForNode) === null || _47 === void 0 ? void 0 : _47.call(_46, n, params.assetType);
             return { success: true };
         }
         case 'get_buzz_asset_type': {
             const n = await getNode(params.nodeId);
-            const t = (_48 = (_47 = figma).getBuzzAssetTypeForNode) === null || _48 === void 0 ? void 0 : _48.call(_47, n);
+            const t = (_49 = (_48 = figma).getBuzzAssetTypeForNode) === null || _49 === void 0 ? void 0 : _49.call(_48, n);
             return { assetType: t !== null && t !== void 0 ? t : null };
         }
         case 'move_local_style': {
@@ -3531,7 +3571,7 @@ async function handle(method, params, reqId) {
             }
             const parent = params.parentId
                 ? (await getNode(params.parentId))
-                : (_49 = comps[0].parent) !== null && _49 !== void 0 ? _49 : figma.currentPage;
+                : (_50 = comps[0].parent) !== null && _50 !== void 0 ? _50 : figma.currentPage;
             const set = typeof params.index === 'number'
                 ? figma.combineAsVariants(comps, parent, params.index)
                 : figma.combineAsVariants(comps, parent);
@@ -3555,7 +3595,7 @@ async function handle(method, params, reqId) {
             const idx = typeof params.paintIndex === 'number' ? params.paintIndex : 0;
             if (idx < 0 || idx >= paints.length)
                 throw new Error(`paintIndex ${idx} out of range (have ${paints.length})`);
-            const field = ((_50 = params.field) !== null && _50 !== void 0 ? _50 : 'color');
+            const field = ((_51 = params.field) !== null && _51 !== void 0 ? _51 : 'color');
             const updated = figma.variables.setBoundVariableForPaint(paints[idx], field, v);
             const next = paints.slice();
             next[idx] = updated;
@@ -3680,6 +3720,37 @@ function serializeVarValues(v) {
         }
     }
     return out;
+}
+// A variable value by shape (no resolvedType needed): composed color, MotionEasing, alias or RGB(A).
+function serializeOneVarValue(raw) {
+    if (raw && typeof raw === 'object') {
+        if ('color' in raw && 'opacity' in raw)
+            return { color: serializeVarPart(raw.color), opacity: serializeVarPart(raw.opacity) };
+        if (raw.type !== 'VARIABLE_ALIAS' && MOTION_EASING_TYPES.has(raw.type))
+            return plainData(raw);
+    }
+    return serializeVarPart(raw);
+}
+// Extension info for a variable collection (ExtendedVariableCollection): isExtension is always
+// present; extended collections add parent/root ids and variableOverrides
+// ({variableId: {extendedModeId: value}}) in the same value shapes get_variables emits.
+function serializeCollectionExtension(c) {
+    var _a;
+    if (!(c === null || c === void 0 ? void 0 : c.isExtension))
+        return { isExtension: false };
+    const overrides = {};
+    for (const [variableId, byMode] of Object.entries((_a = c.variableOverrides) !== null && _a !== void 0 ? _a : {})) {
+        const m = {};
+        for (const [modeId, val] of Object.entries(byMode))
+            m[modeId] = serializeOneVarValue(val);
+        overrides[variableId] = m;
+    }
+    return {
+        isExtension: true,
+        parentVariableCollectionId: c.parentVariableCollectionId,
+        rootVariableCollectionId: c.rootVariableCollectionId,
+        variableOverrides: overrides,
+    };
 }
 const MOTION_EASING_TYPES = new Set([
     'EASE_IN', 'EASE_OUT', 'EASE_IN_AND_OUT', 'LINEAR', 'EASE_IN_BACK', 'EASE_OUT_BACK',
@@ -4357,7 +4428,7 @@ const READ_ONLY_METHODS = new Set([
     'slides_get_canvas_grid', 'get_slide_transition', 'get_audit', 'list_pages',
     // listings + loaders that don't change the canvas
     'list_fonts', 'load_font', 'load_brushes', 'list_shaders',
-    'list_animation_styles', 'get_animations', 'spring_to_normalized', 'get_library_usage',
+    'list_animation_styles', 'get_animations', 'spring_to_normalized', 'get_library_usage', 'list_library_variables',
     'list_custom_animation_styles',
     // exports + transient UI
     'export_node', 'notify',

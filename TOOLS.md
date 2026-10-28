@@ -1,6 +1,6 @@
 # Grip MCP Tools
 
-152 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
+153 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
 
 **Figma Plugin API coverage:** through plugin update 141 (Oct 15, 2026) and `@figma/plugin-typings` 1.142.0. <!-- figma-api-coverage: update=141 typings=1.142.0 --> The weekly API-updates check reads the marker in this line as its baseline — bump both numbers in the same commit whenever support for newly shipped Plugin API features lands.
 
@@ -74,7 +74,7 @@ All local paint / text / effect / grid styles.
 ### `get_variables`
 All local variable collections + variables.
 - Params: none.
-- Returns: array of collections; variables include `description`, `scopes`, `codeSyntax`, `hiddenFromPublishing`, `key`, `remote`, `valuesByMode`. Color values emit `{ hex, opacity }`. Aliases emit `{ aliasOf: id }`. Composed colors emit `{ color: {hex,opacity}|{aliasOf}, opacity: number|{aliasOf} }`.
+- Returns: array of collections; variables include `description`, `scopes`, `codeSyntax`, `hiddenFromPublishing`, `key`, `remote`, `valuesByMode`. Color values emit `{ hex, opacity }`. Aliases emit `{ aliasOf: id }`. Composed colors emit `{ color: {hex,opacity}|{aliasOf}, opacity: number|{aliasOf} }`. Every collection carries `isExtension`; **extended** collections (a collection that extends another, e.g. from a library) also carry `parentVariableCollectionId`, `rootVariableCollectionId` and `variableOverrides` (`{ variableId: { extendedModeId: value } }`, values in the shapes above), and their `modes` include `parentModeId`. Extended collections list only their own variables here; the inherited ones appear under the parent.
 
 ### `get_components`
 All local components + component sets.
@@ -263,6 +263,8 @@ Merged: bind a node field/paint/effect/layout-grid to a variable, dispatched on 
 Merged: create/delete a local variable collection, dispatched on `op`.
 - `op: 'create'` — `{ op, name }` → `{ id, name, defaultModeId, modes: [{ modeId, name }] }`. Comes with one default mode.
 - `op: 'delete'` — `{ op, collectionId }` → `{ success: true }`. Deletes the collection and all its variables.
+- `op: 'extend'` — `{ op, collectionId, name }` → `{ id, name, isExtension: true, parentVariableCollectionId, rootVariableCollectionId, variableOverrides }`. Creates an **extended** collection from a local collection (Enterprise plan only).
+- `op: 'remove_overrides'` — `{ op, collectionId (extended), variableId }` → `{ success: true }`. Clears every overridden value of that variable in the extended collection. To *set* an override, use `set_variable_value` with the extended collection's own `modeId`.
 
 ### `variable`
 Merged: create/delete a variable, dispatched on `op`.
@@ -458,6 +460,18 @@ Set the file thumbnail node (must be FRAME/COMPONENT/COMPONENT_SET/SECTION). `no
 
 ### `import_variable_by_key`
 - Params: `key`. → `{ id, name, resolvedType, key }`.
+
+### `list_library_variables`
+Browse the variables of connected team libraries (wraps `figma.teamLibrary`). Use it to find the `key`s that `import_variable_by_key` and `extend_library_collection_by_key` need.
+- No params → `{ collections: [{ name, key, libraryName }] }`: the variable collections available to this file.
+- `collectionKey` → `{ collectionKey, variables: [{ name, key, resolvedType }] }`: the variables inside that collection.
+- The Plugin API has no equivalent listing for library **components** or **styles** — their keys come from the REST API or from existing instances/styles (`get_node` on an instance's main component, `get_styles` `key`).
+
+### `extend_library_collection_by_key`
+- Params: `key` (a library collection key from `list_library_variables`), `name?` (default `"Extended collection"`). → `{ id, name, isExtension: true, parentVariableCollectionId, rootVariableCollectionId, variableOverrides }`. Enterprise plan only. (Earlier versions omitted the name the API requires.) To extend a **local** collection use `variable_collection` `op: 'extend'`.
+
+### `get_publish_status`
+- Params: `id` — a style id, variable id, variable-collection id, or a component / component-set node id. → `{ id, status }`.
 
 ---
 
@@ -753,7 +767,7 @@ Applied via `set_node_property` fills/strokes/effects (fully-shaped objects pass
 
 ## Tool scoping (`GRIP_TOOLS`)
 
-By default an agent only sees the `core` scope (~35 always-useful tools), not the full 152 — this keeps per-turn schema weight small. Widen the scope per agent — at launch (below) or mid-session with `grip_load_tools {categories:['motion', …]}` (or `'all'`), and drop them again with `grip_load_tools {unload:['motion']}` (`'all'` resets to core; `core`/`meta` can't be unloaded, and tools that are also in core stay). Each change refreshes the tool list via `tools/list_changed` (applies next turn; clients that ignore the notification can still use `run_script`). Not available to restricted scopes without `run_script` (e.g. `GRIP_TOOLS=read`):
+By default an agent only sees the `core` scope (~35 always-useful tools), not the full 153 — this keeps per-turn schema weight small. Widen the scope per agent — at launch (below) or mid-session with `grip_load_tools {categories:['motion', …]}` (or `'all'`), and drop them again with `grip_load_tools {unload:['motion']}` (`'all'` resets to core; `core`/`meta` can't be unloaded, and tools that are also in core stay). Each change refreshes the tool list via `tools/list_changed` (applies next turn; clients that ignore the notification can still use `run_script`). Not available to restricted scopes without `run_script` (e.g. `GRIP_TOOLS=read`):
 
 - **stdio:** set env `GRIP_TOOLS=core,motion` on the agent process (delivered to the daemon as an IPC control frame, alongside `GRIP_FILE`).
 - **HTTP:** pass `?tools=core,motion` on the `/mcp` URL.

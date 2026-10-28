@@ -23604,7 +23604,8 @@ var TOOL_CATEGORIES = {
     "import_shader",
     "list_shaders",
     "get_library_usage",
-    "extend_library_collection_by_key"
+    "extend_library_collection_by_key",
+    "list_library_variables"
   ],
   assets: [
     "upload_image",
@@ -23697,7 +23698,9 @@ var MERGED_TOOLS = {
   } },
   variable_collection: { discriminator: "op", category: "variables", map: {
     create: "create_variable_collection",
-    delete: "delete_variable_collection"
+    delete: "delete_variable_collection",
+    extend: "extend_variable_collection",
+    remove_overrides: "remove_variable_overrides"
   } },
   explicit_variable_mode: { discriminator: "op", category: "variables", map: {
     set: "set_explicit_variable_mode",
@@ -24326,9 +24329,9 @@ var TOOLS = [
   {
     name: "variable_collection",
     category: "variables",
-    description: "Create or delete a variable collection. `op`: create ({name}, returns {id, defaultModeId}) | delete ({collectionId}, deletes all its variables too). Call grip_capabilities {tool:'variable_collection'} for per-op params.",
-    detail: "op=create: create a new local variable collection with one default mode (was create_variable_collection) \u2014 {name} \u2192 returns {id, defaultModeId}. op=delete: delete a variable collection and all its variables (was delete_variable_collection) \u2014 {collectionId}.",
-    schema: external_exports.object({ op: external_exports.enum(["create", "delete"]) }).passthrough()
+    description: "Create, delete or extend a variable collection, or clear an extension's overrides. `op`: create ({name}) | delete ({collectionId}) | extend ({collectionId, name}) | remove_overrides ({collectionId, variableId}). Call grip_capabilities {tool:'variable_collection'} for per-op params.",
+    detail: "op=create: create a new local variable collection with one default mode (was create_variable_collection) \u2014 {name} \u2192 returns {id, defaultModeId}. op=delete: delete a variable collection and all its variables (was delete_variable_collection) \u2014 {collectionId}. op=extend: create an EXTENDED collection from a LOCAL collection \u2014 {collectionId, name} \u2192 {id, name, isExtension:true, parentVariableCollectionId, rootVariableCollectionId, variableOverrides} (Enterprise plan only: other plans throw 'Cannot create extended collections outside of enterprise plan'; to extend a published library collection use extend_library_collection_by_key). op=remove_overrides: clear every overridden value of one variable in an extended collection \u2014 {collectionId (an extended collection), variableId} \u2192 {success}. To OVERRIDE a value in an extended collection, call set_variable_value with the extended collection's own modeId (get_variables shows each extended mode's parentModeId and the collection's variableOverrides).",
+    schema: external_exports.object({ op: external_exports.enum(["create", "delete", "extend", "remove_overrides"]) }).passthrough()
   },
   {
     name: "variable",
@@ -24796,7 +24799,7 @@ var TOOLS = [
   { name: "get_image_by_hash", description: "Fetch a registered image by its hash. Returns { hash, bytesLength, size, base64 } or null. base64 is the raw image bytes.", schema: external_exports.object({ imageHash: external_exports.string() }) },
   { name: "get_stamp_author", description: "FigJam: read author of a STAMP node. Requires fileusers permission.", schema: external_exports.object({ nodeId: external_exports.string() }) },
   { name: "get_overrides", description: "Read an INSTANCE's overrides (delta vs main component).", schema: external_exports.object({ nodeId: external_exports.string() }) },
-  { name: "get_publish_status", description: "Read publish status for a style, variable, or variable collection.", schema: external_exports.object({ id: external_exports.string() }) },
+  { name: "get_publish_status", description: "Read publish status for a style, variable, variable collection, component or component set.", schema: external_exports.object({ id: external_exports.string() }) },
   { name: "set_text_range_bound_variable", description: "Bind a variable to a text range field. variableId=null clears.", schema: external_exports.object({ nodeId: external_exports.string(), start: external_exports.number().int().nonnegative(), end: external_exports.number().int().nonnegative(), field: external_exports.string(), variableId: external_exports.union([external_exports.string(), external_exports.null()]).optional() }) },
   { name: "get_text_range_bound_variable", description: "Read variable bound to a text range field.", schema: external_exports.object({ nodeId: external_exports.string(), start: external_exports.number().int().nonnegative(), end: external_exports.number().int().nonnegative(), field: external_exports.string() }) },
   {
@@ -24826,7 +24829,8 @@ var TOOLS = [
   { name: "get_file_thumbnail_node", description: "Read which node is the file thumbnail.", schema: external_exports.object({}) },
   { name: "load_brushes", description: "Buzz only: list available brushes.", schema: external_exports.object({}) },
   // ---------- tier 7 ----------
-  { name: "extend_library_collection_by_key", description: "Extend a remote variable collection (from team library) into this file by its key.", schema: external_exports.object({ key: external_exports.string() }) },
+  { name: "extend_library_collection_by_key", description: 'Extend a library variable collection into this file by its key (Enterprise plan). `name` names the new extended collection (default "Extended collection"). Find keys with list_library_variables.', schema: external_exports.object({ key: external_exports.string(), name: external_exports.string().optional() }) },
+  { name: "list_library_variables", description: "Browse connected libraries' variables. No args: the variable collections available to this file ({name, key, libraryName}). With `collectionKey`: that collection's variables ({name, key, resolvedType}) \u2014 pass a variable's key to import_variable_by_key.", schema: external_exports.object({ collectionKey: external_exports.string().optional() }) },
   { name: "request_variable_to_be_enabled", description: "Request that a library variable be enabled in this file.", schema: external_exports.object({ variableId: external_exports.string() }) },
   { name: "request_variable_to_be_disabled", description: "Request that a library variable be disabled in this file.", schema: external_exports.object({ variableId: external_exports.string() }) },
   {

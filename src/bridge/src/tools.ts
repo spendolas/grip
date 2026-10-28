@@ -67,7 +67,7 @@ export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
   devmode: ['dev_resource', 'set_annotation', 'get_annotations', 'annotation_category', 'measurement',
     'get_deep_link', 'set_reactions'],
   library: ['import_component_by_key', 'import_component_set_by_key', 'import_style_by_key', 'import_variable_by_key',
-    'import_shader', 'list_shaders', 'get_library_usage', 'extend_library_collection_by_key'],
+    'import_shader', 'list_shaders', 'get_library_usage', 'extend_library_collection_by_key', 'list_library_variables'],
   assets: ['upload_image', 'upload_image_from_path', 'upload_image_begin', 'upload_image_chunk',
     'upload_image_finish', 'create_image_from_url', 'get_image_by_hash', 'create_gif', 'create_video',
     'create_link_preview', 'create_slice', 'set_file_thumbnail', 'get_file_thumbnail_node'],
@@ -112,7 +112,8 @@ export const MERGED_TOOLS: Record<string, {
   variable: { discriminator: 'op', category: 'variables', map: {
     create: 'create_variable', delete: 'delete_variable' } },
   variable_collection: { discriminator: 'op', category: 'variables', map: {
-    create: 'create_variable_collection', delete: 'delete_variable_collection' } },
+    create: 'create_variable_collection', delete: 'delete_variable_collection',
+    extend: 'extend_variable_collection', remove_overrides: 'remove_variable_overrides' } },
   explicit_variable_mode: { discriminator: 'op', category: 'variables', map: {
     set: 'set_explicit_variable_mode', clear: 'clear_explicit_variable_mode' } },
   annotation_category: { discriminator: 'op', category: 'devmode', map: {
@@ -729,9 +730,9 @@ export const TOOLS: ToolDef[] = [
   // ---------- variables: lifecycle ----------
   {
     name: 'variable_collection', category: 'variables',
-    description: "Create or delete a variable collection. `op`: create ({name}, returns {id, defaultModeId}) | delete ({collectionId}, deletes all its variables too). Call grip_capabilities {tool:'variable_collection'} for per-op params.",
-    detail: "op=create: create a new local variable collection with one default mode (was create_variable_collection) — {name} → returns {id, defaultModeId}. op=delete: delete a variable collection and all its variables (was delete_variable_collection) — {collectionId}.",
-    schema: z.object({ op: z.enum(['create', 'delete']) }).passthrough(),
+    description: "Create, delete or extend a variable collection, or clear an extension's overrides. `op`: create ({name}) | delete ({collectionId}) | extend ({collectionId, name}) | remove_overrides ({collectionId, variableId}). Call grip_capabilities {tool:'variable_collection'} for per-op params.",
+    detail: "op=create: create a new local variable collection with one default mode (was create_variable_collection) — {name} → returns {id, defaultModeId}. op=delete: delete a variable collection and all its variables (was delete_variable_collection) — {collectionId}. op=extend: create an EXTENDED collection from a LOCAL collection — {collectionId, name} → {id, name, isExtension:true, parentVariableCollectionId, rootVariableCollectionId, variableOverrides} (Enterprise plan only: other plans throw 'Cannot create extended collections outside of enterprise plan'; to extend a published library collection use extend_library_collection_by_key). op=remove_overrides: clear every overridden value of one variable in an extended collection — {collectionId (an extended collection), variableId} → {success}. To OVERRIDE a value in an extended collection, call set_variable_value with the extended collection's own modeId (get_variables shows each extended mode's parentModeId and the collection's variableOverrides).",
+    schema: z.object({ op: z.enum(['create', 'delete', 'extend', 'remove_overrides']) }).passthrough(),
   },
   {
     name: 'variable', category: 'variables',
@@ -1195,7 +1196,7 @@ export const TOOLS: ToolDef[] = [
   { name: 'get_image_by_hash', description: 'Fetch a registered image by its hash. Returns { hash, bytesLength, size, base64 } or null. base64 is the raw image bytes.', schema: z.object({ imageHash: z.string() }) },
   { name: 'get_stamp_author', description: 'FigJam: read author of a STAMP node. Requires fileusers permission.', schema: z.object({ nodeId: z.string() }) },
   { name: 'get_overrides', description: "Read an INSTANCE's overrides (delta vs main component).", schema: z.object({ nodeId: z.string() }) },
-  { name: 'get_publish_status', description: 'Read publish status for a style, variable, or variable collection.', schema: z.object({ id: z.string() }) },
+  { name: 'get_publish_status', description: 'Read publish status for a style, variable, variable collection, component or component set.', schema: z.object({ id: z.string() }) },
   { name: 'set_text_range_bound_variable', description: 'Bind a variable to a text range field. variableId=null clears.', schema: z.object({ nodeId: z.string(), start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), field: z.string(), variableId: z.union([z.string(), z.null()]).optional() }) },
   { name: 'get_text_range_bound_variable', description: 'Read variable bound to a text range field.', schema: z.object({ nodeId: z.string(), start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), field: z.string() }) },
   {
@@ -1224,7 +1225,8 @@ export const TOOLS: ToolDef[] = [
   { name: 'load_brushes', description: 'Buzz only: list available brushes.', schema: z.object({}) },
 
   // ---------- tier 7 ----------
-  { name: 'extend_library_collection_by_key', description: 'Extend a remote variable collection (from team library) into this file by its key.', schema: z.object({ key: z.string() }) },
+  { name: 'extend_library_collection_by_key', description: 'Extend a library variable collection into this file by its key (Enterprise plan). `name` names the new extended collection (default "Extended collection"). Find keys with list_library_variables.', schema: z.object({ key: z.string(), name: z.string().optional() }) },
+  { name: 'list_library_variables', description: "Browse connected libraries' variables. No args: the variable collections available to this file ({name, key, libraryName}). With `collectionKey`: that collection's variables ({name, key, resolvedType}) — pass a variable's key to import_variable_by_key.", schema: z.object({ collectionKey: z.string().optional() }) },
   { name: 'request_variable_to_be_enabled', description: 'Request that a library variable be enabled in this file.', schema: z.object({ variableId: z.string() }) },
   { name: 'request_variable_to_be_disabled', description: 'Request that a library variable be disabled in this file.', schema: z.object({ variableId: z.string() }) },
   {
