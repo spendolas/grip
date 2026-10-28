@@ -538,7 +538,7 @@ export function createSession(bridge: PluginBridge): LiveSession {
       }
       try {
         const result = await bridge.request(merged.method, merged.rest, session);
-        return okResult(result);
+        return pluginResult(name, merged.method, result);
       } catch (err) {
         const message = (err as Error)?.message ?? String(err);
         process.stderr.write(`[grip] handler error in ${name} (merged→${merged.method}): ${message}\n`);
@@ -552,7 +552,7 @@ export function createSession(bridge: PluginBridge): LiveSession {
         parsed.data as Record<string, unknown>,
         session,
       );
-      return okResult(result);
+      return pluginResult(name, name, result);
     } catch (err) {
       // ONLY touch err.message here — accessing err.stack triggers V8's
       // lazy source-position walk, which on hot error paths pegs CPU in
@@ -597,6 +597,20 @@ export async function connectStdio(bridge: PluginBridge): Promise<LiveSession> {
   await live.server.connect(transport);
   process.stderr.write(`[grip] mcp session ${live.session.id.slice(0, 8)} on stdio\n`);
   return live;
+}
+
+// A plugin that predates a method answers with no result at all, which MCP rejects as a
+// protocol error ("expected string, received undefined") and hides the real cause. Turn it
+// into an actionable message; every handler returns a value, so undefined means "unknown method".
+function pluginResult(tool: string, method: string, result: unknown) {
+  if (result === undefined) {
+    return errorResult(
+      `${tool}: the Figma plugin returned no result for '${method}'. It is most likely an older build that ` +
+      `does not know this method — close and re-run the Grip plugin in Figma (the bridge logs a version ` +
+      `mismatch warning, and grip_health lists each plugin's version).`,
+    );
+  }
+  return okResult(result);
 }
 
 function okResult(data: unknown) {

@@ -10582,7 +10582,7 @@ var v4_default = v4;
 import { EventEmitter } from "events";
 
 // src/types.ts
-var BRIDGE_VERSION = "0.5.2";
+var BRIDGE_VERSION = "0.6.0";
 
 // src/ws-server.ts
 var REQUEST_TIMEOUT_MS = 1e4;
@@ -26374,7 +26374,7 @@ ${args.code}
       }
       try {
         const result = await bridge.request(merged.method, merged.rest, session);
-        return okResult(result);
+        return pluginResult(name, merged.method, result);
       } catch (err) {
         const message = err?.message ?? String(err);
         process.stderr.write(`[grip] handler error in ${name} (merged\u2192${merged.method}): ${message}
@@ -26388,7 +26388,7 @@ ${args.code}
         parsed.data,
         session
       );
-      return okResult(result);
+      return pluginResult(name, name, result);
     } catch (err) {
       const message = err?.message ?? String(err);
       process.stderr.write(`[grip] handler error in ${name}: ${message}
@@ -26406,6 +26406,14 @@ function destroySession(live) {
 }
 function activeSessionCount() {
   return liveSessions.length;
+}
+function pluginResult(tool, method, result) {
+  if (result === void 0) {
+    return errorResult(
+      `${tool}: the Figma plugin returned no result for '${method}'. It is most likely an older build that does not know this method \u2014 close and re-run the Grip plugin in Figma (the bridge logs a version mismatch warning, and grip_health lists each plugin's version).`
+    );
+  }
+  return okResult(result);
 }
 function okResult(data) {
   return {

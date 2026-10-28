@@ -4389,7 +4389,7 @@ async function upsertStyle(params) {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.5.1';
+const PLUGIN_VERSION = '0.6.0';
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
 // if two builds share a number). 'nodeBudget' = bounded serialize is live.
