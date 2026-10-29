@@ -10582,7 +10582,7 @@ var v4_default = v4;
 import { EventEmitter } from "events";
 
 // src/types.ts
-var BRIDGE_VERSION = "0.6.0";
+var BRIDGE_VERSION = "0.6.1";
 
 // src/ws-server.ts
 var REQUEST_TIMEOUT_MS = 1e4;

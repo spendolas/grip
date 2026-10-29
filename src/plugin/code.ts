@@ -846,6 +846,28 @@ async function getNode(id: string): Promise<BaseNode> {
   return raced.n;
 }
 
+// Figma's import*ByKeyAsync never settles for a key it can't resolve (unknown key, or a
+// library that isn't enabled in this file) — no resolve, no reject. Left alone that eats the
+// bridge's whole 10s budget and surfaces as a vague request_timeout, so race a shorter
+// timeout and throw a typed, actionable error instead.
+const IMPORT_TIMEOUT_MS = 6000;
+async function importByKey<T>(what: string, key: string, run: () => Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const raced = await Promise.race([
+    run().then((v) => ({ v }) as { v: T }),
+    new Promise<{ timedOut: true }>((r) => { timer = setTimeout(() => r({ timedOut: true }), IMPORT_TIMEOUT_MS); }),
+  ]);
+  clearTimeout(timer!);
+  if ('timedOut' in raced) {
+    throw new Error(
+      `library_key_unresolved: ${what} '${key}' did not resolve in ${IMPORT_TIMEOUT_MS / 1000}s — Figma found no such item. ` +
+        `Either the key is wrong, or the library that publishes it is not enabled for this file (Assets → Libraries). ` +
+        `Keys of internal/unpublished items (often underscore-named) never resolve either.`,
+    );
+  }
+  return raced.v;
+}
+
 // ---------- gentle bulk-iteration helpers ----------
 // The plugin is single-threaded; a synchronous loop over a big node set freezes
 // Figma until the tab reloads. These helpers own the loop so the caller (a
@@ -2049,15 +2071,15 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       return { resources: list };
     }
     case 'import_component_by_key': {
-      const c = await figma.importComponentByKeyAsync(String(params.key));
+      const c = await importByKey('component', String(params.key), () => figma.importComponentByKeyAsync(String(params.key)));
       return { id: c.id, name: c.name, key: c.key };
     }
     case 'import_style_by_key': {
-      const s = await figma.importStyleByKeyAsync(String(params.key));
+      const s = await importByKey('style', String(params.key), () => figma.importStyleByKeyAsync(String(params.key)));
       return { id: s.id, name: s.name, type: s.type, key: s.key };
     }
     case 'import_variable_by_key': {
-      const v = await figma.variables.importVariableByKeyAsync(String(params.key));
+      const v = await importByKey('variable', String(params.key), () => figma.variables.importVariableByKeyAsync(String(params.key)));
       return { id: v.id, name: v.name, resolvedType: v.resolvedType, key: v.key };
     }
     case 'create_image_from_url': {
@@ -2569,7 +2591,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       return list.map((i: InstanceNode) => ({ id: i.id, name: i.name, parentId: i.parent?.id ?? '' }));
     }
     case 'import_component_set_by_key': {
-      const cs = await figma.importComponentSetByKeyAsync(String(params.key));
+      const cs = await importByKey('component set', String(params.key), () => figma.importComponentSetByKeyAsync(String(params.key)));
       return { id: cs.id, name: cs.name, key: cs.key };
     }
     case 'outline_stroke': {
@@ -2909,7 +2931,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
     case 'extend_library_collection_by_key': {
       // The API needs (collectionKey, name); Enterprise plan only.
       const name = typeof params.name === 'string' && params.name ? params.name : 'Extended collection';
-      const c = await (figma.variables as any).extendLibraryCollectionByKeyAsync(String(params.key), name);
+      const c = await importByKey<any>('library collection', String(params.key), () => (figma.variables as any).extendLibraryCollectionByKeyAsync(String(params.key), name));
       return { id: c?.id, name: c?.name, ...serializeCollectionExtension(c) };
     }
     case 'extend_variable_collection': {
@@ -3031,7 +3053,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       let swapTarget: ComponentNode | null = null;
       if (sw) {
         if (!sw.componentKey && !sw.componentId) throw new Error('map_nodes swap needs `componentKey` or `componentId`.');
-        const resolved = sw.componentKey ? await figma.importComponentByKeyAsync(sw.componentKey) : await getNode(sw.componentId!);
+        const resolved = sw.componentKey ? await importByKey('component', sw.componentKey, () => figma.importComponentByKeyAsync(sw.componentKey!)) : await getNode(sw.componentId!);
         if (resolved.type !== 'COMPONENT') throw new Error(`Swap target not a COMPONENT: ${sw.componentKey ?? sw.componentId}`);
         swapTarget = resolved as ComponentNode;
       }
@@ -4195,7 +4217,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.6.0';
+const PLUGIN_VERSION = '0.6.1';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie

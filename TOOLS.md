@@ -452,6 +452,8 @@ Set the file thumbnail node (must be FRAME/COMPONENT/COMPONENT_SET/SECTION). `no
 
 ## Library imports (remote)
 
+Every by-key import (`import_component_by_key`, `import_component_set_by_key`, `import_style_by_key`, `import_variable_by_key`, `extend_library_collection_by_key`, and `map_nodes` swaps by `componentKey`) fails fast with `library_key_unresolved` after 6s. Figma never answers for a key it can't resolve — unknown key, a library not enabled for this file, or an internal/unpublished item (often underscore-named) — so Grip turns that silence into an actionable error instead of a 10s `request_timeout`.
+
 ### `import_component_by_key`
 - Params: `key`. → `{ id, name, key }`.
 
