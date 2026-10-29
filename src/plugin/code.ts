@@ -636,6 +636,11 @@ async function serializeNode(
   if (want('relativeTransform') && 'relativeTransform' in node) out.relativeTransform = sn.relativeTransform;
   if (want('absoluteBoundingBox') && 'absoluteBoundingBox' in node) out.absoluteBoundingBox = sn.absoluteBoundingBox;
   if (want('targetAspectRatio') && 'targetAspectRatio' in node && sn.targetAspectRatio) out.targetAspectRatio = sn.targetAspectRatio;
+  // Opt-in only (must be named in `properties`): redundant with relativeTransform
+  // / absoluteBoundingBox for most callers, so they stay out of the default payload.
+  const explicit = (k: string) => !!opts.properties && opts.properties.has(k);
+  if (explicit('absoluteTransform') && 'absoluteTransform' in node) out.absoluteTransform = sn.absoluteTransform;
+  if (explicit('absoluteRenderBounds') && 'absoluteRenderBounds' in node) out.absoluteRenderBounds = sn.absoluteRenderBounds;
 
   // Fills / strokes / effects
   if (want('fills')) {
@@ -679,6 +684,11 @@ async function serializeNode(
     if (want('layoutMode')) out.layoutMode = f.layoutMode;
     for (const k of ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'itemSpacing', 'counterAxisSpacing', 'primaryAxisSizingMode', 'counterAxisSizingMode', 'primaryAxisAlignItems', 'counterAxisAlignItems', 'layoutWrap', 'itemReverseZIndex', 'strokesIncludedInLayout']) {
       if (want(k) && k in f) out[k] = (f as any)[k];
+    }
+    // Wrap track alignment ('AUTO' | 'SPACE_BETWEEN'): only meaningful when layoutWrap is
+    // 'WRAP', so omitted otherwise to keep default payloads lean (name it in `properties` to force).
+    if (want('counterAxisAlignContent') && 'counterAxisAlignContent' in f && (explicit('counterAxisAlignContent') || (f as any).layoutWrap === 'WRAP')) {
+      try { out.counterAxisAlignContent = (f as any).counterAxisAlignContent; } catch { /* unsupported on this node */ }
     }
     // CSS-grid auto-layout container props (layoutMode 'GRID').
     for (const k of ['gridRowCount', 'gridColumnCount', 'gridRowGap', 'gridColumnGap', 'gridColumnSizes', 'gridRowSizes', 'gridAutoTracks', 'gridItemsPositioning']) {
@@ -769,6 +779,30 @@ async function serializeNode(
   if (want('textStyleId') && node.type === 'TEXT') {
     const tsid = (node as TextNode).textStyleId;
     if (tsid && tsid !== figma.mixed) out.textStyleId = tsid;
+  }
+
+  // Mask type: only meaningful on masks (a non-mask's maskType is just the 'ALPHA' default).
+  if (want('maskType') && 'maskType' in node && (explicit('maskType') || sn.isMask === true)) out.maskType = sn.maskType;
+  // Scrolling-frame fixed children count (omitted when 0 unless requested) + overlay settings
+  // (read-only in the Plugin API; opt-in via `properties` so plain frames stay lean).
+  if (want('numberOfFixedChildren') && 'numberOfFixedChildren' in node && (explicit('numberOfFixedChildren') || sn.numberOfFixedChildren > 0)) {
+    out.numberOfFixedChildren = sn.numberOfFixedChildren;
+  }
+  for (const k of ['overlayPositionType', 'overlayBackground', 'overlayBackgroundInteraction']) {
+    if (explicit(k) && k in node) {
+      try { out[k] = serializeEffectValue(sn[k]); } catch { /* not a frame overlay target */ }
+    }
+  }
+  // Vector handle mirroring (NONE | ANGLE | ANGLE_AND_LENGTH | 'mixed'): opt-in.
+  if (explicit('handleMirroring') && 'handleMirroring' in node) {
+    try { out.handleMirroring = sn.handleMirroring === figma.mixed ? 'mixed' : sn.handleMirroring; } catch { /* ignore */ }
+  }
+  // Raw vector outlines ({windingRule, data}[]): can be huge, so opt-in only. get_node/get_nodes/
+  // get_selection stay under the read_too_large cap; search_nodes/export_node JSON do not.
+  for (const k of ['fillGeometry', 'strokeGeometry']) {
+    if (explicit(k) && k in node) {
+      try { out[k] = sn[k]; } catch { /* geometry unavailable (e.g. group) */ }
+    }
   }
 
   // Bound variables
@@ -1607,6 +1641,19 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       if (!('parent' in src)) throw new Error(`Node ${params.nodeId} cannot move`);
       const target = await getNode(params.parentId);
       if (!hasChildren(target)) throw new Error(`Parent ${params.parentId} cannot contain children`);
+      // GridLayoutMixin.appendChildAt: place the node in a specific (row, column) cell of a GRID
+      // auto-layout parent (0-based). row/column must both be given, and index is then ignored.
+      if (params.row !== undefined || params.column !== undefined) {
+        const r = Number(params.row), c = Number(params.column);
+        if (params.row === undefined || params.column === undefined || !Number.isInteger(r) || !Number.isInteger(c) || r < 0 || c < 0) {
+          throw new Error('move_node: row and column must both be given as non-negative integers');
+        }
+        if (typeof (target as any).appendChildAt !== 'function') {
+          throw new Error(`move_node row/column requires a parent frame with layoutMode 'GRID', got ${target.type}`);
+        }
+        (target as any).appendChildAt(src as SceneNode, r, c);
+        return { id: src.id, parentId: target.id, row: r, column: c };
+      }
       if (typeof params.index === 'number') target.insertChild(params.index, src as SceneNode);
       else target.appendChild(src as SceneNode);
       return { id: src.id, parentId: target.id };
@@ -3860,14 +3907,22 @@ async function applyProperty(node: SceneNode, property: string, value: any) {
       t.fontSize = Number(value);
       return;
     }
-    case 'fills':
+    case 'fills': {
       must(hasFills(node), 'no fills');
-      sn.fills = paintsFromInput(value);
+      const fp = paintsFromInput(value);
+      // PATTERN paints can only be set via the async setter (it loads the pattern's source
+      // node first); a plain assignment throws. Other paints keep the sync path unchanged.
+      if (fp.some((x) => x.type === 'PATTERN') && typeof sn.setFillsAsync === 'function') await sn.setFillsAsync(fp);
+      else sn.fills = fp;
       return;
-    case 'strokes':
+    }
+    case 'strokes': {
       must(hasStrokes(node), 'no strokes');
-      sn.strokes = paintsFromInput(value);
+      const sp = paintsFromInput(value);
+      if (sp.some((x) => x.type === 'PATTERN') && typeof sn.setStrokesAsync === 'function') await sn.setStrokesAsync(sp);
+      else sn.strokes = sp;
       return;
+    }
     case 'effects':
       must('effects' in node, 'no effects');
       // rehydrate so a read-back effect ({hex,opacity} colors, alias shapes)
@@ -3902,6 +3957,49 @@ async function applyProperty(node: SceneNode, property: string, value: any) {
       }
       return;
     }
+  }
+
+  // Layout/shape props with enum or special validation (kept out of the shared buckets above).
+  switch (property) {
+    case 'counterAxisAlignContent': {
+      must(property in node, 'no such property (auto-layout frames only)');
+      if (value !== 'AUTO' && value !== 'SPACE_BETWEEN') {
+        throw new Error(`counterAxisAlignContent must be 'AUTO' | 'SPACE_BETWEEN', got ${JSON.stringify(value)}`);
+      }
+      // Figma throws on a non-wrapping frame; surface a clearer message.
+      if (sn.layoutWrap !== 'WRAP') throw new Error("counterAxisAlignContent only applies when layoutWrap is 'WRAP' — set layoutWrap:'WRAP' first");
+      sn.counterAxisAlignContent = value;
+      return;
+    }
+    case 'maskType': {
+      must(property in node, 'no such property');
+      if (value !== 'ALPHA' && value !== 'VECTOR' && value !== 'LUMINANCE') {
+        throw new Error(`maskType must be 'ALPHA' | 'VECTOR' | 'LUMINANCE', got ${JSON.stringify(value)}`);
+      }
+      // Does not toggle isMask — set isMask:true separately.
+      sn.maskType = value;
+      return;
+    }
+    case 'handleMirroring': {
+      must(property in node, 'only vector-like nodes (VECTOR, STAR, POLYGON, …) have handleMirroring');
+      if (node.type === 'TEXT_PATH') not('read-only on TEXT_PATH nodes');
+      if (value !== 'NONE' && value !== 'ANGLE' && value !== 'ANGLE_AND_LENGTH') {
+        throw new Error(`handleMirroring must be 'NONE' | 'ANGLE' | 'ANGLE_AND_LENGTH', got ${JSON.stringify(value)}`);
+      }
+      sn.handleMirroring = value;
+      return;
+    }
+    case 'numberOfFixedChildren': {
+      must(property in node, 'only frames (scrolling-frame prototyping) have numberOfFixedChildren');
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 0) throw new Error('numberOfFixedChildren must be a non-negative integer');
+      sn.numberOfFixedChildren = n;
+      return;
+    }
+    case 'overlayPositionType':
+    case 'overlayBackground':
+    case 'overlayBackgroundInteraction':
+      not('read-only in the Figma Plugin API (set the overlay behaviour in the Prototype panel, or via set_reactions OPEN_OVERLAY actions); readable via get_node properties:["' + property + '"]');
   }
 
   // For wide-net buckets, validate the property exists on the node before
