@@ -173,6 +173,7 @@ type ToolMethod =
   | 'extend_library_collection_by_key'
   | 'extend_variable_collection'
   | 'remove_variable_overrides'
+  | 'remove_variable_override_for_mode'
   | 'list_library_variables'
   | 'request_variable_to_be_enabled'
   | 'request_variable_to_be_disabled'
@@ -602,6 +603,27 @@ function serializePluginData(node: BaseNode, keys?: string[]): Record<string, st
   return Object.keys(out).length ? out : undefined;
 }
 
+// {collectionId: modeId} -> {collectionId: {collection, mode}} with readable names. Collection
+// lookups are cached for ~2s so a tree read doesn't re-fetch the same collection per node.
+let modeNameCache: { t: number; byId: Map<string, { name: string; modes: Map<string, string> } | null> } = { t: 0, byId: new Map() };
+async function resolveModeNames(resolved: Record<string, string>): Promise<Record<string, { collection?: string; mode?: string }>> {
+  const now = Date.now();
+  if (now - modeNameCache.t > 2000) modeNameCache = { t: now, byId: new Map() };
+  const out: Record<string, { collection?: string; mode?: string }> = {};
+  for (const [collId, modeId] of Object.entries(resolved)) {
+    let info = modeNameCache.byId.get(collId);
+    if (info === undefined) {
+      try {
+        const c = await figma.variables.getVariableCollectionByIdAsync(collId);
+        info = c ? { name: c.name, modes: new Map(c.modes.map((m: any) => [m.modeId, m.name] as [string, string])) } : null;
+      } catch { info = null; }
+      modeNameCache.byId.set(collId, info);
+    }
+    out[collId] = { collection: info?.name, mode: info?.modes.get(modeId) };
+  }
+  return out;
+}
+
 async function serializeNode(
   node: BaseNode,
   optsOrDepth: SerializeOpts | number,
@@ -845,6 +867,39 @@ async function serializeNode(
   if (opts.includeBoundVariables) {
     const bv = serializeBoundVariables(node);
     if (bv) out.boundVariables = bv;
+  }
+
+  // Read-only variable-resolution fields. Expensive/noisy, so opt-in ONLY via the
+  // `properties` whitelist (never part of the default output).
+  if (opts.properties) {
+    if (opts.properties.has('resolvedVariableModes')) {
+      try {
+        const r = sn.resolvedVariableModes;
+        if (r && typeof r === 'object' && Object.keys(r).length) out.resolvedVariableModes = { ...r };
+      } catch {}
+    }
+    if (opts.properties.has('resolvedVariableModeNames')) {
+      try {
+        const r = sn.resolvedVariableModes;
+        if (r && typeof r === 'object' && Object.keys(r).length) out.resolvedVariableModeNames = await resolveModeNames(r);
+      } catch {}
+    }
+    if (opts.properties.has('inferredVariables')) {
+      try {
+        const inf = sn.inferredVariables;
+        if (inf && typeof inf === 'object') {
+          const o: Record<string, unknown> = {};
+          for (const [field, val] of Object.entries(inf)) {
+            if (!Array.isArray(val) || !val.length) continue;
+            // fills/strokes are VariableAlias[][] (index matches node.fills/strokes); other fields VariableAlias[].
+            const ids = val.map((a: any) => (Array.isArray(a) ? a.map((x: any) => x?.id) : a?.id));
+            const nonEmpty = ids.some((x: any) => (Array.isArray(x) ? x.length > 0 : !!x));
+            if (nonEmpty) o[field] = ids;
+          }
+          if (Object.keys(o).length) out.inferredVariables = o;
+        }
+      } catch {}
+    }
   }
 
   // Export settings
@@ -1191,6 +1246,76 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
     case 'get_variables': {
       const collections = await figma.variables.getLocalVariableCollectionsAsync();
       const allVars = await figma.variables.getLocalVariablesAsync();
+      // Optional additive params (no params = unchanged output):
+      //  variableIds / collectionId: narrow the variables returned.
+      //  resolveFor: nodeId. Per variable add `resolved: {value, resolvedType}` for that node
+      //    (Variable.resolveForConsumer: follows aliases + the node's explicit/inherited modes).
+      //  forCollection: extendedCollectionId. Per variable add `valuesByModeForCollection`
+      //    (Variable.valuesByModeForCollectionAsync: overridden-or-inherited values per extended mode).
+      const idFilter = params.variableIds !== undefined ? new Set(asIds(params.variableIds)) : null;
+      const collFilter = typeof params.collectionId === 'string' && params.collectionId ? params.collectionId : null;
+      let consumer: SceneNode | null = null;
+      if (params.resolveFor) {
+        const n = await getNode(String(params.resolveFor));
+        if (!('parent' in n) || n.type === 'DOCUMENT' || n.type === 'PAGE') throw new Error(`resolveFor must be a scene node id (got ${n.type})`);
+        consumer = n as SceneNode;
+      }
+      let extColl: any = null;
+      if (params.forCollection) {
+        extColl = await figma.variables.getVariableCollectionByIdAsync(String(params.forCollection));
+        if (!extColl) throw new Error(`Collection not found: ${params.forCollection}`);
+        if (!extColl.isExtension) throw new Error(`forCollection must be an extended collection: ${params.forCollection}`);
+      }
+      if (idFilter || collFilter || consumer || extColl) {
+        const extra = async (v: Variable): Promise<Record<string, any>> => {
+          const o: Record<string, any> = {};
+          if (consumer) {
+            try {
+              const r = v.resolveForConsumer(consumer);
+              o.resolved = { value: serializeOneVarValue(r.value), resolvedType: r.resolvedType };
+            } catch (e: any) { o.resolved = { error: String(e?.message ?? e) }; }
+          }
+          if (extColl) {
+            try {
+              const vals = await (v as any).valuesByModeForCollectionAsync(extColl);
+              const m: Record<string, any> = {};
+              for (const [modeId, raw] of Object.entries(vals ?? {})) m[modeId] = serializeOneVarValue(raw);
+              o.valuesByModeForCollection = m;
+            } catch (e: any) { o.valuesByModeForCollection = { error: String(e?.message ?? e) }; }
+          }
+          return o;
+        };
+        const brief = async (v: Variable) => ({
+          id: v.id, name: v.name, key: v.key, resolvedType: v.resolvedType, remote: v.remote,
+          valuesByMode: serializeVarValues(v), ...(await extra(v)),
+        });
+        // Targeted read: only collections that still have a matching variable are returned.
+        const out: any[] = [];
+        for (const c of collections) {
+          if (collFilter && c.id !== collFilter) continue;
+          const vars: any[] = [];
+          for (const v of allVars) {
+            if (v.variableCollectionId !== c.id) continue;
+            if (idFilter && !idFilter.has(v.id)) continue;
+            vars.push(await brief(v));
+          }
+          if (vars.length) out.push({ id: c.id, name: c.name, key: c.key, ...serializeCollectionExtension(c), variables: vars });
+        }
+        // forCollection: inherited variables live in the parent/root collections, which may be
+        // remote and absent from the local list; fetch any ids the extension lists that we haven't covered.
+        if (extColl && !idFilter && !collFilter) {
+          const seen = new Set<string>();
+          for (const c of out) for (const v of c.variables) seen.add(v.id);
+          const missing: any[] = [];
+          for (const id of (extColl.variableIds ?? []) as string[]) {
+            if (seen.has(id)) continue;
+            const v = await figma.variables.getVariableByIdAsync(id);
+            if (v) missing.push(await brief(v));
+          }
+          if (missing.length) out.push({ id: null, name: '(variables from non-local collections)', variables: missing });
+        }
+        return out;
+      }
       return collections.map((c) => ({
         id: c.id,
         name: c.name,
@@ -1952,7 +2077,9 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       const codeSyntax = coerce<Record<string, unknown> | undefined>(params.codeSyntax);
       if (codeSyntax && typeof codeSyntax === 'object') {
         for (const [platform, code] of Object.entries(codeSyntax)) {
-          v.setVariableCodeSyntax(platform as CodeSyntaxPlatform, String(code));
+          // null removes that platform's definition (Variable.removeVariableCodeSyntax).
+          if (code === null) v.removeVariableCodeSyntax(platform as CodeSyntaxPlatform);
+          else v.setVariableCodeSyntax(platform as CodeSyntaxPlatform, String(code));
         }
       }
       if (typeof params.hiddenFromPublishing === 'boolean') v.hiddenFromPublishing = params.hiddenFromPublishing;
@@ -3060,6 +3187,21 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       const v = await figma.variables.getVariableByIdAsync(String(params.variableId));
       if (!v) throw new Error(`Variable not found: ${params.variableId}`);
       (c as any).removeOverridesForVariable(v);
+      return { success: true };
+    }
+    case 'remove_variable_override_for_mode': {
+      // Variable.removeOverrideForMode: drop ONE extended mode's overridden value (back to inherited).
+      const v = await figma.variables.getVariableByIdAsync(String(params.variableId));
+      if (!v) throw new Error(`Variable not found: ${params.variableId}`);
+      const modeId = String(params.modeId ?? '');
+      if (!modeId) throw new Error('modeId is required (an extended collection mode id)');
+      if (params.collectionId) {
+        const c = await figma.variables.getVariableCollectionByIdAsync(String(params.collectionId));
+        if (!c) throw new Error(`Collection not found: ${params.collectionId}`);
+        if (!(c as any).isExtension) throw new Error(`Not an extended collection: ${params.collectionId} (only extended collections have overrides)`);
+        if (!c.modes.some((m: any) => m.modeId === modeId)) throw new Error(`Mode ${modeId} does not belong to collection ${params.collectionId}`);
+      }
+      (v as any).removeOverrideForMode(modeId);
       return { success: true };
     }
     case 'list_library_variables': {
