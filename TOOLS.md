@@ -33,7 +33,7 @@ Pin this MCP session to a specific connected plugin.
 ### `get_document`
 File metadata + page list.
 - Params: none.
-- Returns: `{ name, id, currentPageId, pages: [{ id, name, isPageDivider, nodeCount }] }`. `nodeCount` is top-level children only.
+- Returns: `{ name, id, currentPageId, documentColorProfile, pages: [{ id, name, isPageDivider, nodeCount }] }`. `nodeCount` is top-level children only. `documentColorProfile` is `'LEGACY' | 'SRGB' | 'DISPLAY_P3'` (`'LEGACY'` for files predating color management). **Read-only** — the Plugin API has no setter, so there is no write op. It is what `export_node` `colorProfile: 'DOCUMENT'` resolves to; colors authored in other spaces (see Color spaces below) are still stored as sRGB `color` + `sourceColor`.
 
 ### `list_pages`
 Enumerate pages (id, name, current) WITHOUT loading their contents — cheap even on a 97-page file, unlike `get_document`.
@@ -240,6 +240,12 @@ Create or update a local style. Omit `styleId` to create.
 - TEXT `textWrapStyle`: `'AUTO' | 'BALANCE' | 'PRETTY'` (validated). TEXT `fontName` is `{ family, style?, variationSettings? }` — omit `style` to let Figma resolve the named instance nearest `variationSettings` (e.g. `{ wght: 550 }`); the font is auto-loaded. `get_styles` text entries return `textWrapStyle` and `fontName` (with `variationSettings` for variable fonts).
 - Returns: `{ id, name }`.
 
+### `move_local_style`
+Reorder a local PAINT/TEXT/EFFECT/GRID style, or a style folder.
+- Style: `{ styleId, afterStyleId? }` — omit `afterStyleId` = first. Style type is inferred from `styleId`.
+- Folder: `{ folder, styleType, afterFolder? }` — `styleType` (req: `PAINT | TEXT | EFFECT | GRID`); `folder`/`afterFolder` are full `/`-delimited folder names (e.g. `'Brand/Primary'`); target and reference must share the same parent folder; omit `afterFolder` = first in the parent. Wraps `figma.moveLocal{Paint,Text,Effect,Grid}FolderAfter`. Figma Design only.
+- Returns: `{ success: true }`.
+
 ### `apply_style`
 Bind a node property to a local style.
 - Params: `nodeId`, `styleId`, `kind` (`fill | stroke | effect | grid | text`).
@@ -445,7 +451,7 @@ Merged: manage Dev Mode measurements, dispatched on `op`.
 - `op: 'for_node'` — `{ op, nodeId }` → measurements anchored on that node.
 
 ### `set_file_thumbnail`
-Set the file thumbnail node (must be FRAME/COMPONENT/COMPONENT_SET/SECTION). `nodeId: null` clears.
+Set the file thumbnail node (must be FRAME/COMPONENT/COMPONENT_SET/SECTION). `nodeId: null` clears. To READ the current thumbnail node use the existing `get_file_thumbnail_node` (`{}` → `{ id, name, type }` or null; uses `getFileThumbnailNodeAsync`).
 - Returns: `{ success: true }`.
 
 ---
@@ -529,6 +535,8 @@ Replace a node's prototype reactions.
 
 ### `create_sticky` / `create_connector` / `create_shape_with_text` / `create_table`
 FigJam node creation. Params follow each Figma `createX` shape; check Plugin API docs for legal values. All return `{ id, type }`.
+- `create_sticky` also takes `authorVisible`, `isWideWidth` (booleans). `create_connector` also takes `startStrokeCap`, `endStrokeCap` (`NONE | ARROW_EQUILATERAL | ARROW_LINES | TRIANGLE_FILLED | DIAMOND_FILLED | CIRCLE_FILLED | ERD_*`).
+- Post-creation via `set_node_property`: STICKY `authorVisible`, `isWideWidth`, `authorName`; CONNECTOR `connectorStartStrokeCap`, `connectorEndStrokeCap`, `textBackground` (Paint[] or `{ fills }` for the label background; `[]` clears). `get_node` reads all of these (connector `textBackground` as `{ fills }`), and TABLE_CELL nodes carry read-only `rowIndex`/`columnIndex`.
 
 ### `table_op`
 Merged: insert/remove/move/resize/read rows and columns of a FigJam TABLE, dispatched on `op`.
@@ -678,6 +686,8 @@ Merged, Slides editor only: manage the canvas row grid, dispatched on `op`.
 - `op: 'get_grid'` — `{ op }` → the current canvas grid (was `slides_get_canvas_grid`).
 - `op: 'set_grid'` — `{ op, grid }` (was `slides_set_canvas_grid`).
 - `op: 'move_nodes'` — `{ op, nodeIds, row, column }` (was `slides_move_nodes_to_coord`).
+- `op: 'focus'` — the slide in single-slide view (`currentPage.focusedSlide`). `{ op }` reads → `{ focusedSlideId }` (null if none); `{ op, nodeId: '<SLIDE id>' }` focuses it; `{ op, nodeId: null }` clears. `get_page_context` also returns `focusedSlideId` (only when a slide is focused).
+- SLIDE nodes: `isSkippedSlide` (skipped in presentation) is read by `get_node` and written with `set_node_property`. The deprecated `getSlideGrid`/`setSlideGrid` are superseded by `get_grid`/`set_grid` (canvas grid) and not wrapped separately.
 
 ---
 
