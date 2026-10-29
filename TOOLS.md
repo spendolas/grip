@@ -156,6 +156,12 @@ Set any one property on a node.
     - `devStatus` — frames/components/instances/sections: `{ type: 'READY_FOR_DEV'|'COMPLETED', description? }`, a bare type string, or `null` (clear). Figma only allows it on a node directly under a page or section, and not inside a node that already has one. See **Hand-off / Dev Mode**.
     - `description`, `descriptionMarkdown` — COMPONENT/COMPONENT_SET string (the markdown one is the rich-text description).
     - PAGE nodes (pass the page id as `nodeId`): `guides` (`[{ axis: 'X'|'Y', offset }]`, replaces all), `backgrounds` (Paint[] like `fills`; Figma supports one solid paint), `flowStartingPoints` (`[{ nodeId, name? }]`, bare id strings also work; `name` defaults to the node's name). `prototypeStartNode` is read-only (reads emit `prototypeStartNodeId`).
+    - `counterAxisAlignContent` — `'AUTO' | 'SPACE_BETWEEN'` (wrap-track alignment). The frame must have `layoutWrap: 'WRAP'` (set that first) or it errors. Read back only when `layoutWrap` is `WRAP` (or when named in `properties`).
+    - `maskType` — `'ALPHA' | 'VECTOR' | 'LUMINANCE'`. Does **not** turn the node into a mask — set `isMask: true` too. Reads include `maskType` on masks (`isMask: true`) or when named in `properties`.
+    - `handleMirroring` — `'NONE' | 'ANGLE' | 'ANGLE_AND_LENGTH'` on vector-like nodes (VECTOR/STAR/POLYGON…; read-only on TEXT_PATH). Read via `properties: ['handleMirroring']` (`'mixed'` possible).
+    - `numberOfFixedChildren` — non-negative integer, frames: the top-most N children stay fixed while a scrolling frame scrolls in a prototype. Reads include it when > 0.
+    - `overlayPositionType`, `overlayBackground`, `overlayBackgroundInteraction` — **read-only** in the Plugin API (typings mark them `readonly`); writes throw a clear error. Read via `properties: [...]` (opt-in, not in default reads).
+    - `fills`, `strokes` with a `PATTERN` paint (`{ type:'PATTERN', sourceNodeId, tileType, scalingFactor, spacing:{x,y}, horizontalAlignment }`) are applied via `setFillsAsync`/`setStrokesAsync` (the plain setters throw on pattern paints); all other paints keep the sync path.
 - Returns: `{ success: true }`.
 
 ### `create_node`
@@ -181,8 +187,9 @@ Duplicate a node.
 
 ### `move_node`
 Reparent + reorder.
-- Params: `nodeId`, `parentId` (req), `index`.
-- Returns: `{ id, parentId }`.
+- Params: `nodeId`, `parentId` (req), `index`, `row`, `column`.
+- `row` + `column` (0-based integers, both required together): `parentId` must be a GRID auto-layout frame; places the node in that cell via `GridLayoutMixin.appendChildAt`. `index` is ignored then. To re-position a node already inside a grid use `set_grid_child_position`.
+- Returns: `{ id, parentId }` (plus `row`, `column` for a grid placement).
 
 ### `group`
 Merged: group/ungroup, dispatched on `op`.
@@ -385,6 +392,10 @@ Always present: `id`, `name`, `type`. Other fields appear when the node has them
 | `parent` | Only when `includeParent: true`. `{ id, name, type }`. |
 | `visible`, `locked`, `x`, `y`, `width`, `height`, `rotation`, `opacity`, `blendMode`, `isMask`, `clipsContent`, `constraints` | Mixin-dependent. |
 | `relativeTransform`, `absoluteBoundingBox` | Useful for camera math. |
+| `absoluteTransform`, `absoluteRenderBounds` | **Opt-in** (name in `properties`). Page-relative 2x3 matrix / bounds including shadows+strokes (`null` if invisible). |
+| `fillGeometry`, `strokeGeometry` | **Opt-in** (name in `properties`). Raw vector outlines `[{ windingRule, data }]` — can be huge; `get_node`/`get_nodes`/`get_selection` still enforce the `read_too_large` cap (`search_nodes` and `export_node` JSON do not), so request them on few nodes. |
+| `counterAxisAlignContent`, `maskType`, `numberOfFixedChildren` | Emitted only when meaningful (wrapping frame / mask / > 0); name in `properties` to force. |
+| `overlayPositionType`, `overlayBackground`, `overlayBackgroundInteraction`, `handleMirroring` | **Opt-in** (name in `properties`). |
 | `fills`, `strokes`, `effects`, `layoutGrids` | Arrays. Fills/strokes use rich Paint shape (`type`, `hex`, `stops`, `imageHash`, `opacity`, `visible`, `blendMode`, `boundVariable`). |
 | `strokeWeight`, `strokeAlign`, `strokeJoin`, `strokeCap`, `strokeMiterLimit`, `dashPattern`, `strokeTopWeight`/`Right`/`Bottom`/`Left` | When present. |
 | `cornerRadius`, `topLeftRadius`/`TopRight`/`BottomLeft`/`BottomRight`, `cornerSmoothing` | `cornerRadius` omitted when mixed (per-corner). |
@@ -741,7 +752,7 @@ Set `layoutMode="GRID"` via `set_node_property`, then configure with more `set_n
 - Container: `gridRowCount`, `gridColumnCount`, `gridRowGap`, `gridColumnGap`, `gridColumnSizes`/`gridRowSizes` (arrays of `{ type: 'FLEX'|'FIXED'|'HUG', value }`), `gridAutoTracks`, `gridItemsPositioning`.
 - Grid child (on a direct child): `gridRowSpan`, `gridColumnSpan`, `gridRowAnchorIndex`, `gridColumnAnchorIndex`, `gridChildHorizontalAlign`, `gridChildVerticalAlign`.
 
-### `set_grid_child_position` — `{ nodeId, row, column }` (0-based). Wraps `node.setGridChildPosition`.
+### `set_grid_child_position` — `{ nodeId, row, column }` (0-based). Wraps `node.setGridChildPosition`. To *reparent into* a grid cell use `move_node` with `row`/`column` (wraps `appendChildAt`).
 
 ### `reorder_grid_tracks` — `{ nodeId, axis: 'rows' | 'columns', fromIndices: number[], insertionIndex }` → `{ success, moves: [{ from, to }] }`. Wraps `reorderRows` / `reorderColumns` (typings ≥ 1.142) on a GRID auto-layout frame. `fromIndices` need not be sorted or contiguous; `insertionIndex` is against the **original** order, `0..count` inclusive (rows `[0]` with `insertionIndex: 3` on a 3-row grid moves row 0 to the end). Spanning children pull their tracks along, and `moves` lists them. Not for FigJam tables — use `table_op` `move_row` / `move_column`.
 
