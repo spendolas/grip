@@ -340,6 +340,15 @@ function hasChildren(node) {
 // Generous enough for real components, bounded enough to return fast.
 const DEFAULT_READ_DEPTH = 12;
 const DEFAULT_READ_NODE_BUDGET = 3000;
+function focusedSlideCtx() {
+    try {
+        const f = figma.currentPage.focusedSlide;
+        return f ? { focusedSlideId: f.id } : {};
+    }
+    catch (_a) {
+        return {};
+    }
+}
 function maybe(out, opts, key, val) {
     if (opts.properties && !opts.properties.has(key))
         return;
@@ -376,6 +385,30 @@ function serializePluginData(node, keys) {
             out[k] = v;
     }
     return Object.keys(out).length ? out : undefined;
+}
+// {collectionId: modeId} -> {collectionId: {collection, mode}} with readable names. Collection
+// lookups are cached for ~2s so a tree read doesn't re-fetch the same collection per node.
+let modeNameCache = { t: 0, byId: new Map() };
+async function resolveModeNames(resolved) {
+    const now = Date.now();
+    if (now - modeNameCache.t > 2000)
+        modeNameCache = { t: now, byId: new Map() };
+    const out = {};
+    for (const [collId, modeId] of Object.entries(resolved)) {
+        let info = modeNameCache.byId.get(collId);
+        if (info === undefined) {
+            try {
+                const c = await figma.variables.getVariableCollectionByIdAsync(collId);
+                info = c ? { name: c.name, modes: new Map(c.modes.map((m) => [m.modeId, m.name])) } : null;
+            }
+            catch (_a) {
+                info = null;
+            }
+            modeNameCache.byId.set(collId, info);
+        }
+        out[collId] = { collection: info === null || info === void 0 ? void 0 : info.name, mode: info === null || info === void 0 ? void 0 : info.modes.get(modeId) };
+    }
+    return out;
 }
 async function serializeNode(node, optsOrDepth, maxDepth, includeChildren) {
     var _a, _b;
@@ -426,6 +459,13 @@ async function serializeNode(node, optsOrDepth, maxDepth, includeChildren) {
         out.absoluteBoundingBox = sn.absoluteBoundingBox;
     if (want('targetAspectRatio') && 'targetAspectRatio' in node && sn.targetAspectRatio)
         out.targetAspectRatio = sn.targetAspectRatio;
+    // Opt-in only (must be named in `properties`): redundant with relativeTransform
+    // / absoluteBoundingBox for most callers, so they stay out of the default payload.
+    const explicit = (k) => !!opts.properties && opts.properties.has(k);
+    if (explicit('absoluteTransform') && 'absoluteTransform' in node)
+        out.absoluteTransform = sn.absoluteTransform;
+    if (explicit('absoluteRenderBounds') && 'absoluteRenderBounds' in node)
+        out.absoluteRenderBounds = sn.absoluteRenderBounds;
     // Fills / strokes / effects
     if (want('fills')) {
         if (hasFills(node)) {
@@ -473,6 +513,14 @@ async function serializeNode(node, optsOrDepth, maxDepth, includeChildren) {
         for (const k of ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'itemSpacing', 'counterAxisSpacing', 'primaryAxisSizingMode', 'counterAxisSizingMode', 'primaryAxisAlignItems', 'counterAxisAlignItems', 'layoutWrap', 'itemReverseZIndex', 'strokesIncludedInLayout']) {
             if (want(k) && k in f)
                 out[k] = f[k];
+        }
+        // Wrap track alignment ('AUTO' | 'SPACE_BETWEEN'): only meaningful when layoutWrap is
+        // 'WRAP', so omitted otherwise to keep default payloads lean (name it in `properties` to force).
+        if (want('counterAxisAlignContent') && 'counterAxisAlignContent' in f && (explicit('counterAxisAlignContent') || f.layoutWrap === 'WRAP')) {
+            try {
+                out.counterAxisAlignContent = f.counterAxisAlignContent;
+            }
+            catch ( /* unsupported on this node */_c) { /* unsupported on this node */ }
         }
         // CSS-grid auto-layout container props (layoutMode 'GRID').
         for (const k of ['gridRowCount', 'gridColumnCount', 'gridRowGap', 'gridColumnGap', 'gridColumnSizes', 'gridRowSizes', 'gridAutoTracks', 'gridItemsPositioning']) {
@@ -529,6 +577,10 @@ async function serializeNode(node, optsOrDepth, maxDepth, includeChildren) {
             out.hyperlink = t.hyperlink;
         if (want('listOptions') && t.listOptions !== figma.mixed)
             out.listOptions = t.listOptions;
+        // Text details (Figma 1.142 typings). Mixed values and null decoration
+        // extras (text not decorated) are omitted; read per-range with
+        // get_styled_text_segments. Guarded so older clients just omit them.
+        serializeTextDetails(t, want, out);
     }
     // INSTANCE / COMPONENT / COMPONENT_SET
     if (node.type === 'INSTANCE') {
@@ -572,6 +624,134 @@ async function serializeNode(node, optsOrDepth, maxDepth, includeChildren) {
     if (node.type === 'PAGE') {
         maybe(out, opts, 'isPageDivider', () => node.isPageDivider === true);
     }
+    // Dev Mode status — only emitted when set (null = no status, omitted to keep reads lean).
+    // Present on frames/components/instances/sections (DevStatusMixin).
+    maybe(out, opts, 'devStatus', () => {
+        try {
+            if (!('devStatus' in node))
+                return undefined;
+            const ds = node.devStatus;
+            return ds ? Object.assign({ type: ds.type }, (ds.description ? { description: ds.description } : {})) : undefined;
+        }
+        catch (_a) {
+            return undefined;
+        }
+    });
+    // Page setup: guides, canvas backgrounds, prototype flow starting points / start node.
+    if (node.type === 'PAGE') {
+        const pg = node;
+        maybe(out, opts, 'guides', () => { try {
+            return pg.guides.map((g) => ({ axis: g.axis, offset: g.offset }));
+        }
+        catch (_a) {
+            return undefined;
+        } });
+        maybe(out, opts, 'backgrounds', () => { try {
+            return pg.backgrounds.map(serializePaint);
+        }
+        catch (_a) {
+            return undefined;
+        } });
+        maybe(out, opts, 'flowStartingPoints', () => { try {
+            return pg.flowStartingPoints.map((f) => ({ nodeId: f.nodeId, name: f.name }));
+        }
+        catch (_a) {
+            return undefined;
+        } });
+        maybe(out, opts, 'prototypeStartNodeId', () => { try {
+            return pg.prototypeStartNode ? pg.prototypeStartNode.id : null;
+        }
+        catch (_a) {
+            return undefined;
+        } });
+    }
+    // Component extras: rich-text description, default variant, legacy variant-group view.
+    if (node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') {
+        const cx = node;
+        maybe(out, opts, 'descriptionMarkdown', () => { try {
+            return cx.descriptionMarkdown || undefined;
+        }
+        catch (_a) {
+            return undefined;
+        } });
+    }
+    if (node.type === 'COMPONENT_SET') {
+        const cs = node;
+        maybe(out, opts, 'defaultVariant', () => { try {
+            const v = cs.defaultVariant;
+            return v ? { id: v.id, name: v.name } : undefined;
+        }
+        catch (_a) {
+            return undefined;
+        } });
+        maybe(out, opts, 'variantGroupProperties', () => { try {
+            return cs.variantGroupProperties;
+        }
+        catch (_a) {
+            return undefined;
+        } });
+    }
+    if (node.type === 'INSTANCE') {
+        // Normally 1; only differs when the instance was resized with the scale tool (K).
+        maybe(out, opts, 'scaleFactor', () => { try {
+            return node.scaleFactor;
+        }
+        catch (_a) {
+            return undefined;
+        } });
+    }
+    // Slides: whether the slide is skipped in presentation mode.
+    if (node.type === 'SLIDE') {
+        maybe(out, opts, 'isSkippedSlide', () => { try {
+            return node.isSkippedSlide;
+        }
+        catch (_a) {
+            return undefined;
+        } });
+    }
+    // FigJam: sticky author/width flags, connector caps + label background, table-cell position.
+    if (node.type === 'STICKY') {
+        for (const k of ['authorVisible', 'isWideWidth', 'authorName']) {
+            maybe(out, opts, k, () => { try {
+                return sn[k];
+            }
+            catch (_a) {
+                return undefined;
+            } });
+        }
+    }
+    if (node.type === 'CONNECTOR') {
+        for (const k of ['connectorStartStrokeCap', 'connectorEndStrokeCap']) {
+            maybe(out, opts, k, () => { try {
+                return sn[k];
+            }
+            catch (_a) {
+                return undefined;
+            } });
+        }
+        maybe(out, opts, 'textBackground', () => {
+            var _a;
+            try {
+                const f = (_a = sn.textBackground) === null || _a === void 0 ? void 0 : _a.fills;
+                if (f === undefined)
+                    return undefined;
+                return { fills: f === figma.mixed ? 'mixed' : f.map(serializePaint) };
+            }
+            catch (_b) {
+                return undefined;
+            }
+        });
+    }
+    if (node.type === 'TABLE_CELL') {
+        for (const k of ['rowIndex', 'columnIndex']) {
+            maybe(out, opts, k, () => { try {
+                return sn[k];
+            }
+            catch (_a) {
+                return undefined;
+            } });
+        }
+    }
     if (node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') {
         const c = node;
         if (want('key'))
@@ -584,7 +764,7 @@ async function serializeNode(node, optsOrDepth, maxDepth, includeChildren) {
             try {
                 out.componentPropertyDefinitions = c.componentPropertyDefinitions;
             }
-            catch (_c) { }
+            catch (_d) { }
         }
     }
     // Style binding ids
@@ -600,11 +780,84 @@ async function serializeNode(node, optsOrDepth, maxDepth, includeChildren) {
         if (tsid && tsid !== figma.mixed)
             out.textStyleId = tsid;
     }
+    // Mask type: only meaningful on masks (a non-mask's maskType is just the 'ALPHA' default).
+    if (want('maskType') && 'maskType' in node && (explicit('maskType') || sn.isMask === true))
+        out.maskType = sn.maskType;
+    // Scrolling-frame fixed children count (omitted when 0 unless requested) + overlay settings
+    // (read-only in the Plugin API; opt-in via `properties` so plain frames stay lean).
+    if (want('numberOfFixedChildren') && 'numberOfFixedChildren' in node && (explicit('numberOfFixedChildren') || sn.numberOfFixedChildren > 0)) {
+        out.numberOfFixedChildren = sn.numberOfFixedChildren;
+    }
+    for (const k of ['overlayPositionType', 'overlayBackground', 'overlayBackgroundInteraction']) {
+        if (explicit(k) && k in node) {
+            try {
+                out[k] = serializeEffectValue(sn[k]);
+            }
+            catch ( /* not a frame overlay target */_e) { /* not a frame overlay target */ }
+        }
+    }
+    // Vector handle mirroring (NONE | ANGLE | ANGLE_AND_LENGTH | 'mixed'): opt-in.
+    if (explicit('handleMirroring') && 'handleMirroring' in node) {
+        try {
+            out.handleMirroring = sn.handleMirroring === figma.mixed ? 'mixed' : sn.handleMirroring;
+        }
+        catch ( /* ignore */_f) { /* ignore */ }
+    }
+    // Raw vector outlines ({windingRule, data}[]): can be huge, so opt-in only. get_node/get_nodes/
+    // get_selection stay under the read_too_large cap; search_nodes/export_node JSON do not.
+    for (const k of ['fillGeometry', 'strokeGeometry']) {
+        if (explicit(k) && k in node) {
+            try {
+                out[k] = sn[k];
+            }
+            catch ( /* geometry unavailable (e.g. group) */_g) { /* geometry unavailable (e.g. group) */ }
+        }
+    }
     // Bound variables
     if (opts.includeBoundVariables) {
         const bv = serializeBoundVariables(node);
         if (bv)
             out.boundVariables = bv;
+    }
+    // Read-only variable-resolution fields. Expensive/noisy, so opt-in ONLY via the
+    // `properties` whitelist (never part of the default output).
+    if (opts.properties) {
+        if (opts.properties.has('resolvedVariableModes')) {
+            try {
+                const r = sn.resolvedVariableModes;
+                if (r && typeof r === 'object' && Object.keys(r).length)
+                    out.resolvedVariableModes = Object.assign({}, r);
+            }
+            catch (_h) { }
+        }
+        if (opts.properties.has('resolvedVariableModeNames')) {
+            try {
+                const r = sn.resolvedVariableModes;
+                if (r && typeof r === 'object' && Object.keys(r).length)
+                    out.resolvedVariableModeNames = await resolveModeNames(r);
+            }
+            catch (_j) { }
+        }
+        if (opts.properties.has('inferredVariables')) {
+            try {
+                const inf = sn.inferredVariables;
+                if (inf && typeof inf === 'object') {
+                    const o = {};
+                    for (const [field, val] of Object.entries(inf)) {
+                        if (!Array.isArray(val) || !val.length)
+                            continue;
+                        // fills/strokes are VariableAlias[][] (index matches node.fills/strokes); other fields VariableAlias[].
+                        const ids = val.map((a) => (Array.isArray(a) ? a.map((x) => x === null || x === void 0 ? void 0 : x.id) : a === null || a === void 0 ? void 0 : a.id));
+                        const nonEmpty = ids.some((x) => (Array.isArray(x) ? x.length > 0 : !!x));
+                        if (nonEmpty)
+                            o[field] = ids;
+                    }
+                    if (Object.keys(o).length)
+                        out.inferredVariables = o;
+                }
+            }
+            catch (_k) { }
+        }
     }
     // Export settings
     if (want('exportSettings') && 'exportSettings' in node) {
@@ -790,7 +1043,7 @@ function inspectScript(code) {
     return null;
 }
 async function handle(method, params, reqId) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, _17, _18, _19, _20, _21, _22, _23, _24, _25, _26, _27, _28, _29, _30, _31, _32, _33, _34, _35, _36, _37, _38, _39, _40, _41, _42, _43, _44, _45, _46, _47, _48, _49, _50, _51;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, _17, _18, _19, _20, _21, _22, _23, _24, _25, _26, _27, _28, _29, _30, _31, _32, _33, _34, _35, _36, _37, _38, _39, _40, _41, _42, _43, _44, _45, _46, _47, _48, _49, _50, _51, _52, _53, _54, _55;
     switch (method) {
         case 'get_document': {
             await figma.loadAllPagesAsync();
@@ -798,6 +1051,8 @@ async function handle(method, params, reqId) {
                 name: figma.root.name,
                 id: figma.root.id,
                 currentPageId: figma.currentPage.id,
+                // 'LEGACY' | 'SRGB' | 'DISPLAY_P3' (read-only in the Plugin API).
+                documentColorProfile: (_a = figma.root.documentColorProfile) !== null && _a !== void 0 ? _a : null,
                 pages: figma.root.children.map((p) => ({
                     id: p.id,
                     name: p.name,
@@ -810,11 +1065,7 @@ async function handle(method, params, reqId) {
             // Cheap ground-truth probe: which file/page is this plugin session on,
             // and how much is selected. Lets an agent distinguish "empty here" from
             // "wrong page" before trusting an empty get_selection/search result.
-            return {
-                file: { key: (_a = figma.fileKey) !== null && _a !== void 0 ? _a : figma.root.id, name: figma.root.name },
-                page: { id: figma.currentPage.id, name: figma.currentPage.name },
-                selectionCount: figma.currentPage.selection.length,
-            };
+            return Object.assign({ file: { key: (_b = figma.fileKey) !== null && _b !== void 0 ? _b : figma.root.id, name: figma.root.name }, page: { id: figma.currentPage.id, name: figma.currentPage.name }, selectionCount: figma.currentPage.selection.length }, focusedSlideCtx());
         }
         case 'get_page': {
             const depth = clampDepth(params.depth);
@@ -904,6 +1155,10 @@ async function handle(method, params, reqId) {
                         textCase: s.textCase,
                         textDecoration: s.textDecoration,
                         textWrapStyle: s.textWrapStyle,
+                        leadingTrim: s.leadingTrim,
+                        listSpacing: s.listSpacing,
+                        hangingPunctuation: s.hangingPunctuation,
+                        hangingList: s.hangingList,
                     },
                 })),
                 effect: effects.map((s) => ({
@@ -925,6 +1180,93 @@ async function handle(method, params, reqId) {
         case 'get_variables': {
             const collections = await figma.variables.getLocalVariableCollectionsAsync();
             const allVars = await figma.variables.getLocalVariablesAsync();
+            // Optional additive params (no params = unchanged output):
+            //  variableIds / collectionId: narrow the variables returned.
+            //  resolveFor: nodeId. Per variable add `resolved: {value, resolvedType}` for that node
+            //    (Variable.resolveForConsumer: follows aliases + the node's explicit/inherited modes).
+            //  forCollection: extendedCollectionId. Per variable add `valuesByModeForCollection`
+            //    (Variable.valuesByModeForCollectionAsync: overridden-or-inherited values per extended mode).
+            const idFilter = params.variableIds !== undefined ? new Set(asIds(params.variableIds)) : null;
+            const collFilter = typeof params.collectionId === 'string' && params.collectionId ? params.collectionId : null;
+            let consumer = null;
+            if (params.resolveFor) {
+                const n = await getNode(String(params.resolveFor));
+                if (!('parent' in n) || n.type === 'DOCUMENT' || n.type === 'PAGE')
+                    throw new Error(`resolveFor must be a scene node id (got ${n.type})`);
+                consumer = n;
+            }
+            let extColl = null;
+            if (params.forCollection) {
+                extColl = await figma.variables.getVariableCollectionByIdAsync(String(params.forCollection));
+                if (!extColl)
+                    throw new Error(`Collection not found: ${params.forCollection}`);
+                if (!extColl.isExtension)
+                    throw new Error(`forCollection must be an extended collection: ${params.forCollection}`);
+            }
+            if (idFilter || collFilter || consumer || extColl) {
+                const extra = async (v) => {
+                    var _a, _b;
+                    const o = {};
+                    if (consumer) {
+                        try {
+                            const r = v.resolveForConsumer(consumer);
+                            o.resolved = { value: serializeOneVarValue(r.value), resolvedType: r.resolvedType };
+                        }
+                        catch (e) {
+                            o.resolved = { error: String((_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e) };
+                        }
+                    }
+                    if (extColl) {
+                        try {
+                            const vals = await v.valuesByModeForCollectionAsync(extColl);
+                            const m = {};
+                            for (const [modeId, raw] of Object.entries(vals !== null && vals !== void 0 ? vals : {}))
+                                m[modeId] = serializeOneVarValue(raw);
+                            o.valuesByModeForCollection = m;
+                        }
+                        catch (e) {
+                            o.valuesByModeForCollection = { error: String((_b = e === null || e === void 0 ? void 0 : e.message) !== null && _b !== void 0 ? _b : e) };
+                        }
+                    }
+                    return o;
+                };
+                const brief = async (v) => (Object.assign({ id: v.id, name: v.name, key: v.key, resolvedType: v.resolvedType, remote: v.remote, valuesByMode: serializeVarValues(v) }, (await extra(v))));
+                // Targeted read: only collections that still have a matching variable are returned.
+                const out = [];
+                for (const c of collections) {
+                    if (collFilter && c.id !== collFilter)
+                        continue;
+                    const vars = [];
+                    for (const v of allVars) {
+                        if (v.variableCollectionId !== c.id)
+                            continue;
+                        if (idFilter && !idFilter.has(v.id))
+                            continue;
+                        vars.push(await brief(v));
+                    }
+                    if (vars.length)
+                        out.push(Object.assign(Object.assign({ id: c.id, name: c.name, key: c.key }, serializeCollectionExtension(c)), { variables: vars }));
+                }
+                // forCollection: inherited variables live in the parent/root collections, which may be
+                // remote and absent from the local list; fetch any ids the extension lists that we haven't covered.
+                if (extColl && !idFilter && !collFilter) {
+                    const seen = new Set();
+                    for (const c of out)
+                        for (const v of c.variables)
+                            seen.add(v.id);
+                    const missing = [];
+                    for (const id of ((_c = extColl.variableIds) !== null && _c !== void 0 ? _c : [])) {
+                        if (seen.has(id))
+                            continue;
+                        const v = await figma.variables.getVariableByIdAsync(id);
+                        if (v)
+                            missing.push(await brief(v));
+                    }
+                    if (missing.length)
+                        out.push({ id: null, name: '(variables from non-local collections)', variables: missing });
+                }
+                return out;
+            }
             return collections.map((c) => (Object.assign(Object.assign({ id: c.id, name: c.name, key: c.key, hiddenFromPublishing: c.hiddenFromPublishing, defaultModeId: c.defaultModeId, remote: c.remote, modes: c.modes.map((m) => (Object.assign({ modeId: m.modeId, name: m.name }, (m.parentModeId ? { parentModeId: m.parentModeId } : {})))) }, serializeCollectionExtension(c)), { variables: allVars
                     .filter((v) => v.variableCollectionId === c.id)
                     .map((v) => ({
@@ -974,13 +1316,13 @@ async function handle(method, params, reqId) {
             };
         }
         case 'search_nodes': {
-            const max = (_b = params.maxResults) !== null && _b !== void 0 ? _b : 50;
-            const offset = Math.max(0, (_c = params.offset) !== null && _c !== void 0 ? _c : 0);
+            const max = (_d = params.maxResults) !== null && _d !== void 0 ? _d : 50;
+            const offset = Math.max(0, (_e = params.offset) !== null && _e !== void 0 ? _e : 0);
             const types = params.type
                 ? Array.isArray(params.type) ? params.type : [params.type]
                 : null;
             const nameRx = params.nameRegex
-                ? new RegExp(params.nameRegex, (_d = params.nameFlags) !== null && _d !== void 0 ? _d : 'i')
+                ? new RegExp(params.nameRegex, (_f = params.nameFlags) !== null && _f !== void 0 ? _f : 'i')
                 : null;
             const needle = !nameRx && params.name ? String(params.name).toLowerCase() : null;
             const fillHex = params.fillHex ? String(params.fillHex).toUpperCase() : null;
@@ -1075,8 +1417,8 @@ async function handle(method, params, reqId) {
                 const mp = (typeof params.maxPages === 'number' && params.maxPages > 0) ? params.maxPages : Infinity;
                 const budget = Math.min(55000, Math.max(1000, typeof params.timeBudgetMs === 'number' ? params.timeBudgetMs : 45000));
                 const t0 = Date.now();
-                const startPage = Math.max(0, (_e = params.pageCursor) !== null && _e !== void 0 ? _e : 0);
-                let startNode = Math.max(0, (_f = params.nodeCursor) !== null && _f !== void 0 ? _f : 0);
+                const startPage = Math.max(0, (_g = params.pageCursor) !== null && _g !== void 0 ? _g : 0);
+                let startNode = Math.max(0, (_h = params.nodeCursor) !== null && _h !== void 0 ? _h : 0);
                 let processed = 0;
                 let pi = startPage;
                 for (; pi < kids.length && processed < mp; pi++, processed++, startNode = 0) {
@@ -1087,7 +1429,7 @@ async function handle(method, params, reqId) {
                         try {
                             candidates = pg.findAllWithCriteria({ types });
                         }
-                        catch (_52) {
+                        catch (_56) {
                             candidates = null;
                         }
                     }
@@ -1136,7 +1478,7 @@ async function handle(method, params, reqId) {
                     try {
                         candidates = root.findAllWithCriteria({ types });
                     }
-                    catch (_53) {
+                    catch (_57) {
                         candidates = null;
                     }
                 }
@@ -1158,10 +1500,10 @@ async function handle(method, params, reqId) {
             for (const n of slice) {
                 if (propsSet) {
                     const proj = await serializeNode(n, { depth: 0, maxDepth: 0, includeChildren: false, properties: propsSet });
-                    results.push(Object.assign(Object.assign({}, proj), { parentId: (_h = (_g = n.parent) === null || _g === void 0 ? void 0 : _g.id) !== null && _h !== void 0 ? _h : '' }));
+                    results.push(Object.assign(Object.assign({}, proj), { parentId: (_k = (_j = n.parent) === null || _j === void 0 ? void 0 : _j.id) !== null && _k !== void 0 ? _k : '' }));
                 }
                 else {
-                    results.push({ id: n.id, name: n.name, type: n.type, parentId: (_k = (_j = n.parent) === null || _j === void 0 ? void 0 : _j.id) !== null && _k !== void 0 ? _k : '' });
+                    results.push({ id: n.id, name: n.name, type: n.type, parentId: (_m = (_l = n.parent) === null || _l === void 0 ? void 0 : _l.id) !== null && _m !== void 0 ? _m : '' });
                 }
             }
             return Object.assign(Object.assign(Object.assign(Object.assign({ total: matches.length, offset }, (partial ? { partial: true } : {})), (nextPageCursor !== undefined ? { nextPageCursor } : {})), (nextNodeCursor !== undefined && nextNodeCursor > 0 ? { nextNodeCursor } : {})), { results });
@@ -1306,8 +1648,8 @@ async function handle(method, params, reqId) {
                 return { format: 'CSS', data: text };
             }
             // Build a Figma ExportSettings from params.
-            const constraintType = (_m = (_l = params.constraint) === null || _l === void 0 ? void 0 : _l.type) !== null && _m !== void 0 ? _m : 'SCALE';
-            const constraintValue = (_q = (_p = (_o = params.constraint) === null || _o === void 0 ? void 0 : _o.value) !== null && _p !== void 0 ? _p : params.scale) !== null && _q !== void 0 ? _q : 2;
+            const constraintType = (_p = (_o = params.constraint) === null || _o === void 0 ? void 0 : _o.type) !== null && _p !== void 0 ? _p : 'SCALE';
+            const constraintValue = (_s = (_r = (_q = params.constraint) === null || _q === void 0 ? void 0 : _q.value) !== null && _r !== void 0 ? _r : params.scale) !== null && _s !== void 0 ? _s : 2;
             const settingsBase = {
                 contentsOnly: params.contentsOnly,
                 useAbsoluteBounds: params.useAbsoluteBounds,
@@ -1486,7 +1828,7 @@ async function handle(method, params, reqId) {
             if (!('clone' in src))
                 throw new Error(`Node ${params.nodeId} cannot be cloned`);
             const copy = src.clone();
-            let parent = (_r = src.parent) !== null && _r !== void 0 ? _r : figma.currentPage;
+            let parent = (_t = src.parent) !== null && _t !== void 0 ? _t : figma.currentPage;
             if (params.parentId) {
                 const p = await getNode(params.parentId);
                 if (!hasChildren(p))
@@ -1512,6 +1854,19 @@ async function handle(method, params, reqId) {
             const target = await getNode(params.parentId);
             if (!hasChildren(target))
                 throw new Error(`Parent ${params.parentId} cannot contain children`);
+            // GridLayoutMixin.appendChildAt: place the node in a specific (row, column) cell of a GRID
+            // auto-layout parent (0-based). row/column must both be given, and index is then ignored.
+            if (params.row !== undefined || params.column !== undefined) {
+                const r = Number(params.row), c = Number(params.column);
+                if (params.row === undefined || params.column === undefined || !Number.isInteger(r) || !Number.isInteger(c) || r < 0 || c < 0) {
+                    throw new Error('move_node: row and column must both be given as non-negative integers');
+                }
+                if (typeof target.appendChildAt !== 'function') {
+                    throw new Error(`move_node row/column requires a parent frame with layoutMode 'GRID', got ${target.type}`);
+                }
+                target.appendChildAt(src, r, c);
+                return { id: src.id, parentId: target.id, row: r, column: c };
+            }
             if (typeof params.index === 'number')
                 target.insertChild(params.index, src);
             else
@@ -1530,7 +1885,7 @@ async function handle(method, params, reqId) {
             }
             const parent = params.parentId
                 ? (await getNode(params.parentId))
-                : (_s = nodes[0].parent) !== null && _s !== void 0 ? _s : figma.currentPage;
+                : (_u = nodes[0].parent) !== null && _u !== void 0 ? _u : figma.currentPage;
             if (params.asFrame) {
                 const frame = figma.createFrame();
                 parent.appendChild(frame);
@@ -1637,8 +1992,8 @@ async function handle(method, params, reqId) {
         case 'apply_style': {
             const node = await getNode(params.nodeId);
             const sn = node;
-            const kind = String((_t = params.kind) !== null && _t !== void 0 ? _t : 'fill').toLowerCase();
-            const sid = (_u = params.styleId) !== null && _u !== void 0 ? _u : '';
+            const kind = String((_v = params.kind) !== null && _v !== void 0 ? _v : 'fill').toLowerCase();
+            const sid = (_w = params.styleId) !== null && _w !== void 0 ? _w : '';
             switch (kind) {
                 case 'fill':
                     if (!('fillStyleId' in sn))
@@ -1699,7 +2054,7 @@ async function handle(method, params, reqId) {
         }
         // ---------- assets ----------
         case 'upload_image': {
-            const b64 = String((_v = params.base64) !== null && _v !== void 0 ? _v : '');
+            const b64 = String((_x = params.base64) !== null && _x !== void 0 ? _x : '');
             const bytes = base64ToBytes(b64);
             const image = figma.createImage(bytes);
             return { imageHash: image.hash, bytesLength: bytes.length };
@@ -1759,7 +2114,7 @@ async function handle(method, params, reqId) {
                 try {
                     v.remove();
                 }
-                catch ( /* already gone */_54) { /* already gone */ }
+                catch ( /* already gone */_58) { /* already gone */ }
                 throw err;
             }
         }
@@ -1805,7 +2160,11 @@ async function handle(method, params, reqId) {
             const codeSyntax = coerce(params.codeSyntax);
             if (codeSyntax && typeof codeSyntax === 'object') {
                 for (const [platform, code] of Object.entries(codeSyntax)) {
-                    v.setVariableCodeSyntax(platform, String(code));
+                    // null removes that platform's definition (Variable.removeVariableCodeSyntax).
+                    if (code === null)
+                        v.removeVariableCodeSyntax(platform);
+                    else
+                        v.setVariableCodeSyntax(platform, String(code));
                 }
             }
             if (typeof params.hiddenFromPublishing === 'boolean')
@@ -1825,7 +2184,7 @@ async function handle(method, params, reqId) {
             }
             const parent = params.parentId
                 ? (await getNode(params.parentId))
-                : (_w = nodes[0].parent) !== null && _w !== void 0 ? _w : figma.currentPage;
+                : (_y = nodes[0].parent) !== null && _y !== void 0 ? _y : figma.currentPage;
             const flat = typeof params.index === 'number'
                 ? figma.flatten(nodes, parent, params.index)
                 : figma.flatten(nodes, parent);
@@ -1835,7 +2194,7 @@ async function handle(method, params, reqId) {
             const ids = asIds(params.nodeIds);
             if (ids.length < 2)
                 throw new Error('boolean_operation: need ≥2 nodes');
-            const op = String((_y = (_x = params.operation) !== null && _x !== void 0 ? _x : params.type) !== null && _y !== void 0 ? _y : '').toUpperCase();
+            const op = String((_0 = (_z = params.operation) !== null && _z !== void 0 ? _z : params.type) !== null && _0 !== void 0 ? _0 : '').toUpperCase();
             const nodes = [];
             for (const id of ids) {
                 const n = await getNode(id);
@@ -1844,7 +2203,7 @@ async function handle(method, params, reqId) {
             }
             const parent = params.parentId
                 ? (await getNode(params.parentId))
-                : (_z = nodes[0].parent) !== null && _z !== void 0 ? _z : figma.currentPage;
+                : (_1 = nodes[0].parent) !== null && _1 !== void 0 ? _1 : figma.currentPage;
             let out;
             if (op === 'UNION')
                 out = figma.union(nodes, parent);
@@ -1861,7 +2220,7 @@ async function handle(method, params, reqId) {
             return { id: out.id, name: out.name, type: out.type };
         }
         case 'create_node_from_svg': {
-            const svg = String((_0 = params.svg) !== null && _0 !== void 0 ? _0 : '');
+            const svg = String((_2 = params.svg) !== null && _2 !== void 0 ? _2 : '');
             if (!svg)
                 throw new Error('create_node_from_svg: svg required');
             const node = figma.createNodeFromSvg(svg);
@@ -1882,7 +2241,7 @@ async function handle(method, params, reqId) {
             return { id: node.id, name: node.name, type: node.type };
         }
         case 'notify': {
-            const message = String((_1 = params.message) !== null && _1 !== void 0 ? _1 : '');
+            const message = String((_3 = params.message) !== null && _3 !== void 0 ? _3 : '');
             const opts = {};
             if (typeof params.timeout === 'number')
                 opts.timeout = params.timeout;
@@ -1912,7 +2271,7 @@ async function handle(method, params, reqId) {
                     axes = figma.getFontFamilyVariationAxes(family);
                 }
                 catch (e) {
-                    return { family, available: false, axes: null, variable: null, styles, error: String((_2 = e === null || e === void 0 ? void 0 : e.message) !== null && _2 !== void 0 ? _2 : e) };
+                    return { family, available: false, axes: null, variable: null, styles, error: String((_4 = e === null || e === void 0 ? void 0 : e.message) !== null && _4 !== void 0 ? _4 : e) };
                 }
                 return { family, available: true, variable: axes !== null, axes, styles };
             }
@@ -1949,7 +2308,7 @@ async function handle(method, params, reqId) {
             const node = await getNode(params.nodeId);
             if (!('reactions' in node))
                 throw new Error(`Node ${node.type} has no reactions`);
-            const reactions = coerce((_3 = params.reactions) !== null && _3 !== void 0 ? _3 : []);
+            const reactions = coerce((_5 = params.reactions) !== null && _5 !== void 0 ? _5 : []);
             const sn = node;
             if (typeof sn.setReactionsAsync === 'function') {
                 await sn.setReactionsAsync(reactions);
@@ -1963,7 +2322,7 @@ async function handle(method, params, reqId) {
             const n = await getNode(params.nodeId);
             if (n.type !== 'TEXT')
                 throw new Error(`Not a TEXT node: ${params.nodeId}`);
-            const fields = ((_4 = params.fields) !== null && _4 !== void 0 ? _4 : [
+            const fields = ((_6 = params.fields) !== null && _6 !== void 0 ? _6 : [
                 'fontName', 'fontStyle', 'fontSize', 'textCase', 'textDecoration',
                 'fills', 'lineHeight', 'letterSpacing', 'hyperlink', 'listOptions',
                 'paragraphSpacing', 'paragraphIndent', 'openTypeFeatures',
@@ -1978,6 +2337,9 @@ async function handle(method, params, reqId) {
                 const out = Object.assign({}, s);
                 if (Array.isArray(s.fills))
                     out.fills = s.fills.map(serializePaint);
+                // textDecorationColor carries a raw SolidPaint ({value:{color:{r,g,b}}}); hex-encode it.
+                if (s.textDecorationColor && typeof s.textDecorationColor === 'object')
+                    out.textDecorationColor = serializeTextDecorationColor(s.textDecorationColor);
                 return out;
             });
         }
@@ -2009,7 +2371,7 @@ async function handle(method, params, reqId) {
             if (typeof sn.addDevResourceAsync !== 'function') {
                 throw new Error(`Node ${node.type} does not support dev resources`);
             }
-            await sn.addDevResourceAsync(String(params.url), String((_5 = params.name) !== null && _5 !== void 0 ? _5 : params.url));
+            await sn.addDevResourceAsync(String(params.url), String((_7 = params.name) !== null && _7 !== void 0 ? _7 : params.url));
             return { success: true };
         }
         case 'delete_dev_resource': {
@@ -2024,7 +2386,7 @@ async function handle(method, params, reqId) {
         case 'get_dev_resources': {
             const node = await getNode(params.nodeId);
             const sn = node;
-            const list = (_6 = sn.devResources) !== null && _6 !== void 0 ? _6 : [];
+            const list = (_8 = sn.devResources) !== null && _8 !== void 0 ? _8 : [];
             return { resources: list };
         }
         case 'import_component_by_key': {
@@ -2060,7 +2422,7 @@ async function handle(method, params, reqId) {
             return { success: true };
         }
         case 'save_version': {
-            const id = await figma.saveVersionHistoryAsync(String((_7 = params.title) !== null && _7 !== void 0 ? _7 : ''), params.description ? String(params.description) : undefined);
+            const id = await figma.saveVersionHistoryAsync(String((_9 = params.title) !== null && _9 !== void 0 ? _9 : ''), params.description ? String(params.description) : undefined);
             return { id };
         }
         case 'set_annotation': {
@@ -2072,14 +2434,14 @@ async function handle(method, params, reqId) {
             const props = coerce(params.properties);
             const ann = Array.isArray(list)
                 ? list
-                : [{ label: String((_8 = params.label) !== null && _8 !== void 0 ? _8 : ''), properties: props }];
+                : [{ label: String((_10 = params.label) !== null && _10 !== void 0 ? _10 : ''), properties: props }];
             sn.annotations = ann;
             return { success: true, count: ann.length };
         }
         case 'get_annotations': {
             const node = await getNode(params.nodeId);
             const sn = node;
-            return { annotations: (_9 = sn.annotations) !== null && _9 !== void 0 ? _9 : [] };
+            return { annotations: (_11 = sn.annotations) !== null && _11 !== void 0 ? _11 : [] };
         }
         // ---------- tier 3: figjam / vector / shared data / palette / thumbnail ----------
         case 'create_sticky': {
@@ -2098,6 +2460,10 @@ async function handle(method, params, reqId) {
             }
             if (params.author)
                 s.authorName = String(params.author);
+            if (typeof params.authorVisible === 'boolean')
+                s.authorVisible = params.authorVisible;
+            if (typeof params.isWideWidth === 'boolean')
+                s.isWideWidth = params.isWideWidth;
             if (typeof params.x === 'number')
                 s.x = params.x;
             if (typeof params.y === 'number')
@@ -2113,14 +2479,18 @@ async function handle(method, params, reqId) {
             }
             if (params.startNodeId) {
                 const s = await getNode(params.startNodeId);
-                c.connectorStart = { endpointNodeId: s.id, magnet: (_10 = params.startMagnet) !== null && _10 !== void 0 ? _10 : 'AUTO' };
+                c.connectorStart = { endpointNodeId: s.id, magnet: (_12 = params.startMagnet) !== null && _12 !== void 0 ? _12 : 'AUTO' };
             }
             if (params.endNodeId) {
                 const e = await getNode(params.endNodeId);
-                c.connectorEnd = { endpointNodeId: e.id, magnet: (_11 = params.endMagnet) !== null && _11 !== void 0 ? _11 : 'AUTO' };
+                c.connectorEnd = { endpointNodeId: e.id, magnet: (_13 = params.endMagnet) !== null && _13 !== void 0 ? _13 : 'AUTO' };
             }
             if (params.lineType)
                 c.connectorLineType = params.lineType;
+            if (params.startStrokeCap)
+                c.connectorStartStrokeCap = params.startStrokeCap;
+            if (params.endStrokeCap)
+                c.connectorEndStrokeCap = params.endStrokeCap;
             if (params.text) {
                 await figma.loadFontAsync(c.text.fontName);
                 c.text.characters = String(params.text);
@@ -2150,7 +2520,7 @@ async function handle(method, params, reqId) {
             return { id: s.id, type: s.type };
         }
         case 'create_table': {
-            const t = figma.createTable((_12 = params.numRows) !== null && _12 !== void 0 ? _12 : 2, (_13 = params.numColumns) !== null && _13 !== void 0 ? _13 : 2);
+            const t = figma.createTable((_14 = params.numRows) !== null && _14 !== void 0 ? _14 : 2, (_15 = params.numColumns) !== null && _15 !== void 0 ? _15 : 2);
             let parent = figma.currentPage;
             if (params.parentId) {
                 const p = await getNode(params.parentId);
@@ -2230,7 +2600,7 @@ async function handle(method, params, reqId) {
                     detail: 'This file has no public fileKey — figma.fileKey is null. Grip must run as a private org plugin with enablePrivatePluginApi for deep links to work. Not possible for this file.',
                 };
             }
-            const kind = ((_14 = params.kind) !== null && _14 !== void 0 ? _14 : 'design');
+            const kind = ((_16 = params.kind) !== null && _16 !== void 0 ? _16 : 'design');
             // Resolve target: explicit nodeId → first selected → current page.
             let targetId;
             let scope;
@@ -2299,7 +2669,7 @@ async function handle(method, params, reqId) {
             }
             const propName = c.addComponentProperty(String(params.name), params.type, 
             // A SLOT has no default value; accept it omitted.
-            ((_15 = params.defaultValue) !== null && _15 !== void 0 ? _15 : (isSlot ? '' : undefined)), Object.keys(opts).length ? opts : undefined);
+            ((_17 = params.defaultValue) !== null && _17 !== void 0 ? _17 : (isSlot ? '' : undefined)), Object.keys(opts).length ? opts : undefined);
             return { propertyName: propName };
         }
         case 'edit_component_property': {
@@ -2332,10 +2702,23 @@ async function handle(method, params, reqId) {
         }
         case 'reset_instance_overrides': {
             const n = await getNode(params.nodeId);
+            // A SLOT node resets to the component's original slot content.
+            if (n.type === 'SLOT') {
+                const slot = n;
+                if (typeof slot.resetSlot !== 'function')
+                    throw new Error('resetSlot is not available in this Figma version');
+                slot.resetSlot();
+                return { success: true, reset: 'slot' };
+            }
             if (n.type !== 'INSTANCE')
-                throw new Error(`Not an INSTANCE: ${params.nodeId}`);
-            n.resetOverrides();
-            return { success: true };
+                throw new Error(`Not an INSTANCE or SLOT: ${params.nodeId}`);
+            const inst = n;
+            // removeOverrides() supersedes the deprecated resetOverrides(); fall back for older clients.
+            if (typeof inst.removeOverrides === 'function')
+                inst.removeOverrides();
+            else
+                inst.resetOverrides();
+            return { success: true, reset: 'overrides' };
         }
         case 'find_with_criteria': {
             const scope = params.scope ? await getNode(params.scope) : figma.currentPage;
@@ -2349,7 +2732,7 @@ async function handle(method, params, reqId) {
             if (params.sharedPluginData)
                 criteria.sharedPluginData = params.sharedPluginData;
             const out = scope.findAllWithCriteria(criteria);
-            const max = (_16 = params.maxResults) !== null && _16 !== void 0 ? _16 : 200;
+            const max = (_18 = params.maxResults) !== null && _18 !== void 0 ? _18 : 200;
             return out.slice(0, max).map((n) => {
                 var _a, _b;
                 return ({
@@ -2471,7 +2854,7 @@ async function handle(method, params, reqId) {
             return { id: lp.id, type: lp.type };
         }
         case 'create_page_divider': {
-            const d = figma.createPageDivider((_17 = params.name) !== null && _17 !== void 0 ? _17 : '---');
+            const d = figma.createPageDivider((_19 = params.name) !== null && _19 !== void 0 ? _19 : '---');
             return { id: d.id, name: d.name, type: d.type };
         }
         case 'create_slide': {
@@ -2503,7 +2886,7 @@ async function handle(method, params, reqId) {
             const t = figma.timer;
             if (!t)
                 throw new Error('Timer only available in FigJam');
-            t.start(Number((_18 = params.seconds) !== null && _18 !== void 0 ? _18 : 60));
+            t.start(Number((_20 = params.seconds) !== null && _20 !== void 0 ? _20 : 60));
             return { state: t.state, remaining: t.remaining };
         }
         case 'timer_stop': {
@@ -2528,7 +2911,7 @@ async function handle(method, params, reqId) {
             return { state: t.state, remaining: t.remaining };
         }
         case 'get_active_users': {
-            const users = (_19 = figma.activeUsers) !== null && _19 !== void 0 ? _19 : [];
+            const users = (_21 = figma.activeUsers) !== null && _21 !== void 0 ? _21 : [];
             return users.map((u) => ({
                 id: u.id,
                 name: u.name,
@@ -2654,8 +3037,8 @@ async function handle(method, params, reqId) {
             const start = await getNode(params.startNodeId);
             const end = await getNode(params.endNodeId);
             const m = await figma.annotations.addMeasurementAsync({
-                start: { node: start, side: (_20 = params.startSide) !== null && _20 !== void 0 ? _20 : 'TOP' },
-                end: { node: end, side: (_21 = params.endSide) !== null && _21 !== void 0 ? _21 : 'TOP' },
+                start: { node: start, side: (_22 = params.startSide) !== null && _22 !== void 0 ? _22 : 'TOP' },
+                end: { node: end, side: (_23 = params.endSide) !== null && _23 !== void 0 ? _23 : 'TOP' },
                 offset: coerce(params.offset),
                 freeText: params.freeText,
             });
@@ -2780,19 +3163,38 @@ async function handle(method, params, reqId) {
             if (n.type !== 'TABLE')
                 throw new Error(`Not a TABLE: ${params.nodeId}`);
             const cell = n.cellAt(Number(params.row), Number(params.column));
-            return { id: (_22 = cell.id) !== null && _22 !== void 0 ? _22 : null, type: (_23 = cell.type) !== null && _23 !== void 0 ? _23 : 'TABLE_CELL', text: (_24 = cell.text) === null || _24 === void 0 ? void 0 : _24.characters };
+            return { id: (_24 = cell.id) !== null && _24 !== void 0 ? _24 : null, type: (_25 = cell.type) !== null && _25 !== void 0 ? _25 : 'TABLE_CELL', text: (_26 = cell.text) === null || _26 === void 0 ? void 0 : _26.characters };
         }
         case 'slides_get_canvas_grid': {
-            const grid = (_26 = (_25 = figma).getCanvasGrid) === null || _26 === void 0 ? void 0 : _26.call(_25);
+            const grid = (_28 = (_27 = figma).getCanvasGrid) === null || _28 === void 0 ? void 0 : _28.call(_27);
             return grid !== null && grid !== void 0 ? grid : null;
         }
         case 'slides_set_canvas_grid': {
-            (_28 = (_27 = figma).setCanvasGrid) === null || _28 === void 0 ? void 0 : _28.call(_27, coerce(params.grid));
+            (_30 = (_29 = figma).setCanvasGrid) === null || _30 === void 0 ? void 0 : _30.call(_29, coerce(params.grid));
             return { success: true };
         }
         case 'slides_create_canvas_row': {
-            const r = (_30 = (_29 = figma).createCanvasRow) === null || _30 === void 0 ? void 0 : _30.call(_29);
+            const r = (_32 = (_31 = figma).createCanvasRow) === null || _32 === void 0 ? void 0 : _32.call(_31);
             return r ? { id: r.id, type: r.type } : null;
+        }
+        case 'slides_focus_slide': {
+            // Slides editor only. nodeId omitted -> read; nodeId null -> clear; else focus that SLIDE.
+            const page = figma.currentPage;
+            if (params.nodeId === undefined) {
+                const f = page.focusedSlide;
+                return { focusedSlideId: f ? f.id : null };
+            }
+            if (params.nodeId === null) {
+                page.focusedSlide = null;
+            }
+            else {
+                const n = await getNode(params.nodeId);
+                if (n.type !== 'SLIDE')
+                    throw new Error(`Not a SLIDE: ${params.nodeId} (${n.type})`);
+                page.focusedSlide = n;
+            }
+            const f = page.focusedSlide;
+            return { success: true, focusedSlideId: f ? f.id : null };
         }
         case 'slides_move_nodes_to_coord': {
             const ids = asIds(params.nodeIds);
@@ -2802,7 +3204,7 @@ async function handle(method, params, reqId) {
                 if ('parent' in node)
                     nodes.push(node);
             }
-            (_32 = (_31 = figma).moveNodesToCoord) === null || _32 === void 0 ? void 0 : _32.call(_31, nodes, { row: params.row, column: params.column });
+            (_34 = (_33 = figma).moveNodesToCoord) === null || _34 === void 0 ? void 0 : _34.call(_33, nodes, { row: params.row, column: params.column });
             return { success: true };
         }
         case 'set_slide_transition': {
@@ -2843,11 +3245,11 @@ async function handle(method, params, reqId) {
         }
         case 'get_relaunch_data': {
             const n = await getNode(params.nodeId);
-            return (_35 = (_34 = (_33 = n).getRelaunchData) === null || _34 === void 0 ? void 0 : _34.call(_33)) !== null && _35 !== void 0 ? _35 : {};
+            return (_37 = (_36 = (_35 = n).getRelaunchData) === null || _36 === void 0 ? void 0 : _36.call(_35)) !== null && _37 !== void 0 ? _37 : {};
         }
         case 'get_top_level_frame': {
             const n = await getNode(params.nodeId);
-            const top = (_37 = (_36 = n).getTopLevelFrame) === null || _37 === void 0 ? void 0 : _37.call(_36);
+            const top = (_39 = (_38 = n).getTopLevelFrame) === null || _39 === void 0 ? void 0 : _39.call(_38);
             return top ? { id: top.id, name: top.name, type: top.type } : null;
         }
         case 'get_text_content': {
@@ -2893,18 +3295,18 @@ async function handle(method, params, reqId) {
             try {
                 target = await figma.getStyleByIdAsync(id);
             }
-            catch (_55) { }
+            catch (_59) { }
             if (!target) {
                 try {
                     target = await figma.variables.getVariableByIdAsync(id);
                 }
-                catch (_56) { }
+                catch (_60) { }
             }
             if (!target) {
                 try {
                     target = await figma.variables.getVariableCollectionByIdAsync(id);
                 }
-                catch (_57) { }
+                catch (_61) { }
             }
             // Components / component sets: plain node ids ("12:34"). Other id shapes were handled above,
             // and getNode on an unknown id burns its 8s hang-guard, so only try real node-id shapes.
@@ -2912,12 +3314,12 @@ async function handle(method, params, reqId) {
                 try {
                     target = await getNode(id);
                 }
-                catch (_58) { }
+                catch (_62) { }
             }
             if (!target)
                 throw new Error(`No style, variable, variable collection, component or component set found for id: ${id}`);
             if (typeof target.getPublishStatusAsync !== 'function') {
-                throw new Error(`${(_38 = target.type) !== null && _38 !== void 0 ? _38 : 'This node'} has no publish status (components and component sets only)`);
+                throw new Error(`${(_40 = target.type) !== null && _40 !== void 0 ? _40 : 'This node'} has no publish status (components and component sets only)`);
             }
             const status = await target.getPublishStatusAsync();
             return { id, status };
@@ -2966,7 +3368,7 @@ async function handle(method, params, reqId) {
         }
         case 'get_attached_connectors': {
             const n = await getNode(params.nodeId);
-            const list = (_39 = n.attachedConnectors) !== null && _39 !== void 0 ? _39 : [];
+            const list = (_41 = n.attachedConnectors) !== null && _41 !== void 0 ? _41 : [];
             return list.map((c) => ({ id: c.id, name: c.name }));
         }
         case 'set_skip_invisible_instance_children': {
@@ -2978,7 +3380,7 @@ async function handle(method, params, reqId) {
             return n ? { id: n.id, name: n.name, type: n.type } : null;
         }
         case 'load_brushes': {
-            const list = await ((_41 = (_40 = figma).loadBrushesAsync) === null || _41 === void 0 ? void 0 : _41.call(_40));
+            const list = await ((_43 = (_42 = figma).loadBrushesAsync) === null || _43 === void 0 ? void 0 : _43.call(_42));
             return list !== null && list !== void 0 ? list : [];
         }
         // ---------- tier 7 ----------
@@ -3008,6 +3410,26 @@ async function handle(method, params, reqId) {
             if (!v)
                 throw new Error(`Variable not found: ${params.variableId}`);
             c.removeOverridesForVariable(v);
+            return { success: true };
+        }
+        case 'remove_variable_override_for_mode': {
+            // Variable.removeOverrideForMode: drop ONE extended mode's overridden value (back to inherited).
+            const v = await figma.variables.getVariableByIdAsync(String(params.variableId));
+            if (!v)
+                throw new Error(`Variable not found: ${params.variableId}`);
+            const modeId = String((_44 = params.modeId) !== null && _44 !== void 0 ? _44 : '');
+            if (!modeId)
+                throw new Error('modeId is required (an extended collection mode id)');
+            if (params.collectionId) {
+                const c = await figma.variables.getVariableCollectionByIdAsync(String(params.collectionId));
+                if (!c)
+                    throw new Error(`Collection not found: ${params.collectionId}`);
+                if (!c.isExtension)
+                    throw new Error(`Not an extended collection: ${params.collectionId} (only extended collections have overrides)`);
+                if (!c.modes.some((m) => m.modeId === modeId))
+                    throw new Error(`Mode ${modeId} does not belong to collection ${params.collectionId}`);
+            }
+            v.removeOverrideForMode(modeId);
             return { success: true };
         }
         case 'list_library_variables': {
@@ -3077,7 +3499,7 @@ async function handle(method, params, reqId) {
             if (wantEdit) {
                 const fresh = slotKeys().filter((k) => !before.has(k));
                 const propName = typeof params.propertyName === 'string' ? params.propertyName
-                    : (fresh.length === 1 ? fresh[0] : (_42 = slot.componentPropertyReferences) === null || _42 === void 0 ? void 0 : _42.slot);
+                    : (fresh.length === 1 ? fresh[0] : (_45 = slot.componentPropertyReferences) === null || _45 === void 0 ? void 0 : _45.slot);
                 if (!propName) {
                     out.slotSettingsApplied = false;
                     out.warning = 'slot created, but its SLOT property could not be identified — call component_property op=edit with the propertyName from get_node componentPropertyDefinitions';
@@ -3130,7 +3552,7 @@ async function handle(method, params, reqId) {
                     throw new Error('map_nodes swap needs `componentKey` or `componentId`.');
                 const resolved = sw.componentKey ? await importByKey('component', sw.componentKey, () => figma.importComponentByKeyAsync(sw.componentKey)) : await getNode(sw.componentId);
                 if (resolved.type !== 'COMPONENT')
-                    throw new Error(`Swap target not a COMPONENT: ${(_43 = sw.componentKey) !== null && _43 !== void 0 ? _43 : sw.componentId}`);
+                    throw new Error(`Swap target not a COMPONENT: ${(_46 = sw.componentKey) !== null && _46 !== void 0 ? _46 : sw.componentId}`);
                 swapTarget = resolved;
             }
             let applied = 0;
@@ -3243,7 +3665,7 @@ async function handle(method, params, reqId) {
                 throw new Error(`Node ${params.nodeId} (${n.type}) is not animatable`);
             // Forward presetData verbatim — Figma validates it per-preset and its
             // error is surfaced to the caller.
-            const cfg = (_44 = coerce(params.props)) !== null && _44 !== void 0 ? _44 : {};
+            const cfg = (_47 = coerce(params.props)) !== null && _47 !== void 0 ? _47 : {};
             // A CUSTOM animation style (create op) is applied with {type:'CUSTOM'}.
             // Inject it when the caller passed a custom style id and no explicit type.
             if (cfg && typeof cfg === 'object' && cfg.type === undefined && typeof params.styleId === 'string' && params.styleId.startsWith('S:')) {
@@ -3252,7 +3674,7 @@ async function handle(method, params, reqId) {
                     if (st && st.type === 'CUSTOM_ANIMATION')
                         cfg.type = 'CUSTOM';
                 }
-                catch (_59) { }
+                catch (_63) { }
             }
             const appliedId = n.applyAnimationStyle(params.styleId, cfg);
             return { success: true, id: appliedId };
@@ -3285,7 +3707,7 @@ async function handle(method, params, reqId) {
                 try {
                     style.remove();
                 }
-                catch (_60) { }
+                catch (_64) { }
                 throw err;
             }
             return serializeCustomAnimationStyle(style);
@@ -3494,7 +3916,7 @@ async function handle(method, params, reqId) {
             //   coerce(v) / asIds(v)— sanitize string-ish inputs
             //   log(...args)        — collected, returned alongside result
             //   getNode(id)         — async lookup helper
-            const code = String((_45 = params.code) !== null && _45 !== void 0 ? _45 : '');
+            const code = String((_48 = params.code) !== null && _48 !== void 0 ? _48 : '');
             // Inspect the submitted code and push back on patterns that would freeze
             // Figma's single main thread — with a message that teaches the better way.
             const rejection = inspectScript(code);
@@ -3542,15 +3964,34 @@ async function handle(method, params, reqId) {
         }
         case 'set_buzz_asset_type': {
             const n = await getNode(params.nodeId);
-            (_47 = (_46 = figma).setBuzzAssetTypeForNode) === null || _47 === void 0 ? void 0 : _47.call(_46, n, params.assetType);
+            (_50 = (_49 = figma).setBuzzAssetTypeForNode) === null || _50 === void 0 ? void 0 : _50.call(_49, n, params.assetType);
             return { success: true };
         }
         case 'get_buzz_asset_type': {
             const n = await getNode(params.nodeId);
-            const t = (_49 = (_48 = figma).getBuzzAssetTypeForNode) === null || _49 === void 0 ? void 0 : _49.call(_48, n);
+            const t = (_52 = (_51 = figma).getBuzzAssetTypeForNode) === null || _52 === void 0 ? void 0 : _52.call(_51, n);
             return { assetType: t !== null && t !== void 0 ? t : null };
         }
         case 'move_local_style': {
+            if (params.folder !== undefined && params.folder !== null && params.folder !== '') {
+                // Folder reorder: full '/'-delimited folder names; reference null -> first in parent.
+                const folderFns = {
+                    PAINT: 'moveLocalPaintFolderAfter',
+                    TEXT: 'moveLocalTextFolderAfter',
+                    EFFECT: 'moveLocalEffectFolderAfter',
+                    GRID: 'moveLocalGridFolderAfter',
+                };
+                const st = String((_53 = params.styleType) !== null && _53 !== void 0 ? _53 : '').toUpperCase();
+                const ffn = figma[folderFns[st]];
+                if (!folderFns[st])
+                    throw new Error("move_local_style folder: 'styleType' (PAINT | TEXT | EFFECT | GRID) is required");
+                if (typeof ffn !== 'function')
+                    throw new Error(`${folderFns[st]} is not available in this Figma editor/version`);
+                ffn.call(figma, String(params.folder), params.afterFolder ? String(params.afterFolder) : null);
+                return { success: true };
+            }
+            if (!params.styleId)
+                throw new Error("move_local_style: provide 'styleId' (reorder a style) or 'folder' + 'styleType' (reorder a folder)");
             const s = await figma.getStyleByIdAsync(String(params.styleId));
             if (!s)
                 throw new Error(`Style not found: ${params.styleId}`);
@@ -3590,7 +4031,7 @@ async function handle(method, params, reqId) {
             }
             const parent = params.parentId
                 ? (await getNode(params.parentId))
-                : (_50 = comps[0].parent) !== null && _50 !== void 0 ? _50 : figma.currentPage;
+                : (_54 = comps[0].parent) !== null && _54 !== void 0 ? _54 : figma.currentPage;
             const set = typeof params.index === 'number'
                 ? figma.combineAsVariants(comps, parent, params.index)
                 : figma.combineAsVariants(comps, parent);
@@ -3614,7 +4055,7 @@ async function handle(method, params, reqId) {
             const idx = typeof params.paintIndex === 'number' ? params.paintIndex : 0;
             if (idx < 0 || idx >= paints.length)
                 throw new Error(`paintIndex ${idx} out of range (have ${paints.length})`);
-            const field = ((_51 = params.field) !== null && _51 !== void 0 ? _51 : 'color');
+            const field = ((_55 = params.field) !== null && _55 !== void 0 ? _55 : 'color');
             const updated = figma.variables.setBoundVariableForPaint(paints[idx], field, v);
             const next = paints.slice();
             next[idx] = updated;
@@ -3650,6 +4091,8 @@ async function handle(method, params, reqId) {
                 throw new Error(`Unsupported text range property: ${prop}`);
             if (prop === 'fills')
                 fn.call(t, start, end, paintsFromInput(value));
+            else if (TEXT_DETAIL_PROPS.has(prop))
+                fn.call(t, start, end, normalizeTextDetailValue(prop, value));
             else
                 fn.call(t, start, end, value);
             return { success: true };
@@ -3953,6 +4396,8 @@ async function applyProperty(node, property, value) {
     };
     const must = (cond, msg) => { if (!cond)
         not(msg); };
+    if (await applyDevPageComponentProperty(node, property, value))
+        return;
     switch (property) {
         case 'width': {
             must('resize' in node, 'cannot resize');
@@ -4036,6 +4481,23 @@ async function applyProperty(node, property, value) {
             t.textWrapStyle = value;
             return;
         }
+        case 'leadingTrim':
+        case 'listSpacing':
+        case 'hangingPunctuation':
+        case 'hangingList':
+        case 'textDecorationStyle':
+        case 'textDecorationOffset':
+        case 'textDecorationThickness':
+        case 'textDecorationColor':
+        case 'textDecorationSkipInk': {
+            requireText();
+            const t = node;
+            const val = normalizeTextDetailValue(property, value);
+            // These setters require every font in the node loaded.
+            await loadTextNodeFonts(t);
+            t[property] = val;
+            return;
+        }
         case 'fontSize': {
             requireText();
             const t = node;
@@ -4044,14 +4506,26 @@ async function applyProperty(node, property, value) {
             t.fontSize = Number(value);
             return;
         }
-        case 'fills':
+        case 'fills': {
             must(hasFills(node), 'no fills');
-            sn.fills = paintsFromInput(value);
+            const fp = paintsFromInput(value);
+            // PATTERN paints can only be set via the async setter (it loads the pattern's source
+            // node first); a plain assignment throws. Other paints keep the sync path unchanged.
+            if (fp.some((x) => x.type === 'PATTERN') && typeof sn.setFillsAsync === 'function')
+                await sn.setFillsAsync(fp);
+            else
+                sn.fills = fp;
             return;
-        case 'strokes':
+        }
+        case 'strokes': {
             must(hasStrokes(node), 'no strokes');
-            sn.strokes = paintsFromInput(value);
+            const sp = paintsFromInput(value);
+            if (sp.some((x) => x.type === 'PATTERN') && typeof sn.setStrokesAsync === 'function')
+                await sn.setStrokesAsync(sp);
+            else
+                sn.strokes = sp;
             return;
+        }
         case 'effects':
             must('effects' in node, 'no effects');
             // rehydrate so a read-back effect ({hex,opacity} colors, alias shapes)
@@ -4062,6 +4536,28 @@ async function applyProperty(node, property, value) {
             must('layoutGrids' in node, 'no layoutGrids');
             sn.layoutGrids = coerce(value);
             return;
+        case 'isSkippedSlide':
+            must(node.type === 'SLIDE', 'only SLIDE supports isSkippedSlide');
+            sn.isSkippedSlide = Boolean(value);
+            return;
+        case 'authorVisible':
+        case 'isWideWidth':
+        case 'authorName':
+            must(node.type === 'STICKY', 'only FigJam STICKY supports this property');
+            sn[property] = property === 'authorName' ? String(value) : Boolean(value);
+            return;
+        case 'connectorStartStrokeCap':
+        case 'connectorEndStrokeCap':
+            must(node.type === 'CONNECTOR', 'only FigJam CONNECTOR supports stroke caps');
+            sn[property] = String(value);
+            return;
+        case 'textBackground': {
+            // Connector label background. value: Paint[] or {fills: Paint[]}; [] clears it.
+            must(node.type === 'CONNECTOR', 'only FigJam CONNECTOR has textBackground');
+            const v = coerce(value);
+            sn.textBackground.fills = paintsFromInput(Array.isArray(v) ? v : v === null || v === void 0 ? void 0 : v.fills);
+            return;
+        }
         case 'componentProperties': {
             if (node.type !== 'INSTANCE')
                 return not('only INSTANCE supports componentProperties');
@@ -4093,6 +4589,51 @@ async function applyProperty(node, property, value) {
             return;
         }
     }
+    // Layout/shape props with enum or special validation (kept out of the shared buckets above).
+    switch (property) {
+        case 'counterAxisAlignContent': {
+            must(property in node, 'no such property (auto-layout frames only)');
+            if (value !== 'AUTO' && value !== 'SPACE_BETWEEN') {
+                throw new Error(`counterAxisAlignContent must be 'AUTO' | 'SPACE_BETWEEN', got ${JSON.stringify(value)}`);
+            }
+            // Figma throws on a non-wrapping frame; surface a clearer message.
+            if (sn.layoutWrap !== 'WRAP')
+                throw new Error("counterAxisAlignContent only applies when layoutWrap is 'WRAP' — set layoutWrap:'WRAP' first");
+            sn.counterAxisAlignContent = value;
+            return;
+        }
+        case 'maskType': {
+            must(property in node, 'no such property');
+            if (value !== 'ALPHA' && value !== 'VECTOR' && value !== 'LUMINANCE') {
+                throw new Error(`maskType must be 'ALPHA' | 'VECTOR' | 'LUMINANCE', got ${JSON.stringify(value)}`);
+            }
+            // Does not toggle isMask — set isMask:true separately.
+            sn.maskType = value;
+            return;
+        }
+        case 'handleMirroring': {
+            must(property in node, 'only vector-like nodes (VECTOR, STAR, POLYGON, …) have handleMirroring');
+            if (node.type === 'TEXT_PATH')
+                not('read-only on TEXT_PATH nodes');
+            if (value !== 'NONE' && value !== 'ANGLE' && value !== 'ANGLE_AND_LENGTH') {
+                throw new Error(`handleMirroring must be 'NONE' | 'ANGLE' | 'ANGLE_AND_LENGTH', got ${JSON.stringify(value)}`);
+            }
+            sn.handleMirroring = value;
+            return;
+        }
+        case 'numberOfFixedChildren': {
+            must(property in node, 'only frames (scrolling-frame prototyping) have numberOfFixedChildren');
+            const n = Number(value);
+            if (!Number.isInteger(n) || n < 0)
+                throw new Error('numberOfFixedChildren must be a non-negative integer');
+            sn.numberOfFixedChildren = n;
+            return;
+        }
+        case 'overlayPositionType':
+        case 'overlayBackground':
+        case 'overlayBackgroundInteraction':
+            not('read-only in the Figma Plugin API (set the overlay behaviour in the Prototype panel, or via set_reactions OPEN_OVERLAY actions); readable via get_node properties:["' + property + '"]');
+    }
     // For wide-net buckets, validate the property exists on the node before
     // assigning so we can surface a clean "not supported" error.
     if (NUMERIC_PROPS.has(property)) {
@@ -4116,10 +4657,217 @@ async function applyProperty(node, property, value) {
     }
     throw new Error(`Property '${property}' not supported on node type ${node.type}`);
 }
+// set_node_property handlers for devStatus, page setup (guides/backgrounds/flowStartingPoints)
+// and component descriptions. Returns true when `property` was handled here.
+async function applyDevPageComponentProperty(node, property, value) {
+    const n = node;
+    const fail = (msg) => {
+        throw new Error(`Property '${property}' not supported on node type ${node.type}: ${msg}`);
+    };
+    switch (property) {
+        case 'devStatus': {
+            if (!('devStatus' in n))
+                return fail('no Dev Mode status (frames, components, instances and sections only)');
+            let v = coerce(value);
+            if (v === null || v === undefined || v === 'NONE') {
+                n.devStatus = null;
+                return true;
+            }
+            if (typeof v === 'string')
+                v = { type: v };
+            if (!v || typeof v !== 'object' || (v.type !== 'READY_FOR_DEV' && v.type !== 'COMPLETED')) {
+                throw new Error("devStatus must be null (clear) or {type:'READY_FOR_DEV'|'COMPLETED', description?}");
+            }
+            const ds = { type: v.type };
+            if (typeof v.description === 'string')
+                ds.description = v.description;
+            n.devStatus = ds;
+            return true;
+        }
+        case 'description':
+        case 'descriptionMarkdown': {
+            if (node.type !== 'COMPONENT' && node.type !== 'COMPONENT_SET')
+                return false;
+            if (typeof value !== 'string')
+                throw new Error(`${property} must be a string`);
+            n[property] = value;
+            return true;
+        }
+        case 'guides':
+        case 'backgrounds':
+        case 'flowStartingPoints':
+        case 'prototypeStartNode':
+        case 'prototypeStartNodeId': {
+            if (node.type !== 'PAGE')
+                return false;
+            if (property === 'prototypeStartNode' || property === 'prototypeStartNodeId') {
+                throw new Error("prototypeStartNode is read-only in the Figma API (serialized as prototypeStartNodeId); set flowStartingPoints instead");
+            }
+            const page = node;
+            await page.loadAsync();
+            const v = coerce(value);
+            if (property === 'backgrounds') {
+                page.backgrounds = paintsFromInput(v);
+                return true;
+            }
+            if (!Array.isArray(v))
+                throw new Error(`${property} must be an array`);
+            if (property === 'guides') {
+                page.guides = v.map((g) => {
+                    if (!g || (g.axis !== 'X' && g.axis !== 'Y') || typeof g.offset !== 'number')
+                        throw new Error("guides entries must be {axis:'X'|'Y', offset:number}");
+                    return { axis: g.axis, offset: g.offset };
+                });
+                return true;
+            }
+            // flowStartingPoints: [{nodeId, name?}] (a bare node-id string also works); name defaults to the node's name.
+            const pts = [];
+            for (const f of v) {
+                const nodeId = typeof f === 'string' ? f : f === null || f === void 0 ? void 0 : f.nodeId;
+                if (typeof nodeId !== 'string')
+                    throw new Error('flowStartingPoints entries must be {nodeId, name?}');
+                let name = typeof f === 'object' && typeof f.name === 'string' ? f.name : undefined;
+                if (name === undefined)
+                    name = (await getNode(nodeId)).name;
+                pts.push({ nodeId, name });
+            }
+            page.flowStartingPoints = pts;
+            return true;
+        }
+    }
+    return false;
+}
 function assertTextWrapStyle(v) {
     if (v !== 'AUTO' && v !== 'BALANCE' && v !== 'PRETTY') {
         throw new Error(`textWrapStyle must be 'AUTO' | 'BALANCE' | 'PRETTY', got ${JSON.stringify(v)}`);
     }
+}
+// ---------- text details: leadingTrim / list+hanging / decoration extras ----------
+// TextNode props (Figma 1.142) that need the node's fonts loaded to set.
+// Handled by a dedicated case in applyProperty (not the generic buckets).
+// Range variants exist for listSpacing + the five decoration extras only.
+const TEXT_DETAIL_PROPS = new Set([
+    'leadingTrim', 'listSpacing', 'hangingPunctuation', 'hangingList',
+    'textDecorationStyle', 'textDecorationOffset', 'textDecorationThickness',
+    'textDecorationColor', 'textDecorationSkipInk',
+]);
+function textDetailBool(prop, v) {
+    const x = typeof v === 'string' ? (v === 'true' ? true : v === 'false' ? false : v) : v;
+    if (typeof x !== 'boolean')
+        throw new Error(`${prop} must be a boolean, got ${JSON.stringify(v)}`);
+    return x;
+}
+// {value,unit:'PIXELS'|'PERCENT'} | {unit:'AUTO'}; bare 'AUTO' and bare numbers
+// (px) are accepted as shorthand.
+function textDetailLength(prop, raw) {
+    const v = coerce(raw);
+    if (v === 'AUTO')
+        return { unit: 'AUTO' };
+    if (typeof v === 'number' && isFinite(v))
+        return { value: v, unit: 'PIXELS' };
+    if (v && typeof v === 'object') {
+        if (v.unit === 'AUTO')
+            return { unit: 'AUTO' };
+        if ((v.unit === 'PIXELS' || v.unit === 'PERCENT') && typeof v.value === 'number' && isFinite(v.value)) {
+            return { value: v.value, unit: v.unit };
+        }
+    }
+    throw new Error(`${prop} must be {value:number, unit:'PIXELS'|'PERCENT'} or {unit:'AUTO'} (or 'AUTO' / a px number), got ${JSON.stringify(raw)}`);
+}
+// Validate + shape the value for one of TEXT_DETAIL_PROPS (shared by
+// set_node_property and set_text_range_property).
+function normalizeTextDetailValue(prop, raw) {
+    var _a;
+    const v = coerce(raw);
+    switch (prop) {
+        case 'leadingTrim':
+            if (v !== 'CAP_HEIGHT' && v !== 'NONE')
+                throw new Error(`leadingTrim must be 'CAP_HEIGHT' | 'NONE', got ${JSON.stringify(raw)}`);
+            return v;
+        case 'listSpacing': {
+            const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v;
+            if (typeof n !== 'number' || !isFinite(n))
+                throw new Error(`listSpacing must be a number, got ${JSON.stringify(raw)}`);
+            return n;
+        }
+        case 'hangingPunctuation':
+        case 'hangingList':
+        case 'textDecorationSkipInk':
+            return textDetailBool(prop, v);
+        case 'textDecorationStyle':
+            if (v !== 'SOLID' && v !== 'WAVY' && v !== 'DOTTED')
+                throw new Error(`textDecorationStyle must be 'SOLID' | 'WAVY' | 'DOTTED', got ${JSON.stringify(raw)}`);
+            return v;
+        case 'textDecorationOffset':
+        case 'textDecorationThickness':
+            return textDetailLength(prop, v);
+        case 'textDecorationColor': {
+            // {value:'AUTO'} | {value: SolidPaint}; shorthands: 'AUTO', a color string,
+            // or a read-back/solid paint {type:'SOLID',hex|color,opacity} (optionally wrapped in {value}).
+            if (v === 'AUTO')
+                return { value: 'AUTO' };
+            const inner = v && typeof v === 'object' && 'value' in v ? v.value : v;
+            if (inner === 'AUTO')
+                return { value: 'AUTO' };
+            const paintIn = typeof inner === 'string' ? inner : (inner && typeof inner === 'object' ? Object.assign(Object.assign({}, inner), { type: (_a = inner.type) !== null && _a !== void 0 ? _a : 'SOLID' }) : undefined);
+            if (paintIn === undefined)
+                throw new Error(`textDecorationColor must be {value:'AUTO'} or {value:<solid paint>} (or 'AUTO' / a color string), got ${JSON.stringify(raw)}`);
+            const paints = paintsFromInput([paintIn]);
+            if (paints[0].type !== 'SOLID')
+                throw new Error('textDecorationColor only accepts a SOLID paint');
+            return { value: paints[0] };
+        }
+    }
+    return v;
+}
+// Load every font the text node uses (setters require loaded fonts).
+async function loadTextNodeFonts(t) {
+    if (t.characters.length > 0) {
+        const fonts = t.getRangeAllFontNames(0, t.characters.length);
+        await Promise.all(fonts.map((f) => figma.loadFontAsync(f)));
+    }
+    else if (t.fontName !== figma.mixed) {
+        await figma.loadFontAsync(t.fontName);
+    }
+}
+// Read side. `out` gets only defined, non-mixed, non-null values.
+function serializeTextDetails(t, want, out) {
+    const plain = (k) => {
+        if (!want(k))
+            return;
+        const v = t[k];
+        if (v === undefined || v === null || v === figma.mixed)
+            return;
+        out[k] = v;
+    };
+    plain('leadingTrim');
+    plain('listSpacing');
+    plain('hangingPunctuation');
+    plain('hangingList');
+    plain('textDecorationStyle');
+    plain('textDecorationOffset');
+    plain('textDecorationThickness');
+    plain('textDecorationSkipInk');
+    if (want('textDecorationColor')) {
+        const c = t.textDecorationColor;
+        if (c !== undefined && c !== null && c !== figma.mixed)
+            out.textDecorationColor = serializeTextDecorationColor(c);
+    }
+    if (want('hasMissingFont')) {
+        try {
+            if (typeof t.hasMissingFont === 'boolean')
+                out.hasMissingFont = t.hasMissingFont;
+        }
+        catch ( /* older clients / unloaded state: omit */_a) { /* older clients / unloaded state: omit */ }
+    }
+}
+// {value:'AUTO'} | {value:SolidPaint} -> {value:'AUTO'} | {value:{type,hex,opacity,...}}
+function serializeTextDecorationColor(c) {
+    if (!c || typeof c !== 'object' || c.value === undefined)
+        return c;
+    if (c.value && typeof c.value === 'object')
+        return { value: serializePaint(c.value) };
+    return c;
 }
 function paintsFromInput(rawInput) {
     const input = coerce(rawInput);
@@ -4376,6 +5124,18 @@ async function upsertStyle(params) {
             assertTextWrapStyle(params.value.textWrapStyle);
             style.textWrapStyle = params.value.textWrapStyle;
         }
+        // Text-detail fields that live on TextStyle (decoration extras are node/range-only).
+        for (const k of ['leadingTrim', 'listSpacing', 'hangingPunctuation', 'hangingList']) {
+            if (params.value[k] === undefined)
+                continue;
+            const nv = normalizeTextDetailValue(k, params.value[k]);
+            // leadingTrim / list props want the style's font loaded (no-op if already loaded).
+            try {
+                await figma.loadFontAsync(style.fontName);
+            }
+            catch ( /* let the setter report */_a) { /* let the setter report */ }
+            style[k] = nv;
+        }
         if (typeof params.value.paragraphSpacing === 'number')
             style.paragraphSpacing = params.value.paragraphSpacing;
         if (typeof params.value.paragraphIndent === 'number')
@@ -4408,7 +5168,7 @@ async function upsertStyle(params) {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.6.1';
+const PLUGIN_VERSION = '0.7.0';
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
 // if two builds share a number). 'nodeBudget' = bounded serialize is live.

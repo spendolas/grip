@@ -10582,7 +10582,7 @@ var v4_default = v4;
 import { EventEmitter } from "events";
 
 // src/types.ts
-var BRIDGE_VERSION = "0.6.1";
+var BRIDGE_VERSION = "0.7.0";
 
 // src/ws-server.ts
 var REQUEST_TIMEOUT_MS = 1e4;
@@ -23700,7 +23700,8 @@ var MERGED_TOOLS = {
     create: "create_variable_collection",
     delete: "delete_variable_collection",
     extend: "extend_variable_collection",
-    remove_overrides: "remove_variable_overrides"
+    remove_overrides: "remove_variable_overrides",
+    remove_override_for_mode: "remove_variable_override_for_mode"
   } },
   explicit_variable_mode: { discriminator: "op", category: "variables", map: {
     set: "set_explicit_variable_mode",
@@ -23782,6 +23783,7 @@ var MERGED_TOOLS = {
   slides_canvas: { discriminator: "op", category: "slides", map: {
     create_row: "slides_create_canvas_row",
     get_grid: "slides_get_canvas_grid",
+    focus: "slides_focus_slide",
     set_grid: "slides_set_canvas_grid",
     move_nodes: "slides_move_nodes_to_coord"
   } },
@@ -24015,7 +24017,13 @@ var TOOLS = [
   {
     name: "get_variables",
     description: "Returns all local variable collections with descriptions, scopes, codeSyntax, hidden flag, and values per mode.",
-    schema: external_exports.object({})
+    detail: "No params = every local collection and variable. Optional narrowing/resolution params (any combination; the result then lists only collections that still have a matching variable): `variableIds` (array) and `collectionId` limit which variables come back. `resolveFor: <nodeId>` adds per variable `resolved: {value, resolvedType}`, the value as seen by that node (Variable.resolveForConsumer: follows aliases and uses the node's explicit/inherited modes; value is in the same shape as valuesByMode entries; failures become resolved:{error}). `forCollection: <extendedCollectionId>` adds per variable `valuesByModeForCollection: {extendedModeId: value}`, the overridden-or-inherited values in that extended collection (Variable.valuesByModeForCollectionAsync; variables the extension inherits from a non-local parent collection are listed under an id:null group). Both may be combined. For the modes a node resolves to, use get_node/get_nodes with properties:['resolvedVariableModes'] ({collectionId: modeId}), properties:['resolvedVariableModeNames'] (adds collection + mode names), or properties:['inferredVariables'] ({field: [variableId]}; fills/strokes are arrays of arrays indexed like node.fills/strokes): opt-in only, never in default output.",
+    schema: external_exports.object({
+      variableIds: external_exports.array(external_exports.string()).optional(),
+      collectionId: external_exports.string().optional(),
+      resolveFor: external_exports.string().optional(),
+      forCollection: external_exports.string().optional()
+    })
   },
   {
     name: "get_components",
@@ -24099,7 +24107,7 @@ var TOOLS = [
   {
     name: "set_node_property",
     description: "Set any property on a node \u2014 one dispatcher across ~60 props: numeric (x, y, width, height, opacity, cornerRadius, strokeWeight, fontSize, \u2026), boolean (visible, locked, isMask, clipsContent, \u2026), and passthrough (name, layoutMode, fills, strokes, effects, componentProperties, \u2026). Call grip_capabilities {tool:'set_node_property'} for the full prop list, CSS-grid auto-layout props, and new paint/effect shapes (SHADER/VIDEO/GRADIENT_DIAMOND, NOISE/TEXTURE/GLASS/progressive-blur).",
-    detail: `Text: textWrapStyle ('AUTO'|'BALANCE'|'PRETTY', node-wide; fonts auto-loaded; per-range via set_text_range_property \u2014 Figma applies it per paragraph, so a sub-range sets its whole paragraph). fontName takes {family, style?, variationSettings?} \u2014 omit style to let Figma pick the named instance nearest the axes; variationSettings e.g. {wght:550} (axis tags: list_fonts {axesFor:'<family>'}); unknown axes throw. Numeric props (non-exhaustive): x, y, width, height, opacity, rotation, padding*, cornerRadius, individual corner radii (topLeftRadius/topRightRadius/bottomLeftRadius/bottomRightRadius), strokeWeight, fontSize, paragraphSpacing, paragraphIndent, itemSpacing, layoutGrow, min/max width/height, etc. Boolean props: visible, locked, isMask, clipsContent, expanded. Passthrough props (non-exhaustive): name, blendMode, layoutMode, layoutAlign, layoutSizing*, primaryAxisSizingMode/counterAxisSizingMode, strokeAlign/strokeJoin/strokeCap, dashPattern, textAlign*, textCase, textDecoration, textAutoResize, lineHeight, letterSpacing, hyperlink, fillStyleId, fills, strokes, effects, layoutGrids, componentProperties, etc. CSS-grid auto-layout: set layoutMode="GRID" then gridRowCount/gridColumnCount, gridRowGap/gridColumnGap, gridColumnSizes/gridRowSizes (arrays of {type:"FLEX"|"FIXED"|"HUG", value}), gridAutoTracks, gridItemsPositioning; per grid-child gridRowSpan/gridColumnSpan/gridRowAnchorIndex/gridColumnAnchorIndex/gridChildHorizontal|VerticalAlign (or use set_grid_child_position). New paint types on fills/strokes: {type:"GRADIENT_DIAMOND",...}, {type:"SHADER", shaderId,...} (import via import_shader first), {type:"VIDEO",...}. New effect types on effects: {type:"NOISE", noiseType:"MONOTONE"|"DUOTONE"|"MULTITONE", density, noiseSize, color}, {type:"TEXTURE", noiseSize, radius, clipToShape}, {type:"GLASS", refraction, depth, lightIntensity, lightAngle, dispersion, radius}, and progressive blur {type:"LAYER_BLUR"|"BACKGROUND_BLUR", blurType:"PROGRESSIVE", radius, startRadius, startOffset, endOffset}. COLOR SPACES (Figma 141): every color in fills/strokes/effects accepts a #hex, ANY CSS color string ('oklch(0.7 0.1 200)', 'hsl(...)', 'lab(...)', 'rgb(...)', #RRGGBBAA \u2014 alpha becomes paint opacity / color a), or a ColorWithColorSpace {space:"SRGB"|"DISPLAY_P3",r,g,b} | {space:"HSL",h,s,l} | {space:"HSB",h,s,b} | {space:"OKLAB",l,a,b} | {space:"OKLCH",l,c,h}. Paints: {type:"SOLID", hex|color:<any of the above>, sourceColor?, opacity}; gradient stops {position, hex|color, sourceColor?, opacity}; effect colors (color/secondaryColor) take a CSS string, {hex,opacity,sourceColor?} or {space,...}. Reads emit hex (sRGB) PLUS sourceColor ({space,...}) on paints/stops/effect colors when the color was authored in a color space; pass it back as-is to round-trip. If you change hex but leave a stale sourceColor, the sourceColor is dropped (hex wins); to change the authored color, change or drop sourceColor. Non-hex input needs figma.util.rgba (Figma 141+); plain hex works everywhere.`,
+    detail: `Text: textWrapStyle ('AUTO'|'BALANCE'|'PRETTY', node-wide; fonts auto-loaded; per-range via set_text_range_property \u2014 Figma applies it per paragraph, so a sub-range sets its whole paragraph). fontName takes {family, style?, variationSettings?} \u2014 omit style to let Figma pick the named instance nearest the axes; variationSettings e.g. {wght:550} (axis tags: list_fonts {axesFor:'<family>'}); unknown axes throw. TEXT details (fonts of the node auto-loaded; read back by get_node/get_selection): leadingTrim 'CAP_HEIGHT'|'NONE'; listSpacing number; hangingPunctuation/hangingList boolean; textDecorationStyle 'SOLID'|'WAVY'|'DOTTED'; textDecorationOffset / textDecorationThickness {value, unit:'PIXELS'|'PERCENT'} | {unit:'AUTO'} (shorthand: 'AUTO' or a px number); textDecorationColor {value:'AUTO'} | {value:<solid paint {hex|color, opacity}>} (shorthand: 'AUTO' or a color string); textDecorationSkipInk boolean. Decoration extras only take effect while textDecoration is UNDERLINE/STRIKETHROUGH and read back absent otherwise. Reads also include read-only hasMissingFont. Layout/shape: counterAxisAlignContent ('AUTO'|'SPACE_BETWEEN' \u2014 wrap-track alignment; the frame must have layoutWrap:'WRAP' or it errors; read back only when layoutWrap is WRAP, or by naming it in \`properties\`). maskType ('ALPHA'|'VECTOR'|'LUMINANCE' \u2014 does NOT turn the node into a mask; set isMask:true too; reads include maskType on masks). handleMirroring ('NONE'|'ANGLE'|'ANGLE_AND_LENGTH', vector-like nodes; read via properties:['handleMirroring']). numberOfFixedChildren (integer, frames: the top-most N children stay fixed when a scrolling frame scrolls in prototype; reads include it when >0). Overlay settings overlayPositionType / overlayBackground / overlayBackgroundInteraction are READ-ONLY in the Plugin API (reads only via properties:[...]; writes error). fills/strokes accept PATTERN paints ({type:'PATTERN', sourceNodeId, tileType, scalingFactor, spacing:{x,y}, horizontalAlignment}) \u2014 set through the async setter automatically. Opt-in read fields (name them in get_node/get_nodes/get_selection/search_nodes/export_node-JSON \`properties\`; never in default reads): absoluteTransform (2x3 matrix relative to the page), absoluteRenderBounds ({x,y,width,height}|null, includes shadows/strokes), fillGeometry / strokeGeometry (vector paths [{windingRule,data}] \u2014 can be very large; get_node/get_nodes/get_selection still enforce the read_too_large cap, so request them on few nodes), overlay* and handleMirroring. Numeric props (non-exhaustive): x, y, width, height, opacity, rotation, padding*, cornerRadius, individual corner radii (topLeftRadius/topRightRadius/bottomLeftRadius/bottomRightRadius), strokeWeight, fontSize, paragraphSpacing, paragraphIndent, itemSpacing, layoutGrow, min/max width/height, etc. Boolean props: visible, locked, isMask, clipsContent, expanded. Passthrough props (non-exhaustive): name, blendMode, layoutMode, layoutAlign, layoutSizing*, primaryAxisSizingMode/counterAxisSizingMode, strokeAlign/strokeJoin/strokeCap, dashPattern, textAlign*, textCase, textDecoration, textAutoResize, lineHeight, letterSpacing, hyperlink, fillStyleId, fills, strokes, effects, layoutGrids, componentProperties, etc. CSS-grid auto-layout: set layoutMode="GRID" then gridRowCount/gridColumnCount, gridRowGap/gridColumnGap, gridColumnSizes/gridRowSizes (arrays of {type:"FLEX"|"FIXED"|"HUG", value}), gridAutoTracks, gridItemsPositioning; per grid-child gridRowSpan/gridColumnSpan/gridRowAnchorIndex/gridColumnAnchorIndex/gridChildHorizontal|VerticalAlign (or use set_grid_child_position). New paint types on fills/strokes: {type:"GRADIENT_DIAMOND",...}, {type:"SHADER", shaderId,...} (import via import_shader first), {type:"VIDEO",...}. New effect types on effects: {type:"NOISE", noiseType:"MONOTONE"|"DUOTONE"|"MULTITONE", density, noiseSize, color}, {type:"TEXTURE", noiseSize, radius, clipToShape}, {type:"GLASS", refraction, depth, lightIntensity, lightAngle, dispersion, radius}, and progressive blur {type:"LAYER_BLUR"|"BACKGROUND_BLUR", blurType:"PROGRESSIVE", radius, startRadius, startOffset, endOffset}. COLOR SPACES (Figma 141): every color in fills/strokes/effects accepts a #hex, ANY CSS color string ('oklch(0.7 0.1 200)', 'hsl(...)', 'lab(...)', 'rgb(...)', #RRGGBBAA \u2014 alpha becomes paint opacity / color a), or a ColorWithColorSpace {space:"SRGB"|"DISPLAY_P3",r,g,b} | {space:"HSL",h,s,l} | {space:"HSB",h,s,b} | {space:"OKLAB",l,a,b} | {space:"OKLCH",l,c,h}. Paints: {type:"SOLID", hex|color:<any of the above>, sourceColor?, opacity}; gradient stops {position, hex|color, sourceColor?, opacity}; effect colors (color/secondaryColor) take a CSS string, {hex,opacity,sourceColor?} or {space,...}. Reads emit hex (sRGB) PLUS sourceColor ({space,...}) on paints/stops/effect colors when the color was authored in a color space; pass it back as-is to round-trip. If you change hex but leave a stale sourceColor, the sourceColor is dropped (hex wins); to change the authored color, change or drop sourceColor. Non-hex input needs figma.util.rgba (Figma 141+); plain hex works everywhere. DEV MODE / PAGE / COMPONENT: devStatus ({type:'READY_FOR_DEV'|'COMPLETED', description?} | null to clear; only on a node directly under a page/section). descriptionMarkdown + description on COMPONENT/COMPONENT_SET. On a PAGE nodeId: guides [{axis:'X'|'Y',offset}], backgrounds (Paint[]), flowStartingPoints [{nodeId,name?}] (prototypeStartNode is read-only; reads emit prototypeStartNodeId). Reads of these appear on get_node/get_page.`,
     schema: external_exports.object({
       nodeId: external_exports.string(),
       property: external_exports.string(),
@@ -24165,7 +24173,7 @@ var TOOLS = [
   {
     name: "set_style",
     description: "Create or update a local style. Omit styleId to create a new one.",
-    detail: "PAINT value=Paint[]; EFFECT value=Effect[]; GRID value=LayoutGrid[]. TEXT value={fontName, fontSize, lineHeight, letterSpacing, textCase, textDecoration, textWrapStyle, paragraphSpacing, paragraphIndent}. textWrapStyle: 'AUTO'|'BALANCE'|'PRETTY'. fontName is {family, style?, variationSettings?} \u2014 variable fonts: omit style to let Figma resolve the nearest named instance, variationSettings e.g. {wght:550} (discover axes with list_fonts {axesFor:'<family>'}). get_styles returns textWrapStyle and fontName.variationSettings for text styles. PAINT value = Paint[] and EFFECT value = Effect[], in the same shapes get_styles returns ({type,hex,opacity,sourceColor?,stops?} / {type,color:{hex,opacity,sourceColor?},...}). Colors accept #hex, any CSS color string ('oklch(0.7 0.1 200)', 'hsl(...)', 'lab(...)') or {space,...}; sourceColor round-trips (see set_node_property detail, COLOR SPACES).",
+    detail: "PAINT value=Paint[]; EFFECT value=Effect[]; GRID value=LayoutGrid[]. TEXT value={fontName, fontSize, lineHeight, letterSpacing, textCase, textDecoration, textWrapStyle, paragraphSpacing, paragraphIndent}. textWrapStyle: 'AUTO'|'BALANCE'|'PRETTY'. fontName is {family, style?, variationSettings?} \u2014 variable fonts: omit style to let Figma resolve the nearest named instance, variationSettings e.g. {wght:550} (discover axes with list_fonts {axesFor:'<family>'}). get_styles returns textWrapStyle and fontName.variationSettings for text styles. TEXT value also accepts leadingTrim ('CAP_HEIGHT'|'NONE'), listSpacing (number), hangingPunctuation, hangingList (boolean); get_styles returns them too. Text styles have no textDecoration extras (those are node/range-only). PAINT value = Paint[] and EFFECT value = Effect[], in the same shapes get_styles returns ({type,hex,opacity,sourceColor?,stops?} / {type,color:{hex,opacity,sourceColor?},...}). Colors accept #hex, any CSS color string ('oklch(0.7 0.1 200)', 'hsl(...)', 'lab(...)') or {space,...}; sourceColor round-trips (see set_node_property detail, COLOR SPACES).",
     schema: external_exports.object({
       styleId: external_exports.string().optional(),
       name: external_exports.string(),
@@ -24206,10 +24214,13 @@ var TOOLS = [
   {
     name: "move_node",
     description: "Reparent and/or reorder a node. `index` controls z-order within the new parent.",
+    detail: "Params: nodeId, parentId, index?, row?, column?. When parentId is a GRID auto-layout frame, pass BOTH row and column (0-based integers) to place the node in that cell (GridLayoutMixin.appendChildAt); index is then ignored. Returns {id, parentId} (+ row, column for a grid placement). To re-position a node that is already a grid child, use set_grid_child_position instead.",
     schema: external_exports.object({
       nodeId: external_exports.string(),
       parentId: external_exports.string(),
-      index: external_exports.number().int().nonnegative().optional()
+      index: external_exports.number().int().nonnegative().optional(),
+      row: external_exports.number().int().nonnegative().optional(),
+      column: external_exports.number().int().nonnegative().optional()
     })
   },
   {
@@ -24329,9 +24340,9 @@ var TOOLS = [
   {
     name: "variable_collection",
     category: "variables",
-    description: "Create, delete or extend a variable collection, or clear an extension's overrides. `op`: create ({name}) | delete ({collectionId}) | extend ({collectionId, name}) | remove_overrides ({collectionId, variableId}). Call grip_capabilities {tool:'variable_collection'} for per-op params.",
-    detail: "op=create: create a new local variable collection with one default mode (was create_variable_collection) \u2014 {name} \u2192 returns {id, defaultModeId}. op=delete: delete a variable collection and all its variables (was delete_variable_collection) \u2014 {collectionId}. op=extend: create an EXTENDED collection from a LOCAL collection \u2014 {collectionId, name} \u2192 {id, name, isExtension:true, parentVariableCollectionId, rootVariableCollectionId, variableOverrides} (Enterprise plan only: other plans throw 'Cannot create extended collections outside of enterprise plan'; to extend a published library collection use extend_library_collection_by_key). op=remove_overrides: clear every overridden value of one variable in an extended collection \u2014 {collectionId (an extended collection), variableId} \u2192 {success}. To OVERRIDE a value in an extended collection, call set_variable_value with the extended collection's own modeId (get_variables shows each extended mode's parentModeId and the collection's variableOverrides).",
-    schema: external_exports.object({ op: external_exports.enum(["create", "delete", "extend", "remove_overrides"]) }).passthrough()
+    description: "Create, delete or extend a variable collection, or clear an extension's overrides. `op`: create ({name}) | delete ({collectionId}) | extend ({collectionId, name}) | remove_overrides ({collectionId, variableId}) | remove_override_for_mode ({variableId, modeId, collectionId?}). Call grip_capabilities {tool:'variable_collection'} for per-op params.",
+    detail: "op=create: create a new local variable collection with one default mode (was create_variable_collection) \u2014 {name} \u2192 returns {id, defaultModeId}. op=delete: delete a variable collection and all its variables (was delete_variable_collection) \u2014 {collectionId}. op=extend: create an EXTENDED collection from a LOCAL collection \u2014 {collectionId, name} \u2192 {id, name, isExtension:true, parentVariableCollectionId, rootVariableCollectionId, variableOverrides} (Enterprise plan only: other plans throw 'Cannot create extended collections outside of enterprise plan'; to extend a published library collection use extend_library_collection_by_key). op=remove_overrides: clear every overridden value of one variable in an extended collection \u2014 {collectionId (an extended collection), variableId} \u2192 {success}. op=remove_override_for_mode: clear the override of ONE extended mode, returning it to the inherited value (Variable.removeOverrideForMode) \u2014 {variableId, modeId (an EXTENDED collection's mode id), collectionId? (the extended collection; when given, it is validated as an extension that owns modeId)} \u2192 {success}. To OVERRIDE a value in an extended collection, call set_variable_value with the extended collection's own modeId (get_variables shows each extended mode's parentModeId and the collection's variableOverrides).",
+    schema: external_exports.object({ op: external_exports.enum(["create", "delete", "extend", "remove_overrides", "remove_override_for_mode"]) }).passthrough()
   },
   {
     name: "variable",
@@ -24350,13 +24361,13 @@ var TOOLS = [
   {
     name: "set_variable_meta",
     description: "Update a variable's metadata (name, description, scopes, codeSyntax, hiddenFromPublishing). Values are unchanged \u2014 use set_variable_value for those.",
-    detail: "scopes accepts any of: ALL_SCOPES, TEXT_CONTENT, CORNER_RADIUS, WIDTH_HEIGHT, GAP, ALL_FILLS, FRAME_FILL, SHAPE_FILL, TEXT_FILL, STROKE_COLOR, STROKE_FLOAT, EFFECT_FLOAT, EFFECT_COLOR, OPACITY, COLOR_OPACITY (FLOAT variables only \u2014 a COLOR variable is rejected; the opacity input of a composed color; Update 139), FONT_FAMILY, FONT_STYLE, FONT_WEIGHT, FONT_SIZE, LINE_HEIGHT, LETTER_SPACING, PARAGRAPH_SPACING, PARAGRAPH_INDENT. Scopes only control where the variable appears in Figma's variable pickers; they do not block API bindings.",
+    detail: "scopes accepts any of: ALL_SCOPES, TEXT_CONTENT, CORNER_RADIUS, WIDTH_HEIGHT, GAP, ALL_FILLS, FRAME_FILL, SHAPE_FILL, TEXT_FILL, STROKE_COLOR, STROKE_FLOAT, EFFECT_FLOAT, EFFECT_COLOR, OPACITY, COLOR_OPACITY (FLOAT variables only \u2014 a COLOR variable is rejected; the opacity input of a composed color; Update 139), FONT_FAMILY, FONT_STYLE, FONT_WEIGHT, FONT_SIZE, LINE_HEIGHT, LETTER_SPACING, PARAGRAPH_SPACING, PARAGRAPH_INDENT. Scopes only control where the variable appears in Figma's variable pickers; they do not block API bindings. codeSyntax is {WEB|ANDROID|iOS: string}; a platform set to null REMOVES its definition (e.g. {WEB:'--x', ANDROID:null}).",
     schema: external_exports.object({
       variableId: external_exports.string(),
       name: external_exports.string().optional(),
       description: external_exports.string().optional(),
       scopes: external_exports.array(external_exports.string()).optional(),
-      codeSyntax: external_exports.record(external_exports.string()).optional(),
+      codeSyntax: external_exports.record(external_exports.string().nullable()).optional(),
       hiddenFromPublishing: external_exports.boolean().optional()
     })
   },
@@ -24422,7 +24433,7 @@ var TOOLS = [
   },
   {
     name: "get_styled_text_segments",
-    description: "Read per-range styled segments from a TEXT node. fields defaults to a sensible style set.",
+    description: "Read per-range styled segments from a TEXT node. fields defaults to a sensible style set; also accepts textWrapStyle, listSpacing, indentation, textDecorationStyle/Offset/Thickness/Color/SkipInk.",
     schema: external_exports.object({
       nodeId: external_exports.string(),
       fields: external_exports.array(external_exports.string()).optional(),
@@ -24534,6 +24545,8 @@ var TOOLS = [
     schema: external_exports.object({
       text: external_exports.string().optional(),
       author: external_exports.string().optional(),
+      authorVisible: external_exports.boolean().optional(),
+      isWideWidth: external_exports.boolean().optional(),
       parentId: external_exports.string().optional(),
       x: external_exports.number().optional(),
       y: external_exports.number().optional()
@@ -24548,6 +24561,8 @@ var TOOLS = [
       startMagnet: external_exports.enum(["AUTO", "TOP", "BOTTOM", "LEFT", "RIGHT", "CENTER"]).optional(),
       endMagnet: external_exports.enum(["AUTO", "TOP", "BOTTOM", "LEFT", "RIGHT", "CENTER"]).optional(),
       lineType: external_exports.enum(["STRAIGHT", "ELBOWED"]).optional(),
+      startStrokeCap: external_exports.string().optional(),
+      endStrokeCap: external_exports.string().optional(),
       text: external_exports.string().optional(),
       parentId: external_exports.string().optional()
     })
@@ -24634,6 +24649,7 @@ var TOOLS = [
   {
     name: "reset_instance_overrides",
     description: "Reset all overrides on an INSTANCE.",
+    detail: 'Also accepts a SLOT nodeId (resetSlot). INSTANCE: removeOverrides() (resetOverrides on older clients). SLOT node: resetSlot(). Returns {success, reset:"overrides"|"slot"}.',
     schema: external_exports.object({ nodeId: external_exports.string() })
   },
   {
@@ -24779,9 +24795,9 @@ var TOOLS = [
   {
     name: "slides_canvas",
     category: "slides",
-    description: "Slides editor only. Create/read/write the canvas row grid, or move nodes to a grid coordinate. `op`: create_row ({}) | get_grid ({}) | set_grid ({grid}) | move_nodes ({nodeIds, row, column}). Call grip_capabilities {tool:'slides_canvas'} for per-op params.",
-    detail: "op=create_row: create a new canvas row (was slides_create_canvas_row) \u2014 {}. op=get_grid: read the current canvas grid (was slides_get_canvas_grid) \u2014 {}. op=set_grid: set the canvas grid (was slides_set_canvas_grid) \u2014 {grid}. op=move_nodes: move nodes to a (row, column) coordinate (was slides_move_nodes_to_coord) \u2014 {nodeIds, row, column}.",
-    schema: external_exports.object({ op: external_exports.enum(["create_row", "get_grid", "set_grid", "move_nodes"]) }).passthrough()
+    description: "Slides editor only. Create/read/write the canvas row grid, or move nodes to a grid coordinate. `op`: create_row ({}) | get_grid ({}) | set_grid ({grid}) | move_nodes ({nodeIds, row, column}) | focus ({nodeId?}). Call grip_capabilities {tool:'slides_canvas'} for per-op params.",
+    detail: "op=create_row: create a new canvas row (was slides_create_canvas_row) \u2014 {}. op=get_grid: read the current canvas grid (was slides_get_canvas_grid) \u2014 {}. op=set_grid: set the canvas grid (was slides_set_canvas_grid) \u2014 {grid}. op=move_nodes: move nodes to a (row, column) coordinate (was slides_move_nodes_to_coord) \u2014 {nodeIds, row, column}. op=focus: the slide shown in single-slide view (page.focusedSlide) \u2014 {} reads {focusedSlideId}; {nodeId: '<SLIDE id>'} focuses it; {nodeId: null} clears. (SLIDE nodes also carry isSkippedSlide: read in get_node, write via set_node_property.)",
+    schema: external_exports.object({ op: external_exports.enum(["create_row", "get_grid", "set_grid", "move_nodes", "focus"]) }).passthrough()
   },
   { name: "set_slide_transition", description: "Slides editor: set transition on a SLIDE node.", schema: external_exports.object({ nodeId: external_exports.string(), transition: external_exports.any() }) },
   { name: "get_slide_transition", description: "Slides editor: read a SLIDE node's transition.", schema: external_exports.object({ nodeId: external_exports.string() }) },
@@ -24890,7 +24906,7 @@ var TOOLS = [
   },
   { name: "set_buzz_asset_type", description: "Buzz only: tag a node's buzz asset type.", schema: external_exports.object({ nodeId: external_exports.string(), assetType: external_exports.string() }) },
   { name: "get_buzz_asset_type", description: "Buzz only: read a node's buzz asset type.", schema: external_exports.object({ nodeId: external_exports.string() }) },
-  { name: "move_local_style", description: "Reorder a local style (paint/text/effect/grid). afterStyleId omitted moves to first.", schema: external_exports.object({ styleId: external_exports.string(), afterStyleId: external_exports.string().optional() }) },
+  { name: "move_local_style", description: "Reorder a local style (paint/text/effect/grid): {styleId, afterStyleId?} (omit afterStyleId = first). Or reorder a style FOLDER: {folder, styleType, afterFolder?} ('/'-delimited full folder names; same parent; omit afterFolder = first).", schema: external_exports.object({ styleId: external_exports.string().optional(), afterStyleId: external_exports.string().optional(), folder: external_exports.string().optional(), afterFolder: external_exports.string().optional(), styleType: external_exports.enum(["PAINT", "TEXT", "EFFECT", "GRID"]).optional() }) },
   { name: "delete_style", description: "Delete a local style by id. Counterpart to set_style (which creates/updates).", schema: external_exports.object({ styleId: external_exports.string() }) },
   // ---------- variants + paint variable binding ----------
   {
@@ -24907,7 +24923,7 @@ var TOOLS = [
   {
     name: "set_text_range_property",
     description: "Apply a per-range property to part of a TEXT node. property: fills, fontName, fontSize, fontWeight, lineHeight, letterSpacing, textCase, textDecoration, hyperlink, listOptions, paragraphSpacing, paragraphIndent.",
-    detail: "Calls Figma's setRange<Property>(start,end,value) after loading the range's fonts. Also: property 'textWrapStyle' -> 'AUTO'|'BALANCE'|'PRETTY' (applies to the paragraph(s) containing the range; validated). property 'fontName' -> {family, style?, variationSettings?}: the target font is auto-loaded; omit style to get the named instance nearest the axes (e.g. {family:'Inter', variationSettings:{wght:650}}); unknown axis tags throw (see list_fonts {axesFor}). Read back per range with get_styled_text_segments fields ['fontName','textWrapStyle'].",
+    detail: "Calls Figma's setRange<Property>(start,end,value) after loading the range's fonts. Also: property 'textWrapStyle' -> 'AUTO'|'BALANCE'|'PRETTY' (applies to the paragraph(s) containing the range; validated). property 'fontName' -> {family, style?, variationSettings?}: the target font is auto-loaded; omit style to get the named instance nearest the axes (e.g. {family:'Inter', variationSettings:{wght:650}}); unknown axis tags throw (see list_fonts {axesFor}). Read back per range with get_styled_text_segments fields ['fontName','textWrapStyle']. Also per-range: listSpacing (number); textDecorationStyle 'SOLID'|'WAVY'|'DOTTED'; textDecorationOffset / textDecorationThickness {value, unit:'PIXELS'|'PERCENT'} | {unit:'AUTO'} ('AUTO' / px number shorthand ok); textDecorationColor {value:'AUTO'} | {value:<solid paint>} ('AUTO' / color string ok); textDecorationSkipInk boolean \u2014 values validated. leadingTrim / hangingPunctuation / hangingList have no range setter (node-wide via set_node_property). Read back via get_styled_text_segments fields ['textDecorationStyle','textDecorationOffset','textDecorationThickness','textDecorationColor','textDecorationSkipInk','listSpacing'] (color is hex-encoded).",
     schema: external_exports.object({
       nodeId: external_exports.string(),
       start: external_exports.number().int().nonnegative(),
@@ -24945,7 +24961,7 @@ var richReadProps = {
   properties: {
     type: "array",
     items: { type: "string" },
-    description: "Whitelist of top-level fields to include. Omit to return all."
+    description: "Whitelist of top-level fields to include. Omit to return all. Opt-in only (never in default output, name them here): resolvedVariableModes ({collectionId: modeId}), resolvedVariableModeNames (adds collection/mode names), inferredVariables ({field: [variableId]})."
   }
 };
 function toolInputSchema(name) {
@@ -24955,8 +24971,18 @@ function toolInputSchema(name) {
     case "list_files":
     case "get_document":
     case "get_styles":
-    case "get_variables":
       return { type: "object", properties: {}, additionalProperties: false };
+    case "get_variables":
+      return {
+        type: "object",
+        properties: {
+          variableIds: { type: "array", items: { type: "string" }, description: "Only these variables" },
+          collectionId: { type: "string", description: "Only variables of this collection" },
+          resolveFor: { type: "string", description: "Node id: add per-variable resolved {value, resolvedType} for that node (follows aliases + its modes)" },
+          forCollection: { type: "string", description: "Extended collection id: add per-variable valuesByModeForCollection (overridden-or-inherited per extended mode)" }
+        },
+        additionalProperties: false
+      };
     case "set_active_file":
       return {
         type: "object",
@@ -25213,7 +25239,9 @@ function toolInputSchema(name) {
         properties: {
           nodeId: { type: "string" },
           parentId: { type: "string" },
-          index: { type: "integer" }
+          index: { type: "integer" },
+          row: { type: "integer", description: "GRID parent only: 0-based row (with column) \u2014 appendChildAt" },
+          column: { type: "integer", description: "GRID parent only: 0-based column (with row)" }
         },
         required: ["nodeId", "parentId"],
         additionalProperties: false
@@ -25440,7 +25468,7 @@ function toolInputSchema(name) {
           name: { type: "string" },
           description: { type: "string" },
           scopes: { type: "array", items: { type: "string" } },
-          codeSyntax: { type: "object" },
+          codeSyntax: { type: "object", description: "{WEB|ANDROID|iOS: string}; a platform set to null removes its definition" },
           hiddenFromPublishing: { type: "boolean" }
         },
         required: ["variableId"],
@@ -25639,6 +25667,8 @@ function toolInputSchema(name) {
         properties: {
           text: { type: "string" },
           author: { type: "string" },
+          authorVisible: { type: "boolean" },
+          isWideWidth: { type: "boolean" },
           parentId: { type: "string" },
           x: { type: "number" },
           y: { type: "number" }
@@ -25654,6 +25684,8 @@ function toolInputSchema(name) {
           startMagnet: { type: "string", enum: ["AUTO", "TOP", "BOTTOM", "LEFT", "RIGHT", "CENTER"] },
           endMagnet: { type: "string", enum: ["AUTO", "TOP", "BOTTOM", "LEFT", "RIGHT", "CENTER"] },
           lineType: { type: "string", enum: ["STRAIGHT", "ELBOWED"] },
+          startStrokeCap: { type: "string", description: "NONE | ARROW_EQUILATERAL | ARROW_LINES | TRIANGLE_FILLED | DIAMOND_FILLED | CIRCLE_FILLED | ERD_*" },
+          endStrokeCap: { type: "string", description: "same values as startStrokeCap" },
           text: { type: "string" },
           parentId: { type: "string" }
         },
