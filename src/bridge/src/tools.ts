@@ -113,7 +113,8 @@ export const MERGED_TOOLS: Record<string, {
     create: 'create_variable', delete: 'delete_variable' } },
   variable_collection: { discriminator: 'op', category: 'variables', map: {
     create: 'create_variable_collection', delete: 'delete_variable_collection',
-    extend: 'extend_variable_collection', remove_overrides: 'remove_variable_overrides' } },
+    extend: 'extend_variable_collection', remove_overrides: 'remove_variable_overrides',
+    remove_override_for_mode: 'remove_variable_override_for_mode' } },
   explicit_variable_mode: { discriminator: 'op', category: 'variables', map: {
     set: 'set_explicit_variable_mode', clear: 'clear_explicit_variable_mode' } },
   annotation_category: { discriminator: 'op', category: 'devmode', map: {
@@ -403,7 +404,13 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'get_variables',
     description: 'Returns all local variable collections with descriptions, scopes, codeSyntax, hidden flag, and values per mode.',
-    schema: z.object({}),
+    detail: "No params = every local collection and variable. Optional narrowing/resolution params (any combination; the result then lists only collections that still have a matching variable): `variableIds` (array) and `collectionId` limit which variables come back. `resolveFor: <nodeId>` adds per variable `resolved: {value, resolvedType}`, the value as seen by that node (Variable.resolveForConsumer: follows aliases and uses the node's explicit/inherited modes; value is in the same shape as valuesByMode entries; failures become resolved:{error}). `forCollection: <extendedCollectionId>` adds per variable `valuesByModeForCollection: {extendedModeId: value}`, the overridden-or-inherited values in that extended collection (Variable.valuesByModeForCollectionAsync; variables the extension inherits from a non-local parent collection are listed under an id:null group). Both may be combined. For the modes a node resolves to, use get_node/get_nodes with properties:['resolvedVariableModes'] ({collectionId: modeId}), properties:['resolvedVariableModeNames'] (adds collection + mode names), or properties:['inferredVariables'] ({field: [variableId]}; fills/strokes are arrays of arrays indexed like node.fills/strokes): opt-in only, never in default output.",
+    schema: z.object({
+      variableIds: z.array(z.string()).optional(),
+      collectionId: z.string().optional(),
+      resolveFor: z.string().optional(),
+      forCollection: z.string().optional(),
+    }),
   },
   {
     name: 'get_components',
@@ -730,9 +737,9 @@ export const TOOLS: ToolDef[] = [
   // ---------- variables: lifecycle ----------
   {
     name: 'variable_collection', category: 'variables',
-    description: "Create, delete or extend a variable collection, or clear an extension's overrides. `op`: create ({name}) | delete ({collectionId}) | extend ({collectionId, name}) | remove_overrides ({collectionId, variableId}). Call grip_capabilities {tool:'variable_collection'} for per-op params.",
-    detail: "op=create: create a new local variable collection with one default mode (was create_variable_collection) — {name} → returns {id, defaultModeId}. op=delete: delete a variable collection and all its variables (was delete_variable_collection) — {collectionId}. op=extend: create an EXTENDED collection from a LOCAL collection — {collectionId, name} → {id, name, isExtension:true, parentVariableCollectionId, rootVariableCollectionId, variableOverrides} (Enterprise plan only: other plans throw 'Cannot create extended collections outside of enterprise plan'; to extend a published library collection use extend_library_collection_by_key). op=remove_overrides: clear every overridden value of one variable in an extended collection — {collectionId (an extended collection), variableId} → {success}. To OVERRIDE a value in an extended collection, call set_variable_value with the extended collection's own modeId (get_variables shows each extended mode's parentModeId and the collection's variableOverrides).",
-    schema: z.object({ op: z.enum(['create', 'delete', 'extend', 'remove_overrides']) }).passthrough(),
+    description: "Create, delete or extend a variable collection, or clear an extension's overrides. `op`: create ({name}) | delete ({collectionId}) | extend ({collectionId, name}) | remove_overrides ({collectionId, variableId}) | remove_override_for_mode ({variableId, modeId, collectionId?}). Call grip_capabilities {tool:'variable_collection'} for per-op params.",
+    detail: "op=create: create a new local variable collection with one default mode (was create_variable_collection) — {name} → returns {id, defaultModeId}. op=delete: delete a variable collection and all its variables (was delete_variable_collection) — {collectionId}. op=extend: create an EXTENDED collection from a LOCAL collection — {collectionId, name} → {id, name, isExtension:true, parentVariableCollectionId, rootVariableCollectionId, variableOverrides} (Enterprise plan only: other plans throw 'Cannot create extended collections outside of enterprise plan'; to extend a published library collection use extend_library_collection_by_key). op=remove_overrides: clear every overridden value of one variable in an extended collection — {collectionId (an extended collection), variableId} → {success}. op=remove_override_for_mode: clear the override of ONE extended mode, returning it to the inherited value (Variable.removeOverrideForMode) — {variableId, modeId (an EXTENDED collection's mode id), collectionId? (the extended collection; when given, it is validated as an extension that owns modeId)} → {success}. To OVERRIDE a value in an extended collection, call set_variable_value with the extended collection's own modeId (get_variables shows each extended mode's parentModeId and the collection's variableOverrides).",
+    schema: z.object({ op: z.enum(['create', 'delete', 'extend', 'remove_overrides', 'remove_override_for_mode']) }).passthrough(),
   },
   {
     name: 'variable', category: 'variables',
@@ -749,13 +756,13 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'set_variable_meta',
     description: "Update a variable's metadata (name, description, scopes, codeSyntax, hiddenFromPublishing). Values are unchanged — use set_variable_value for those.",
-    detail: "scopes accepts any of: ALL_SCOPES, TEXT_CONTENT, CORNER_RADIUS, WIDTH_HEIGHT, GAP, ALL_FILLS, FRAME_FILL, SHAPE_FILL, TEXT_FILL, STROKE_COLOR, STROKE_FLOAT, EFFECT_FLOAT, EFFECT_COLOR, OPACITY, COLOR_OPACITY (FLOAT variables only — a COLOR variable is rejected; the opacity input of a composed color; Update 139), FONT_FAMILY, FONT_STYLE, FONT_WEIGHT, FONT_SIZE, LINE_HEIGHT, LETTER_SPACING, PARAGRAPH_SPACING, PARAGRAPH_INDENT. Scopes only control where the variable appears in Figma's variable pickers; they do not block API bindings.",
+    detail: "scopes accepts any of: ALL_SCOPES, TEXT_CONTENT, CORNER_RADIUS, WIDTH_HEIGHT, GAP, ALL_FILLS, FRAME_FILL, SHAPE_FILL, TEXT_FILL, STROKE_COLOR, STROKE_FLOAT, EFFECT_FLOAT, EFFECT_COLOR, OPACITY, COLOR_OPACITY (FLOAT variables only — a COLOR variable is rejected; the opacity input of a composed color; Update 139), FONT_FAMILY, FONT_STYLE, FONT_WEIGHT, FONT_SIZE, LINE_HEIGHT, LETTER_SPACING, PARAGRAPH_SPACING, PARAGRAPH_INDENT. Scopes only control where the variable appears in Figma's variable pickers; they do not block API bindings. codeSyntax is {WEB|ANDROID|iOS: string}; a platform set to null REMOVES its definition (e.g. {WEB:'--x', ANDROID:null}).",
     schema: z.object({
       variableId: z.string(),
       name: z.string().optional(),
       description: z.string().optional(),
       scopes: z.array(z.string()).optional(),
-      codeSyntax: z.record(z.string()).optional(),
+      codeSyntax: z.record(z.string().nullable()).optional(),
       hiddenFromPublishing: z.boolean().optional(),
     }),
   },
@@ -1351,7 +1358,7 @@ const richReadProps = {
   properties: {
     type: 'array',
     items: { type: 'string' },
-    description: 'Whitelist of top-level fields to include. Omit to return all.',
+    description: 'Whitelist of top-level fields to include. Omit to return all. Opt-in only (never in default output, name them here): resolvedVariableModes ({collectionId: modeId}), resolvedVariableModeNames (adds collection/mode names), inferredVariables ({field: [variableId]}).',
   },
 };
 
@@ -1362,8 +1369,18 @@ export function toolInputSchema(name: string): Record<string, unknown> {
     case 'list_files':
     case 'get_document':
     case 'get_styles':
-    case 'get_variables':
       return { type: 'object', properties: {}, additionalProperties: false };
+    case 'get_variables':
+      return {
+        type: 'object',
+        properties: {
+          variableIds: { type: 'array', items: { type: 'string' }, description: 'Only these variables' },
+          collectionId: { type: 'string', description: 'Only variables of this collection' },
+          resolveFor: { type: 'string', description: 'Node id: add per-variable resolved {value, resolvedType} for that node (follows aliases + its modes)' },
+          forCollection: { type: 'string', description: 'Extended collection id: add per-variable valuesByModeForCollection (overridden-or-inherited per extended mode)' },
+        },
+        additionalProperties: false,
+      };
     case 'set_active_file':
       return {
         type: 'object',
@@ -1847,7 +1864,7 @@ export function toolInputSchema(name: string): Record<string, unknown> {
           name: { type: 'string' },
           description: { type: 'string' },
           scopes: { type: 'array', items: { type: 'string' } },
-          codeSyntax: { type: 'object' },
+          codeSyntax: { type: 'object', description: '{WEB|ANDROID|iOS: string}; a platform set to null removes its definition' },
           hiddenFromPublishing: { type: 'boolean' },
         },
         required: ['variableId'],

@@ -73,7 +73,11 @@ All local paint / text / effect / grid styles.
 
 ### `get_variables`
 All local variable collections + variables.
-- Params: none.
+- Params: none for the full dump. Optional (additive, any combination; the result then lists only collections that still have a matching variable, each variable as `{ id, name, key, resolvedType, remote, valuesByMode, ... }`):
+  - `variableIds` (array) / `collectionId` — narrow which variables return.
+  - `resolveFor: <nodeId>` — adds `resolved: { value, resolvedType }` per variable: the value as seen by that node (`Variable.resolveForConsumer`; follows aliases and the node's explicit/inherited modes; `value` uses the same shapes as `valuesByMode`: `{hex,opacity}`, composed colors, EASING objects, plain numbers/strings/booleans). A variable that can't be resolved yields `resolved: { error }`.
+  - `forCollection: <extendedCollectionId>` — adds `valuesByModeForCollection: { extendedModeId: value }` per variable: the overridden-or-inherited values in that extended collection (`Variable.valuesByModeForCollectionAsync`). Without `variableIds`/`collectionId`, also lists the extension's variables that live in non-local parent collections under a group with `id: null`.
+  - Node-side variable state is read via `get_node`/`get_nodes`/`search_nodes` `properties` (opt-in, never in default output): `resolvedVariableModes` (`{ collectionId: modeId }`, explicit + inherited), `resolvedVariableModeNames` (`{ collectionId: { collection, mode } }`), `inferredVariables` (`{ field: [variableId] }`; `fills`/`strokes` are arrays of arrays indexed like `node.fills`/`node.strokes`). Fields with nothing to report are omitted.
 - Returns: array of collections; variables include `description`, `scopes`, `codeSyntax`, `hiddenFromPublishing`, `key`, `remote`, `valuesByMode`. Color values emit `{ hex, opacity }`. Aliases emit `{ aliasOf: id }`. Composed colors emit `{ color: {hex,opacity}|{aliasOf}, opacity: number|{aliasOf} }`. Every collection carries `isExtension`; **extended** collections (a collection that extends another, e.g. from a library) also carry `parentVariableCollectionId`, `rootVariableCollectionId` and `variableOverrides` (`{ variableId: { extendedModeId: value } }`, values in the shapes above), and their `modes` include `parentModeId`. Extended collections list only their own variables here; the inherited ones appear under the parent.
 
 ### `get_components`
@@ -265,6 +269,7 @@ Merged: create/delete a local variable collection, dispatched on `op`.
 - `op: 'delete'` — `{ op, collectionId }` → `{ success: true }`. Deletes the collection and all its variables.
 - `op: 'extend'` — `{ op, collectionId, name }` → `{ id, name, isExtension: true, parentVariableCollectionId, rootVariableCollectionId, variableOverrides }`. Creates an **extended** collection from a local collection (Enterprise plan only).
 - `op: 'remove_overrides'` — `{ op, collectionId (extended), variableId }` → `{ success: true }`. Clears every overridden value of that variable in the extended collection. To *set* an override, use `set_variable_value` with the extended collection's own `modeId`.
+- `op: 'remove_override_for_mode'` — `{ op, variableId, modeId (an EXTENDED collection's mode id), collectionId? }` → `{ success: true }`. Clears the override of just that one extended mode so it returns to the inherited value (`Variable.removeOverrideForMode`). When `collectionId` is given it is validated as an extension that owns `modeId`.
 
 ### `variable`
 Merged: create/delete a variable, dispatched on `op`.
@@ -289,6 +294,7 @@ Merged: set/clear a node's explicit mode override for a collection, dispatched o
 ### `set_variable_meta`
 Update a variable's metadata. Values not touched — use `set_variable_value` for those.
 - Params: `variableId`, optional `name`, `description`, `scopes`, `codeSyntax`, `hiddenFromPublishing`.
+- `codeSyntax` is `{ WEB|ANDROID|iOS: string }`; a platform set to `null` **removes** its definition (`Variable.removeVariableCodeSyntax`), e.g. `{ WEB: '--brand', ANDROID: null }`.
 - `scopes` values: `ALL_SCOPES`, `TEXT_CONTENT`, `CORNER_RADIUS`, `WIDTH_HEIGHT`, `GAP`, `ALL_FILLS`, `FRAME_FILL`, `SHAPE_FILL`, `TEXT_FILL`, `STROKE_COLOR`, `STROKE_FLOAT`, `EFFECT_FLOAT`, `EFFECT_COLOR`, `OPACITY`, `COLOR_OPACITY` (**FLOAT variables only** — setting it on a COLOR variable is rejected by Figma; it marks a number variable usable as a composed color's opacity; Update 139), `FONT_FAMILY`, `FONT_STYLE`, `FONT_WEIGHT`, `FONT_SIZE`, `LINE_HEIGHT`, `LETTER_SPACING`, `PARAGRAPH_SPACING`, `PARAGRAPH_INDENT`. Scopes only control where the variable shows in Figma's pickers; they don't block API bindings.
 - Returns: `{ success: true }`.
 
