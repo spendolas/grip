@@ -140,6 +140,7 @@ Set any one property on a node.
   - **Passthrough (string/enum/object):** `name`, `blendMode`, `strokeAlign`, `strokeJoin`, `strokeCap`, `dashPattern`, `layoutMode`, `layoutWrap`, `layoutAlign`, `layoutPositioning`, `layoutSizingHorizontal`, `layoutSizingVertical`, `primaryAxisSizingMode`, `counterAxisSizingMode`, `primaryAxisAlignItems`, `counterAxisAlignItems`, `constraints`, `exportSettings`, `overflowDirection`, `textAlignHorizontal`, `textAlignVertical`, `textCase`, `textDecoration`, `textAutoResize`, `lineHeight`, `letterSpacing`, `hyperlink`, `listOptions`, `fillStyleId`, `strokeStyleId`, `effectStyleId`, `gridStyleId`, `textStyleId`, `componentProperties`, `overrides`.
   - **Special:**
     - `textWrapStyle` (TEXT) — `'AUTO' | 'BALANCE' | 'PRETTY'`, node-wide, validated; all fonts in the node are auto-loaded first. Per-range: `set_text_range_property` (Figma applies wrap style per paragraph, so a sub-range sets its whole paragraph). Included in text node reads.
+    - **Text details** (TEXT; all fonts in the node auto-loaded first; included in text node reads, mixed/null omitted): `leadingTrim` (`'CAP_HEIGHT' | 'NONE'`), `listSpacing` (number), `hangingPunctuation` / `hangingList` (boolean), `textDecorationStyle` (`'SOLID' | 'WAVY' | 'DOTTED'`), `textDecorationOffset` / `textDecorationThickness` (`{ value, unit: 'PIXELS' | 'PERCENT' }` or `{ unit: 'AUTO' }`; shorthand `'AUTO'` or a px number), `textDecorationColor` (`{ value: 'AUTO' }` or `{ value: <solid paint {hex|color, opacity}> }`; shorthand `'AUTO'` or a color string; reads hex-encode the paint), `textDecorationSkipInk` (boolean). Values are validated. Decoration extras are `null` (omitted on read) while `textDecoration` is `NONE`. Read-only `hasMissingFont` is also serialized on TEXT nodes (selectable via `properties`).
     - `fontName` (TEXT) — `{ family, style?, variationSettings? }`: omit `style` to let Figma pick the named instance nearest the axes; `variationSettings` e.g. `{ wght: 550 }` (axis tags via `list_fonts { axesFor }`; unknown axes throw). The font is auto-loaded. Reads return `fontName` including `variationSettings` for variable fonts.
     - `width`, `height` — call `node.resize()` (preserves the other axis).
     - `characters` — TEXT only; loads the current font first.
@@ -240,6 +241,7 @@ Merge ≥2 COMPONENT nodes into one COMPONENT_SET (variant set). Same as Cmd+Opt
 Create or update a local style. Omit `styleId` to create.
 - Params: `styleId`, `name` (req), `type` (req: `PAINT | TEXT | EFFECT | GRID`), `value` (req — shape varies by type), `description`.
 - PAINT `value` = `Paint[]` (same shapes as `set_node_property` fills, incl. CSS color strings and `sourceColor`). EFFECT `value` = `Effect[]` (read-back `{ hex, opacity, sourceColor? }` colors are accepted). GRID `value` = `LayoutGrid[]`. TEXT `value` = `{ fontName, fontSize, lineHeight, letterSpacing, textCase, textDecoration, textWrapStyle, paragraphSpacing, paragraphIndent }`.
+- TEXT `value` also accepts `leadingTrim` (`'CAP_HEIGHT' | 'NONE'`), `listSpacing` (number), `hangingPunctuation`, `hangingList` (boolean) — `get_styles` returns them too. TextStyle has no `textDecoration*` extras (node/range-only).
 - TEXT `textWrapStyle`: `'AUTO' | 'BALANCE' | 'PRETTY'` (validated). TEXT `fontName` is `{ family, style?, variationSettings? }` — omit `style` to let Figma resolve the named instance nearest `variationSettings` (e.g. `{ wght: 550 }`); the font is auto-loaded. `get_styles` text entries return `textWrapStyle` and `fontName` (with `variationSettings` for variable fonts).
 - Returns: `{ id, name }`.
 
@@ -305,6 +307,7 @@ Apply a per-range property to part of a TEXT node.
 - `property` matches Figma's `setRange<Property>` suffix (`fills`, `fontName`, `fontSize`, `lineHeight`, `letterSpacing`, `textCase`, `textDecoration`, `hyperlink`, `listOptions`, `paragraphSpacing`, `paragraphIndent`, `textWrapStyle`).
 - `textWrapStyle`: `'AUTO' | 'BALANCE' | 'PRETTY'` (validated; Figma applies it to the paragraph(s) containing the range).
 - `fontName`: `{ family, style?, variationSettings? }` (variable fonts; omit `style` to get the nearest named instance; unknown axis tags throw — see `list_fonts { axesFor }`). The target font is auto-loaded.
+- Also: `listSpacing` (number), `textDecorationStyle`, `textDecorationOffset`, `textDecorationThickness`, `textDecorationColor`, `textDecorationSkipInk` (same value shapes as `set_node_property`, validated). `leadingTrim`, `hangingPunctuation`, `hangingList` have no range setter in the Plugin API (use `set_node_property`).
 - Auto-loads the fonts present in the range first.
 - Read per-range values back with `get_styled_text_segments` (`fields: ['fontName','textWrapStyle']`).
 - Returns: `{ success: true }`.
@@ -525,6 +528,7 @@ Pre-load a font for upcoming text writes.
 ### `get_styled_text_segments`
 Read per-range styled segments from a TEXT node.
 - Params: `nodeId`, `fields[]` (default sensible set), `start`, `end`.
+- `fields` also accepts `textWrapStyle`, `listSpacing`, `indentation`, `textDecorationStyle`, `textDecorationOffset`, `textDecorationThickness`, `textDecorationColor` (hex-encoded paint), `textDecorationSkipInk` (not in the default set).
 - Returns: array of `{ characters, start, end, ...style }` matching Figma's segment shape (fills hex-encoded).
 
 ---

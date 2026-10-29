@@ -718,6 +718,10 @@ async function serializeNode(
     if (want('paragraphIndent')) out.paragraphIndent = t.paragraphIndent;
     if (want('hyperlink') && t.hyperlink !== figma.mixed) out.hyperlink = t.hyperlink;
     if (want('listOptions') && (t as any).listOptions !== figma.mixed) out.listOptions = (t as any).listOptions;
+    // Text details (Figma 1.142 typings). Mixed values and null decoration
+    // extras (text not decorated) are omitted; read per-range with
+    // get_styled_text_segments. Guarded so older clients just omit them.
+    serializeTextDetails(t as any, want, out);
   }
 
   // INSTANCE / COMPONENT / COMPONENT_SET
@@ -1123,6 +1127,10 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
             textCase: s.textCase,
             textDecoration: s.textDecoration,
             textWrapStyle: (s as any).textWrapStyle,
+            leadingTrim: (s as any).leadingTrim,
+            listSpacing: (s as any).listSpacing,
+            hangingPunctuation: (s as any).hangingPunctuation,
+            hangingList: (s as any).hangingList,
           },
         })),
         effect: effects.map((s) => ({
@@ -2055,6 +2063,8 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       return segs.map((s: any) => {
         const out: any = { ...s };
         if (Array.isArray(s.fills)) out.fills = s.fills.map(serializePaint);
+        // textDecorationColor carries a raw SolidPaint ({value:{color:{r,g,b}}}); hex-encode it.
+        if (s.textDecorationColor && typeof s.textDecorationColor === 'object') out.textDecorationColor = serializeTextDecorationColor(s.textDecorationColor);
         return out;
       });
     }
@@ -3540,6 +3550,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       const fn = (t as any)[setter];
       if (typeof fn !== 'function') throw new Error(`Unsupported text range property: ${prop}`);
       if (prop === 'fills') (fn as Function).call(t, start, end, paintsFromInput(value));
+      else if (TEXT_DETAIL_PROPS.has(prop)) (fn as Function).call(t, start, end, normalizeTextDetailValue(prop, value));
       else (fn as Function).call(t, start, end, value);
       return { success: true };
     }
@@ -3917,6 +3928,23 @@ async function applyProperty(node: SceneNode, property: string, value: any) {
       (t as any).textWrapStyle = value;
       return;
     }
+    case 'leadingTrim':
+    case 'listSpacing':
+    case 'hangingPunctuation':
+    case 'hangingList':
+    case 'textDecorationStyle':
+    case 'textDecorationOffset':
+    case 'textDecorationThickness':
+    case 'textDecorationColor':
+    case 'textDecorationSkipInk': {
+      requireText();
+      const t = node as TextNode;
+      const val = normalizeTextDetailValue(property, value);
+      // These setters require every font in the node loaded.
+      await loadTextNodeFonts(t);
+      (t as any)[property] = val;
+      return;
+    }
     case 'fontSize': {
       requireText();
       const t = node as TextNode;
@@ -4062,6 +4090,121 @@ function assertTextWrapStyle(v: any): void {
   if (v !== 'AUTO' && v !== 'BALANCE' && v !== 'PRETTY') {
     throw new Error(`textWrapStyle must be 'AUTO' | 'BALANCE' | 'PRETTY', got ${JSON.stringify(v)}`);
   }
+}
+
+// ---------- text details: leadingTrim / list+hanging / decoration extras ----------
+
+// TextNode props (Figma 1.142) that need the node's fonts loaded to set.
+// Handled by a dedicated case in applyProperty (not the generic buckets).
+// Range variants exist for listSpacing + the five decoration extras only.
+const TEXT_DETAIL_PROPS = new Set([
+  'leadingTrim', 'listSpacing', 'hangingPunctuation', 'hangingList',
+  'textDecorationStyle', 'textDecorationOffset', 'textDecorationThickness',
+  'textDecorationColor', 'textDecorationSkipInk',
+]);
+
+function textDetailBool(prop: string, v: any): boolean {
+  const x = typeof v === 'string' ? (v === 'true' ? true : v === 'false' ? false : v) : v;
+  if (typeof x !== 'boolean') throw new Error(`${prop} must be a boolean, got ${JSON.stringify(v)}`);
+  return x;
+}
+
+// {value,unit:'PIXELS'|'PERCENT'} | {unit:'AUTO'}; bare 'AUTO' and bare numbers
+// (px) are accepted as shorthand.
+function textDetailLength(prop: string, raw: any): any {
+  const v = coerce<any>(raw);
+  if (v === 'AUTO') return { unit: 'AUTO' };
+  if (typeof v === 'number' && isFinite(v)) return { value: v, unit: 'PIXELS' };
+  if (v && typeof v === 'object') {
+    if (v.unit === 'AUTO') return { unit: 'AUTO' };
+    if ((v.unit === 'PIXELS' || v.unit === 'PERCENT') && typeof v.value === 'number' && isFinite(v.value)) {
+      return { value: v.value, unit: v.unit };
+    }
+  }
+  throw new Error(`${prop} must be {value:number, unit:'PIXELS'|'PERCENT'} or {unit:'AUTO'} (or 'AUTO' / a px number), got ${JSON.stringify(raw)}`);
+}
+
+// Validate + shape the value for one of TEXT_DETAIL_PROPS (shared by
+// set_node_property and set_text_range_property).
+function normalizeTextDetailValue(prop: string, raw: any): any {
+  const v = coerce<any>(raw);
+  switch (prop) {
+    case 'leadingTrim':
+      if (v !== 'CAP_HEIGHT' && v !== 'NONE') throw new Error(`leadingTrim must be 'CAP_HEIGHT' | 'NONE', got ${JSON.stringify(raw)}`);
+      return v;
+    case 'listSpacing': {
+      const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v;
+      if (typeof n !== 'number' || !isFinite(n)) throw new Error(`listSpacing must be a number, got ${JSON.stringify(raw)}`);
+      return n;
+    }
+    case 'hangingPunctuation':
+    case 'hangingList':
+    case 'textDecorationSkipInk':
+      return textDetailBool(prop, v);
+    case 'textDecorationStyle':
+      if (v !== 'SOLID' && v !== 'WAVY' && v !== 'DOTTED') throw new Error(`textDecorationStyle must be 'SOLID' | 'WAVY' | 'DOTTED', got ${JSON.stringify(raw)}`);
+      return v;
+    case 'textDecorationOffset':
+    case 'textDecorationThickness':
+      return textDetailLength(prop, v);
+    case 'textDecorationColor': {
+      // {value:'AUTO'} | {value: SolidPaint}; shorthands: 'AUTO', a color string,
+      // or a read-back/solid paint {type:'SOLID',hex|color,opacity} (optionally wrapped in {value}).
+      if (v === 'AUTO') return { value: 'AUTO' };
+      const inner = v && typeof v === 'object' && 'value' in v ? v.value : v;
+      if (inner === 'AUTO') return { value: 'AUTO' };
+      const paintIn = typeof inner === 'string' ? inner : (inner && typeof inner === 'object' ? { ...inner, type: inner.type ?? 'SOLID' } : undefined);
+      if (paintIn === undefined) throw new Error(`textDecorationColor must be {value:'AUTO'} or {value:<solid paint>} (or 'AUTO' / a color string), got ${JSON.stringify(raw)}`);
+      const paints = paintsFromInput([paintIn]);
+      if (paints[0].type !== 'SOLID') throw new Error('textDecorationColor only accepts a SOLID paint');
+      return { value: paints[0] };
+    }
+  }
+  return v;
+}
+
+// Load every font the text node uses (setters require loaded fonts).
+async function loadTextNodeFonts(t: TextNode): Promise<void> {
+  if (t.characters.length > 0) {
+    const fonts = t.getRangeAllFontNames(0, t.characters.length);
+    await Promise.all(fonts.map((f) => figma.loadFontAsync(f)));
+  } else if (t.fontName !== figma.mixed) {
+    await figma.loadFontAsync(t.fontName as FontName);
+  }
+}
+
+// Read side. `out` gets only defined, non-mixed, non-null values.
+function serializeTextDetails(t: any, want: (k: string) => boolean, out: any): void {
+  const plain = (k: string) => {
+    if (!want(k)) return;
+    const v = t[k];
+    if (v === undefined || v === null || v === figma.mixed) return;
+    out[k] = v;
+  };
+  plain('leadingTrim');
+  plain('listSpacing');
+  plain('hangingPunctuation');
+  plain('hangingList');
+  plain('textDecorationStyle');
+  plain('textDecorationOffset');
+  plain('textDecorationThickness');
+  plain('textDecorationSkipInk');
+  if (want('textDecorationColor')) {
+    const c = t.textDecorationColor;
+    if (c !== undefined && c !== null && c !== figma.mixed) out.textDecorationColor = serializeTextDecorationColor(c);
+  }
+  if (want('hasMissingFont')) {
+    try {
+      if (typeof t.hasMissingFont === 'boolean') out.hasMissingFont = t.hasMissingFont;
+    } catch { /* older clients / unloaded state: omit */ }
+  }
+}
+
+// {value:'AUTO'} | {value:SolidPaint} -> {value:'AUTO'} | {value:{type,hex,opacity,...}}
+function serializeTextDecorationColor(c: any): any {
+  if (!c || typeof c !== 'object' || c.value === undefined) return c;
+  if (c.value && typeof c.value === 'object') return { value: serializePaint(c.value as Paint) };
+  return c;
 }
 
 function paintsFromInput(rawInput: any): Paint[] {
@@ -4296,6 +4439,14 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
     if (params.value.textWrapStyle !== undefined) {
       assertTextWrapStyle(params.value.textWrapStyle);
       (style as any).textWrapStyle = params.value.textWrapStyle;
+    }
+    // Text-detail fields that live on TextStyle (decoration extras are node/range-only).
+    for (const k of ['leadingTrim', 'listSpacing', 'hangingPunctuation', 'hangingList']) {
+      if (params.value[k] === undefined) continue;
+      const nv = normalizeTextDetailValue(k, params.value[k]);
+      // leadingTrim / list props want the style's font loaded (no-op if already loaded).
+      try { await figma.loadFontAsync(style.fontName); } catch { /* let the setter report */ }
+      (style as any)[k] = nv;
     }
     if (typeof params.value.paragraphSpacing === 'number') style.paragraphSpacing = params.value.paragraphSpacing;
     if (typeof params.value.paragraphIndent === 'number') style.paragraphIndent = params.value.paragraphIndent;
