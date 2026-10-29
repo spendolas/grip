@@ -205,6 +205,7 @@ type ToolMethod =
   | 'set_buzz_asset_type'
   | 'get_buzz_asset_type'
   | 'move_local_style'
+  | 'slides_focus_slide'
   | 'delete_style'
   | 'edit_annotation_category'
   | 'delete_annotation_category'
@@ -562,6 +563,13 @@ interface SerializeOpts {
 const DEFAULT_READ_DEPTH = 12;
 const DEFAULT_READ_NODE_BUDGET = 3000;
 
+function focusedSlideCtx(): Record<string, unknown> {
+  try {
+    const f = (figma.currentPage as any).focusedSlide;
+    return f ? { focusedSlideId: f.id } : {};
+  } catch { return {}; }
+}
+
 function maybe(out: any, opts: SerializeOpts, key: string, val: () => any) {
   if (opts.properties && !opts.properties.has(key)) return;
   const v = val();
@@ -783,6 +791,33 @@ async function serializeNode(
   if (node.type === 'INSTANCE') {
     // Normally 1; only differs when the instance was resized with the scale tool (K).
     maybe(out, opts, 'scaleFactor', () => { try { return (node as InstanceNode).scaleFactor; } catch { return undefined; } });
+  }
+  // Slides: whether the slide is skipped in presentation mode.
+  if (node.type === 'SLIDE') {
+    maybe(out, opts, 'isSkippedSlide', () => { try { return (node as any).isSkippedSlide; } catch { return undefined; } });
+  }
+  // FigJam: sticky author/width flags, connector caps + label background, table-cell position.
+  if (node.type === 'STICKY') {
+    for (const k of ['authorVisible', 'isWideWidth', 'authorName']) {
+      maybe(out, opts, k, () => { try { return sn[k]; } catch { return undefined; } });
+    }
+  }
+  if (node.type === 'CONNECTOR') {
+    for (const k of ['connectorStartStrokeCap', 'connectorEndStrokeCap']) {
+      maybe(out, opts, k, () => { try { return sn[k]; } catch { return undefined; } });
+    }
+    maybe(out, opts, 'textBackground', () => {
+      try {
+        const f = sn.textBackground?.fills;
+        if (f === undefined) return undefined;
+        return { fills: f === figma.mixed ? 'mixed' : (f as Paint[]).map(serializePaint) };
+      } catch { return undefined; }
+    });
+  }
+  if ((node.type as string) === 'TABLE_CELL') {
+    for (const k of ['rowIndex', 'columnIndex']) {
+      maybe(out, opts, k, () => { try { return sn[k]; } catch { return undefined; } });
+    }
   }
   if (node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') {
     const c = node as ComponentNode | ComponentSetNode;
@@ -1024,6 +1059,8 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         name: figma.root.name,
         id: figma.root.id,
         currentPageId: figma.currentPage.id,
+        // 'LEGACY' | 'SRGB' | 'DISPLAY_P3' (read-only in the Plugin API).
+        documentColorProfile: (figma.root as any).documentColorProfile ?? null,
         pages: figma.root.children.map((p) => ({
           id: p.id,
           name: p.name,
@@ -1040,6 +1077,8 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         file: { key: figma.fileKey ?? figma.root.id, name: figma.root.name },
         page: { id: figma.currentPage.id, name: figma.currentPage.name },
         selectionCount: figma.currentPage.selection.length,
+        // Slides editor only: the slide in single-slide view (omitted elsewhere).
+        ...focusedSlideCtx(),
       };
     }
     case 'get_page': {
@@ -2182,6 +2221,8 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         s.text.characters = String(params.text);
       }
       if (params.author) s.authorName = String(params.author);
+      if (typeof params.authorVisible === 'boolean') s.authorVisible = params.authorVisible;
+      if (typeof params.isWideWidth === 'boolean') s.isWideWidth = params.isWideWidth;
       if (typeof params.x === 'number') s.x = params.x;
       if (typeof params.y === 'number') s.y = params.y;
       return { id: s.id, type: s.type };
@@ -2201,6 +2242,8 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         c.connectorEnd = { endpointNodeId: e.id, magnet: params.endMagnet ?? 'AUTO' };
       }
       if (params.lineType) (c as any).connectorLineType = params.lineType;
+      if (params.startStrokeCap) c.connectorStartStrokeCap = params.startStrokeCap as ConnectorStrokeCap;
+      if (params.endStrokeCap) c.connectorEndStrokeCap = params.endStrokeCap as ConnectorStrokeCap;
       if (params.text) {
         await figma.loadFontAsync(c.text.fontName as FontName);
         c.text.characters = String(params.text);
@@ -2813,6 +2856,23 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
     case 'slides_create_canvas_row': {
       const r = (figma as any).createCanvasRow?.();
       return r ? { id: r.id, type: r.type } : null;
+    }
+    case 'slides_focus_slide': {
+      // Slides editor only. nodeId omitted -> read; nodeId null -> clear; else focus that SLIDE.
+      const page = figma.currentPage as any;
+      if (params.nodeId === undefined) {
+        const f = page.focusedSlide;
+        return { focusedSlideId: f ? f.id : null };
+      }
+      if (params.nodeId === null) {
+        page.focusedSlide = null;
+      } else {
+        const n = await getNode(params.nodeId);
+        if (n.type !== 'SLIDE') throw new Error(`Not a SLIDE: ${params.nodeId} (${n.type})`);
+        page.focusedSlide = n;
+      }
+      const f = page.focusedSlide;
+      return { success: true, focusedSlideId: f ? f.id : null };
     }
     case 'slides_move_nodes_to_coord': {
       const ids: string[] = asIds(params.nodeIds);
@@ -3464,6 +3524,22 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       return { assetType: t ?? null };
     }
     case 'move_local_style': {
+      if (params.folder !== undefined && params.folder !== null && params.folder !== '') {
+        // Folder reorder: full '/'-delimited folder names; reference null -> first in parent.
+        const folderFns: Record<string, string> = {
+          PAINT: 'moveLocalPaintFolderAfter',
+          TEXT: 'moveLocalTextFolderAfter',
+          EFFECT: 'moveLocalEffectFolderAfter',
+          GRID: 'moveLocalGridFolderAfter',
+        };
+        const st = String(params.styleType ?? '').toUpperCase();
+        const ffn = (figma as any)[folderFns[st]];
+        if (!folderFns[st]) throw new Error("move_local_style folder: 'styleType' (PAINT | TEXT | EFFECT | GRID) is required");
+        if (typeof ffn !== 'function') throw new Error(`${folderFns[st]} is not available in this Figma editor/version`);
+        ffn.call(figma, String(params.folder), params.afterFolder ? String(params.afterFolder) : null);
+        return { success: true };
+      }
+      if (!params.styleId) throw new Error("move_local_style: provide 'styleId' (reorder a style) or 'folder' + 'styleType' (reorder a folder)");
       const s = await figma.getStyleByIdAsync(String(params.styleId));
       if (!s) throw new Error(`Style not found: ${params.styleId}`);
       const after = params.afterStyleId
@@ -3971,6 +4047,28 @@ async function applyProperty(node: SceneNode, property: string, value: any) {
       must('layoutGrids' in node, 'no layoutGrids');
       sn.layoutGrids = coerce<LayoutGrid[]>(value);
       return;
+    case 'isSkippedSlide':
+      must(node.type === 'SLIDE', 'only SLIDE supports isSkippedSlide');
+      sn.isSkippedSlide = Boolean(value);
+      return;
+    case 'authorVisible':
+    case 'isWideWidth':
+    case 'authorName':
+      must(node.type === 'STICKY', 'only FigJam STICKY supports this property');
+      sn[property] = property === 'authorName' ? String(value) : Boolean(value);
+      return;
+    case 'connectorStartStrokeCap':
+    case 'connectorEndStrokeCap':
+      must(node.type === 'CONNECTOR', 'only FigJam CONNECTOR supports stroke caps');
+      sn[property] = String(value);
+      return;
+    case 'textBackground': {
+      // Connector label background. value: Paint[] or {fills: Paint[]}; [] clears it.
+      must(node.type === 'CONNECTOR', 'only FigJam CONNECTOR has textBackground');
+      const v = coerce<any>(value);
+      sn.textBackground.fills = paintsFromInput(Array.isArray(v) ? v : v?.fills);
+      return;
+    }
     case 'componentProperties': {
       if (node.type !== 'INSTANCE') return not('only INSTANCE supports componentProperties');
       (node as InstanceNode).setProperties(coerce<Record<string, string | boolean>>(value));

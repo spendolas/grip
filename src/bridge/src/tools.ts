@@ -150,6 +150,7 @@ export const MERGED_TOOLS: Record<string, {
     show: 'ui_show', hide: 'ui_hide', resize: 'ui_resize', reposition: 'ui_reposition' } },
   slides_canvas: { discriminator: 'op', category: 'slides', map: {
     create_row: 'slides_create_canvas_row', get_grid: 'slides_get_canvas_grid',
+    focus: 'slides_focus_slide',
     set_grid: 'slides_set_canvas_grid', move_nodes: 'slides_move_nodes_to_coord' } },
   subscribe: { discriminator: 'target', category: 'subscribe', bridgeSide: true, map: {
     selection: 'subscribe_selection', document: 'subscribe_document', currentpage: 'subscribe_currentpage' } },
@@ -496,13 +497,9 @@ export const TOOLS: ToolDef[] = [
       "Set any property on a node — one dispatcher across ~60 props: numeric (x, y, width, height, opacity, cornerRadius, strokeWeight, fontSize, …), boolean (visible, locked, isMask, clipsContent, …), and passthrough (name, layoutMode, fills, strokes, effects, componentProperties, …). Call grip_capabilities {tool:'set_node_property'} for the full prop list, CSS-grid auto-layout props, and new paint/effect shapes (SHADER/VIDEO/GRADIENT_DIAMOND, NOISE/TEXTURE/GLASS/progressive-blur).",
     detail:
       "Text: textWrapStyle ('AUTO'|'BALANCE'|'PRETTY', node-wide; fonts auto-loaded; per-range via set_text_range_property — Figma applies it per paragraph, so a sub-range sets its whole paragraph). fontName takes {family, style?, variationSettings?} — omit style to let Figma pick the named instance nearest the axes; variationSettings e.g. {wght:550} (axis tags: list_fonts {axesFor:'<family>'}); unknown axes throw. " +
-<<<<<<< HEAD
+      "TEXT details (fonts of the node auto-loaded; read back by get_node/get_selection): leadingTrim 'CAP_HEIGHT'|'NONE'; listSpacing number; hangingPunctuation/hangingList boolean; textDecorationStyle 'SOLID'|'WAVY'|'DOTTED'; textDecorationOffset / textDecorationThickness {value, unit:'PIXELS'|'PERCENT'} | {unit:'AUTO'} (shorthand: 'AUTO' or a px number); textDecorationColor {value:'AUTO'} | {value:<solid paint {hex|color, opacity}>} (shorthand: 'AUTO' or a color string); textDecorationSkipInk boolean. Decoration extras only take effect while textDecoration is UNDERLINE/STRIKETHROUGH and read back absent otherwise. Reads also include read-only hasMissingFont. " +
       'Numeric props (non-exhaustive): x, y, width, height, opacity, rotation, padding*, cornerRadius, individual corner radii (topLeftRadius/topRightRadius/bottomLeftRadius/bottomRightRadius), strokeWeight, fontSize, paragraphSpacing, paragraphIndent, itemSpacing, layoutGrow, min/max width/height, etc. Boolean props: visible, locked, isMask, clipsContent, expanded. Passthrough props (non-exhaustive): name, blendMode, layoutMode, layoutAlign, layoutSizing*, primaryAxisSizingMode/counterAxisSizingMode, strokeAlign/strokeJoin/strokeCap, dashPattern, textAlign*, textCase, textDecoration, textAutoResize, lineHeight, letterSpacing, hyperlink, fillStyleId, fills, strokes, effects, layoutGrids, componentProperties, etc. CSS-grid auto-layout: set layoutMode="GRID" then gridRowCount/gridColumnCount, gridRowGap/gridColumnGap, gridColumnSizes/gridRowSizes (arrays of {type:"FLEX"|"FIXED"|"HUG", value}), gridAutoTracks, gridItemsPositioning; per grid-child gridRowSpan/gridColumnSpan/gridRowAnchorIndex/gridColumnAnchorIndex/gridChildHorizontal|VerticalAlign (or use set_grid_child_position). New paint types on fills/strokes: {type:"GRADIENT_DIAMOND",...}, {type:"SHADER", shaderId,...} (import via import_shader first), {type:"VIDEO",...}. New effect types on effects: {type:"NOISE", noiseType:"MONOTONE"|"DUOTONE"|"MULTITONE", density, noiseSize, color}, {type:"TEXTURE", noiseSize, radius, clipToShape}, {type:"GLASS", refraction, depth, lightIntensity, lightAngle, dispersion, radius}, and progressive blur {type:"LAYER_BLUR"|"BACKGROUND_BLUR", blurType:"PROGRESSIVE", radius, startRadius, startOffset, endOffset}. COLOR SPACES (Figma 141): every color in fills/strokes/effects accepts a #hex, ANY CSS color string (\'oklch(0.7 0.1 200)\', \'hsl(...)\', \'lab(...)\', \'rgb(...)\', #RRGGBBAA — alpha becomes paint opacity / color a), or a ColorWithColorSpace {space:"SRGB"|"DISPLAY_P3",r,g,b} | {space:"HSL",h,s,l} | {space:"HSB",h,s,b} | {space:"OKLAB",l,a,b} | {space:"OKLCH",l,c,h}. Paints: {type:"SOLID", hex|color:<any of the above>, sourceColor?, opacity}; gradient stops {position, hex|color, sourceColor?, opacity}; effect colors (color/secondaryColor) take a CSS string, {hex,opacity,sourceColor?} or {space,...}. Reads emit hex (sRGB) PLUS sourceColor ({space,...}) on paints/stops/effect colors when the color was authored in a color space; pass it back as-is to round-trip. If you change hex but leave a stale sourceColor, the sourceColor is dropped (hex wins); to change the authored color, change or drop sourceColor. Non-hex input needs figma.util.rgba (Figma 141+); plain hex works everywhere.' +
       " DEV MODE / PAGE / COMPONENT: devStatus ({type:'READY_FOR_DEV'|'COMPLETED', description?} | null to clear; only on a node directly under a page/section). descriptionMarkdown + description on COMPONENT/COMPONENT_SET. On a PAGE nodeId: guides [{axis:'X'|'Y',offset}], backgrounds (Paint[]), flowStartingPoints [{nodeId,name?}] (prototypeStartNode is read-only; reads emit prototypeStartNodeId). Reads of these appear on get_node/get_page.",
-=======
-      "TEXT details (fonts of the node auto-loaded; read back by get_node/get_selection): leadingTrim 'CAP_HEIGHT'|'NONE'; listSpacing number; hangingPunctuation/hangingList boolean; textDecorationStyle 'SOLID'|'WAVY'|'DOTTED'; textDecorationOffset / textDecorationThickness {value, unit:'PIXELS'|'PERCENT'} | {unit:'AUTO'} (shorthand: 'AUTO' or a px number); textDecorationColor {value:'AUTO'} | {value:<solid paint {hex|color, opacity}>} (shorthand: 'AUTO' or a color string); textDecorationSkipInk boolean. Decoration extras only take effect while textDecoration is UNDERLINE/STRIKETHROUGH and read back absent otherwise. Reads also include read-only hasMissingFont. " +
-      'Numeric props (non-exhaustive): x, y, width, height, opacity, rotation, padding*, cornerRadius, individual corner radii (topLeftRadius/topRightRadius/bottomLeftRadius/bottomRightRadius), strokeWeight, fontSize, paragraphSpacing, paragraphIndent, itemSpacing, layoutGrow, min/max width/height, etc. Boolean props: visible, locked, isMask, clipsContent, expanded. Passthrough props (non-exhaustive): name, blendMode, layoutMode, layoutAlign, layoutSizing*, primaryAxisSizingMode/counterAxisSizingMode, strokeAlign/strokeJoin/strokeCap, dashPattern, textAlign*, textCase, textDecoration, textAutoResize, lineHeight, letterSpacing, hyperlink, fillStyleId, fills, strokes, effects, layoutGrids, componentProperties, etc. CSS-grid auto-layout: set layoutMode="GRID" then gridRowCount/gridColumnCount, gridRowGap/gridColumnGap, gridColumnSizes/gridRowSizes (arrays of {type:"FLEX"|"FIXED"|"HUG", value}), gridAutoTracks, gridItemsPositioning; per grid-child gridRowSpan/gridColumnSpan/gridRowAnchorIndex/gridColumnAnchorIndex/gridChildHorizontal|VerticalAlign (or use set_grid_child_position). New paint types on fills/strokes: {type:"GRADIENT_DIAMOND",...}, {type:"SHADER", shaderId,...} (import via import_shader first), {type:"VIDEO",...}. New effect types on effects: {type:"NOISE", noiseType:"MONOTONE"|"DUOTONE"|"MULTITONE", density, noiseSize, color}, {type:"TEXTURE", noiseSize, radius, clipToShape}, {type:"GLASS", refraction, depth, lightIntensity, lightAngle, dispersion, radius}, and progressive blur {type:"LAYER_BLUR"|"BACKGROUND_BLUR", blurType:"PROGRESSIVE", radius, startRadius, startOffset, endOffset}. COLOR SPACES (Figma 141): every color in fills/strokes/effects accepts a #hex, ANY CSS color string (\'oklch(0.7 0.1 200)\', \'hsl(...)\', \'lab(...)\', \'rgb(...)\', #RRGGBBAA — alpha becomes paint opacity / color a), or a ColorWithColorSpace {space:"SRGB"|"DISPLAY_P3",r,g,b} | {space:"HSL",h,s,l} | {space:"HSB",h,s,b} | {space:"OKLAB",l,a,b} | {space:"OKLCH",l,c,h}. Paints: {type:"SOLID", hex|color:<any of the above>, sourceColor?, opacity}; gradient stops {position, hex|color, sourceColor?, opacity}; effect colors (color/secondaryColor) take a CSS string, {hex,opacity,sourceColor?} or {space,...}. Reads emit hex (sRGB) PLUS sourceColor ({space,...}) on paints/stops/effect colors when the color was authored in a color space; pass it back as-is to round-trip. If you change hex but leave a stale sourceColor, the sourceColor is dropped (hex wins); to change the authored color, change or drop sourceColor. Non-hex input needs figma.util.rgba (Figma 141+); plain hex works everywhere.',
->>>>>>> worktree-agent-a7ea192de713c6d49
     schema: z.object({
       nodeId: z.string(),
       property: z.string(),
@@ -941,6 +938,8 @@ export const TOOLS: ToolDef[] = [
     schema: z.object({
       text: z.string().optional(),
       author: z.string().optional(),
+      authorVisible: z.boolean().optional(),
+      isWideWidth: z.boolean().optional(),
       parentId: z.string().optional(),
       x: z.number().optional(),
       y: z.number().optional(),
@@ -955,6 +954,8 @@ export const TOOLS: ToolDef[] = [
       startMagnet: z.enum(['AUTO', 'TOP', 'BOTTOM', 'LEFT', 'RIGHT', 'CENTER']).optional(),
       endMagnet: z.enum(['AUTO', 'TOP', 'BOTTOM', 'LEFT', 'RIGHT', 'CENTER']).optional(),
       lineType: z.enum(['STRAIGHT', 'ELBOWED']).optional(),
+      startStrokeCap: z.string().optional(),
+      endStrokeCap: z.string().optional(),
       text: z.string().optional(),
       parentId: z.string().optional(),
     }),
@@ -1185,9 +1186,9 @@ export const TOOLS: ToolDef[] = [
   { name: 'unlock_aspect_ratio', description: 'Unlock node aspect ratio.', schema: z.object({ nodeId: z.string() }) },
   {
     name: 'slides_canvas', category: 'slides',
-    description: "Slides editor only. Create/read/write the canvas row grid, or move nodes to a grid coordinate. `op`: create_row ({}) | get_grid ({}) | set_grid ({grid}) | move_nodes ({nodeIds, row, column}). Call grip_capabilities {tool:'slides_canvas'} for per-op params.",
-    detail: "op=create_row: create a new canvas row (was slides_create_canvas_row) — {}. op=get_grid: read the current canvas grid (was slides_get_canvas_grid) — {}. op=set_grid: set the canvas grid (was slides_set_canvas_grid) — {grid}. op=move_nodes: move nodes to a (row, column) coordinate (was slides_move_nodes_to_coord) — {nodeIds, row, column}.",
-    schema: z.object({ op: z.enum(['create_row', 'get_grid', 'set_grid', 'move_nodes']) }).passthrough(),
+    description: "Slides editor only. Create/read/write the canvas row grid, or move nodes to a grid coordinate. `op`: create_row ({}) | get_grid ({}) | set_grid ({grid}) | move_nodes ({nodeIds, row, column}) | focus ({nodeId?}). Call grip_capabilities {tool:'slides_canvas'} for per-op params.",
+    detail: "op=create_row: create a new canvas row (was slides_create_canvas_row) — {}. op=get_grid: read the current canvas grid (was slides_get_canvas_grid) — {}. op=set_grid: set the canvas grid (was slides_set_canvas_grid) — {grid}. op=move_nodes: move nodes to a (row, column) coordinate (was slides_move_nodes_to_coord) — {nodeIds, row, column}. op=focus: the slide shown in single-slide view (page.focusedSlide) — {} reads {focusedSlideId}; {nodeId: '<SLIDE id>'} focuses it; {nodeId: null} clears. (SLIDE nodes also carry isSkippedSlide: read in get_node, write via set_node_property.)",
+    schema: z.object({ op: z.enum(['create_row', 'get_grid', 'set_grid', 'move_nodes', 'focus']) }).passthrough(),
   },
   { name: 'set_slide_transition', description: 'Slides editor: set transition on a SLIDE node.', schema: z.object({ nodeId: z.string(), transition: z.any() }) },
   { name: 'get_slide_transition', description: 'Slides editor: read a SLIDE node\'s transition.', schema: z.object({ nodeId: z.string() }) },
@@ -1295,7 +1296,7 @@ export const TOOLS: ToolDef[] = [
   },
   { name: 'set_buzz_asset_type', description: 'Buzz only: tag a node\'s buzz asset type.', schema: z.object({ nodeId: z.string(), assetType: z.string() }) },
   { name: 'get_buzz_asset_type', description: 'Buzz only: read a node\'s buzz asset type.', schema: z.object({ nodeId: z.string() }) },
-  { name: 'move_local_style', description: 'Reorder a local style (paint/text/effect/grid). afterStyleId omitted moves to first.', schema: z.object({ styleId: z.string(), afterStyleId: z.string().optional() }) },
+  { name: 'move_local_style', description: "Reorder a local style (paint/text/effect/grid): {styleId, afterStyleId?} (omit afterStyleId = first). Or reorder a style FOLDER: {folder, styleType, afterFolder?} ('/'-delimited full folder names; same parent; omit afterFolder = first).", schema: z.object({ styleId: z.string().optional(), afterStyleId: z.string().optional(), folder: z.string().optional(), afterFolder: z.string().optional(), styleType: z.enum(['PAINT', 'TEXT', 'EFFECT', 'GRID']).optional() }) },
   { name: 'delete_style', description: 'Delete a local style by id. Counterpart to set_style (which creates/updates).', schema: z.object({ styleId: z.string() }) },
 
   // ---------- variants + paint variable binding ----------
@@ -2055,6 +2056,8 @@ export function toolInputSchema(name: string): Record<string, unknown> {
         properties: {
           text: { type: 'string' },
           author: { type: 'string' },
+          authorVisible: { type: 'boolean' },
+          isWideWidth: { type: 'boolean' },
           parentId: { type: 'string' },
           x: { type: 'number' },
           y: { type: 'number' },
@@ -2070,6 +2073,8 @@ export function toolInputSchema(name: string): Record<string, unknown> {
           startMagnet: { type: 'string', enum: ['AUTO', 'TOP', 'BOTTOM', 'LEFT', 'RIGHT', 'CENTER'] },
           endMagnet: { type: 'string', enum: ['AUTO', 'TOP', 'BOTTOM', 'LEFT', 'RIGHT', 'CENTER'] },
           lineType: { type: 'string', enum: ['STRAIGHT', 'ELBOWED'] },
+          startStrokeCap: { type: 'string', description: 'NONE | ARROW_EQUILATERAL | ARROW_LINES | TRIANGLE_FILLED | DIAMOND_FILLED | CIRCLE_FILLED | ERD_*' },
+          endStrokeCap: { type: 'string', description: 'same values as startStrokeCap' },
           text: { type: 'string' },
           parentId: { type: 'string' },
         },
