@@ -4314,7 +4314,7 @@ async function applyProperty(node: SceneNode, property: string, value: any) {
       return;
     }
     case 'handleMirroring': {
-      must(property in node, 'only vector-like nodes (VECTOR, STAR, POLYGON, …) have handleMirroring');
+      must(property in node, 'only VECTOR (and HIGHLIGHT) nodes have handleMirroring — not STAR/POLYGON');
       if (node.type === 'TEXT_PATH') not('read-only on TEXT_PATH nodes');
       if (value !== 'NONE' && value !== 'ANGLE' && value !== 'ANGLE_AND_LENGTH') {
         throw new Error(`handleMirroring must be 'NONE' | 'ANGLE' | 'ANGLE_AND_LENGTH', got ${JSON.stringify(value)}`);
