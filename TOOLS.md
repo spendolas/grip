@@ -148,6 +148,9 @@ Set any one property on a node.
     - `effects` — `Effect[]` (Figma shape); colors may be given as `{ hex, opacity, sourceColor? }` (what reads emit), a CSS color string, or `{ space, ... }`.
     - `layoutGrids` — `LayoutGrid[]`.
     - `componentProperties` — INSTANCE only; `Record<string, string|boolean>`.
+    - `devStatus` — frames/components/instances/sections: `{ type: 'READY_FOR_DEV'|'COMPLETED', description? }`, a bare type string, or `null` (clear). Figma only allows it on a node directly under a page or section, and not inside a node that already has one. See **Hand-off / Dev Mode**.
+    - `description`, `descriptionMarkdown` — COMPONENT/COMPONENT_SET string (the markdown one is the rich-text description).
+    - PAGE nodes (pass the page id as `nodeId`): `guides` (`[{ axis: 'X'|'Y', offset }]`, replaces all), `backgrounds` (Paint[] like `fills`; Figma supports one solid paint), `flowStartingPoints` (`[{ nodeId, name? }]`, bare id strings also work; `name` defaults to the node's name). `prototypeStartNode` is read-only (reads emit `prototypeStartNodeId`).
 - Returns: `{ success: true }`.
 
 ### `create_node`
@@ -376,6 +379,11 @@ Always present: `id`, `name`, `type`. Other fields appear when the node has them
 | TEXT-only: `characters`, `fontSize`, `fontFamily`, `fontWeight`, `fontName`, `textAlignHorizontal`/`Vertical`, `textAutoResize`, `textCase`, `textDecoration`, `lineHeight`, `letterSpacing`, `paragraphSpacing`, `paragraphIndent`, `hyperlink`, `listOptions` | Mixed values omitted. |
 | INSTANCE: `componentId`, `componentName`, `componentProperties`, `overrides`, `exposedInstances`, `isExposedInstance` | `componentId`/`Name` resolved via `getMainComponentAsync`. |
 | COMPONENT/COMPONENT_SET: `key`, `description`, `documentationLinks`, `componentPropertyDefinitions` | Definitions optional. |
+| COMPONENT/COMPONENT_SET: `descriptionMarkdown` | Only when non-empty. Writable via `set_node_property`. |
+| COMPONENT_SET: `defaultVariant`, `variantGroupProperties` | `defaultVariant` = `{ id, name }` of the top-left-most variant; `variantGroupProperties` = `{ [prop]: { values } }` (deprecated in Figma; prefer `componentPropertyDefinitions`). |
+| INSTANCE: `scaleFactor` | Read-only here; normally `1`, differs only after the scale tool (K). |
+| `devStatus` | Frames/components/instances/sections with a Dev Mode status: `{ type: 'READY_FOR_DEV'|'COMPLETED', description? }`. Omitted when unset. Writable via `set_node_property` (`null` clears). |
+| PAGE: `guides`, `backgrounds`, `flowStartingPoints`, `prototypeStartNodeId` | `guides` = `[{ axis, offset }]`, `backgrounds` = Paint[], `flowStartingPoints` = `[{ nodeId, name }]`, `prototypeStartNodeId` = id or `null` (read-only). In `get_page`/`get_node` of a PAGE; deliberately NOT in `list_pages`/`get_document` (kept cheap). First three writable via `set_node_property` on the page id. |
 | `boundVariables` | Only when `includeBoundVariables: true`. Map of field → `{ variableId, type }`. |
 | `pluginData` | Only when `includePluginData: true`. `{ key: value }`. Filter with `pluginDataKeys`. |
 | `exportSettings` | Array of Figma export presets. |
@@ -412,6 +420,9 @@ Replace a VECTOR's vector network (raw point/segment editing).
 ---
 
 ## Hand-off / Dev Mode
+
+### Dev status (`devStatus`)
+Read: `get_node`/`get_page`/`search_nodes` (`properties:['devStatus']`) return `devStatus: { type: 'READY_FOR_DEV'|'COMPLETED', description? }` on nodes that have one (omitted otherwise). Write: `set_node_property { nodeId, property: 'devStatus', value }` with `{ type, description? }`, a bare `'READY_FOR_DEV'`/`'COMPLETED'`, or `null` to clear. Figma restrictions: only on a node directly under a page or section, and not inside a node that already has a status.
 
 ### `dev_resource`
 Merged: manage Dev Mode resources on a node, dispatched on `op`.
@@ -597,8 +608,8 @@ Create a SLOT inside a COMPONENT.
 - Returns `{ id, name, type }`, plus `{ propertyName, slotSettingsApplied: true }` when settings were requested — or `slotSettingsApplied: false` + `warning` if the property couldn't be identified (then use `component_property` `op: 'edit'`).
 
 ### `reset_instance_overrides`
-Reset all overrides on an INSTANCE.
-- Params: `nodeId`. → `{ success: true }`.
+Remove all direct overrides on an INSTANCE (`removeOverrides()`, falling back to the deprecated `resetOverrides()` on older clients), or reset a SLOT node to the component's original slot content (`resetSlot()`).
+- Params: `nodeId` (an INSTANCE or a SLOT). → `{ success: true, reset: 'overrides' | 'slot' }`.
 
 ---
 

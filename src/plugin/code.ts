@@ -749,6 +749,37 @@ async function serializeNode(
   if (node.type === 'PAGE') {
     maybe(out, opts, 'isPageDivider', () => (node as PageNode).isPageDivider === true);
   }
+  // Dev Mode status — only emitted when set (null = no status, omitted to keep reads lean).
+  // Present on frames/components/instances/sections (DevStatusMixin).
+  maybe(out, opts, 'devStatus', () => {
+    try {
+      if (!('devStatus' in (node as any))) return undefined;
+      const ds = (node as any).devStatus;
+      return ds ? { type: ds.type, ...(ds.description ? { description: ds.description } : {}) } : undefined;
+    } catch { return undefined; }
+  });
+  // Page setup: guides, canvas backgrounds, prototype flow starting points / start node.
+  if (node.type === 'PAGE') {
+    const pg = node as PageNode;
+    maybe(out, opts, 'guides', () => { try { return pg.guides.map((g) => ({ axis: g.axis, offset: g.offset })); } catch { return undefined; } });
+    maybe(out, opts, 'backgrounds', () => { try { return pg.backgrounds.map(serializePaint); } catch { return undefined; } });
+    maybe(out, opts, 'flowStartingPoints', () => { try { return pg.flowStartingPoints.map((f) => ({ nodeId: f.nodeId, name: f.name })); } catch { return undefined; } });
+    maybe(out, opts, 'prototypeStartNodeId', () => { try { return pg.prototypeStartNode ? pg.prototypeStartNode.id : null; } catch { return undefined; } });
+  }
+  // Component extras: rich-text description, default variant, legacy variant-group view.
+  if (node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') {
+    const cx = node as ComponentNode | ComponentSetNode;
+    maybe(out, opts, 'descriptionMarkdown', () => { try { return cx.descriptionMarkdown || undefined; } catch { return undefined; } });
+  }
+  if (node.type === 'COMPONENT_SET') {
+    const cs = node as ComponentSetNode;
+    maybe(out, opts, 'defaultVariant', () => { try { const v = cs.defaultVariant; return v ? { id: v.id, name: v.name } : undefined; } catch { return undefined; } });
+    maybe(out, opts, 'variantGroupProperties', () => { try { return cs.variantGroupProperties; } catch { return undefined; } });
+  }
+  if (node.type === 'INSTANCE') {
+    // Normally 1; only differs when the instance was resized with the scale tool (K).
+    maybe(out, opts, 'scaleFactor', () => { try { return (node as InstanceNode).scaleFactor; } catch { return undefined; } });
+  }
   if (node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') {
     const c = node as ComponentNode | ComponentSetNode;
     if (want('key')) out.key = c.key;
@@ -2352,9 +2383,19 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
     }
     case 'reset_instance_overrides': {
       const n = await getNode(params.nodeId);
-      if (n.type !== 'INSTANCE') throw new Error(`Not an INSTANCE: ${params.nodeId}`);
-      (n as InstanceNode).resetOverrides();
-      return { success: true };
+      // A SLOT node resets to the component's original slot content.
+      if (n.type === 'SLOT') {
+        const slot = n as any;
+        if (typeof slot.resetSlot !== 'function') throw new Error('resetSlot is not available in this Figma version');
+        slot.resetSlot();
+        return { success: true, reset: 'slot' };
+      }
+      if (n.type !== 'INSTANCE') throw new Error(`Not an INSTANCE or SLOT: ${params.nodeId}`);
+      const inst = n as any;
+      // removeOverrides() supersedes the deprecated resetOverrides(); fall back for older clients.
+      if (typeof inst.removeOverrides === 'function') inst.removeOverrides();
+      else inst.resetOverrides();
+      return { success: true, reset: 'overrides' };
     }
     case 'find_with_criteria': {
       const scope = params.scope ? await getNode(params.scope) : figma.currentPage;
@@ -3797,6 +3838,8 @@ async function applyProperty(node: SceneNode, property: string, value: any) {
   };
   const must = (cond: boolean, msg: string) => { if (!cond) not(msg); };
 
+  if (await applyDevPageComponentProperty(node, property, value)) return;
+
   switch (property) {
     case 'width': {
       must('resize' in node, 'cannot resize');
@@ -3948,6 +3991,71 @@ async function applyProperty(node: SceneNode, property: string, value: any) {
   }
 
   throw new Error(`Property '${property}' not supported on node type ${node.type}`);
+}
+
+// set_node_property handlers for devStatus, page setup (guides/backgrounds/flowStartingPoints)
+// and component descriptions. Returns true when `property` was handled here.
+async function applyDevPageComponentProperty(node: BaseNode, property: string, value: any): Promise<boolean> {
+  const n = node as any;
+  const fail = (msg: string): never => {
+    throw new Error(`Property '${property}' not supported on node type ${node.type}: ${msg}`);
+  };
+  switch (property) {
+    case 'devStatus': {
+      if (!('devStatus' in n)) return fail('no Dev Mode status (frames, components, instances and sections only)');
+      let v = coerce<any>(value);
+      if (v === null || v === undefined || v === 'NONE') { n.devStatus = null; return true; }
+      if (typeof v === 'string') v = { type: v };
+      if (!v || typeof v !== 'object' || (v.type !== 'READY_FOR_DEV' && v.type !== 'COMPLETED')) {
+        throw new Error("devStatus must be null (clear) or {type:'READY_FOR_DEV'|'COMPLETED', description?}");
+      }
+      const ds: any = { type: v.type };
+      if (typeof v.description === 'string') ds.description = v.description;
+      n.devStatus = ds;
+      return true;
+    }
+    case 'description':
+    case 'descriptionMarkdown': {
+      if (node.type !== 'COMPONENT' && node.type !== 'COMPONENT_SET') return false;
+      if (typeof value !== 'string') throw new Error(`${property} must be a string`);
+      n[property] = value;
+      return true;
+    }
+    case 'guides':
+    case 'backgrounds':
+    case 'flowStartingPoints':
+    case 'prototypeStartNode':
+    case 'prototypeStartNodeId': {
+      if (node.type !== 'PAGE') return false;
+      if (property === 'prototypeStartNode' || property === 'prototypeStartNodeId') {
+        throw new Error("prototypeStartNode is read-only in the Figma API (serialized as prototypeStartNodeId); set flowStartingPoints instead");
+      }
+      const page = node as PageNode;
+      await page.loadAsync();
+      const v = coerce<any>(value);
+      if (property === 'backgrounds') { page.backgrounds = paintsFromInput(v); return true; }
+      if (!Array.isArray(v)) throw new Error(`${property} must be an array`);
+      if (property === 'guides') {
+        page.guides = v.map((g: any) => {
+          if (!g || (g.axis !== 'X' && g.axis !== 'Y') || typeof g.offset !== 'number') throw new Error("guides entries must be {axis:'X'|'Y', offset:number}");
+          return { axis: g.axis, offset: g.offset } as Guide;
+        });
+        return true;
+      }
+      // flowStartingPoints: [{nodeId, name?}] (a bare node-id string also works); name defaults to the node's name.
+      const pts: { nodeId: string; name: string }[] = [];
+      for (const f of v) {
+        const nodeId = typeof f === 'string' ? f : f?.nodeId;
+        if (typeof nodeId !== 'string') throw new Error('flowStartingPoints entries must be {nodeId, name?}');
+        let name = typeof f === 'object' && typeof f.name === 'string' ? f.name : undefined;
+        if (name === undefined) name = (await getNode(nodeId)).name;
+        pts.push({ nodeId, name });
+      }
+      page.flowStartingPoints = pts;
+      return true;
+    }
+  }
+  return false;
 }
 
 function assertTextWrapStyle(v: any): void {
