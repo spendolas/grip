@@ -262,3 +262,32 @@ test('CLI: --print-version and a default run', () => {
   const bad = spawnSync(process.execPath, [script, '--bogus'], { encoding: 'utf8' });
   assert.equal(bad.status, 1);
 });
+
+// Nothing a user downloads or runs may be a native binary. Gatekeeper warns about
+// unsigned/unnotarized executables ("could not verify ... is free of malware"),
+// and the only binary on a user's machine must be Node itself. esbuild is a
+// build-time tool that runs in CI and on developer machines, never in a release.
+test('no release asset (or file inside the zip) is a native executable', () => {
+  const out = tmp('grip-nobin-');
+  packageRelease({ root: ROOT, out });
+  const MAGIC = [
+    ['Mach-O', [0xfe, 0xed, 0xfa, 0xce]], ['Mach-O 64', [0xfe, 0xed, 0xfa, 0xcf]],
+    ['Mach-O (le)', [0xce, 0xfa, 0xed, 0xfe]], ['Mach-O 64 (le)', [0xcf, 0xfa, 0xed, 0xfe]],
+    ['Mach-O universal', [0xca, 0xfe, 0xba, 0xbe]], ['ELF', [0x7f, 0x45, 0x4c, 0x46]],
+    ['Windows PE', [0x4d, 0x5a]], ['Windows PE (shortcut/zone)', [0x4c, 0x00, 0x00, 0x00]],
+  ];
+  const isNative = (buf) => MAGIC.find(([, m]) => m.every((b, i) => buf[i] === b))?.[0] ?? null;
+  const zipName = 'grip-install.zip';
+  for (const name of readdirSync(out)) {
+    const buf = readFileSync(join(out, name));
+    if (name === zipName) {
+      for (const [inner, entry] of Object.entries(readZip(buf))) {
+        const data = entry.data ?? entry;
+        assert.equal(isNative(Buffer.from(data)), null, `${zipName}:${inner} is a native executable`);
+      }
+    } else {
+      assert.equal(isNative(buf), null, `${name} is a native executable`);
+    }
+  }
+  assert.ok(!readdirSync(out).some((n) => /esbuild/i.test(n)), 'esbuild is never a release asset');
+});
