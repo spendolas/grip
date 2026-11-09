@@ -5,8 +5,8 @@ import { mergeToolScope, resolveToolScope, toolInScope, CORE_TOOL_NAMES, META_TO
 // Phase 3 task 6 (3b): storage/ui/slides/subscribe cluster merge landed 157 -> 146.
 // Server-side-optimization sprint task 3 added list_pages: 147 -> 148.
 // Server-side-optimization sprint task 6 added replace_text: 149 -> 150.
-// grip_load_tools (runtime scope widening): 150 -> 151. reorder_grid_tracks: 151 -> 152. list_library_variables: 152 -> 153.
-assert.strictEqual(TOOLS.length, 153, `TOOLS.length should be 153, got ${TOOLS.length}`);
+// grip_load_tools (runtime scope widening): 150 -> 151. reorder_grid_tracks: 151 -> 152. list_library_variables: 152 -> 153. grip_update: 153 -> 154.
+assert.strictEqual(TOOLS.length, 154, `TOOLS.length should be 154, got ${TOOLS.length}`);
 
 // Every tool has exactly one category; every core/meta name is a real tool.
 const allNames = new Set(TOOLS.map((t) => t.name));
@@ -97,7 +97,8 @@ for (const [name, kw] of Object.entries(DIET)) {
 // aggregate: core description bytes dropped well below the pre-diet 10154
 import { resolveToolScope as _rs, toolInScope as _tis } from '../dist/tools.js';
 const coreDescBytes = TOOLS.filter((t) => _tis(t.name, _rs('core'))).reduce((a, t) => a + (t.description || '').length, 0);
-assert.ok(coreDescBytes < 7000, `core description bytes should drop below 7000, got ${coreDescBytes}`);
+// (budget 7000 -> 7100 when the meta tool grip_update, always in scope, was added: +79 bytes. No existing description was touched.)
+assert.ok(coreDescBytes < 7100, `core description bytes should drop below 7100, got ${coreDescBytes}`);
 
 // grip_load_tools / mergeToolScope
 assert.ok(toolInScope('grip_load_tools', resolveToolScope('read')), 'grip_load_tools is meta (always listed)');

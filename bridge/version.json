@@ -1,0 +1,28 @@
+{
+  "version": "0.7.0",
+  "bridge": {
+    "file": "bridge/grip-bridge.mjs",
+    "sha256": "f5c8b4f734fbbbc0867005f4e0fe4fa43ecc2bf9ed47cb8a0e9dc13d286de291",
+    "bytes": 1066420
+  },
+  "installer": {
+    "file": "bridge/install.mjs",
+    "sha256": "e034d3164dade11f3e80c602853934f14b53ea642d2d4626cddea42165d9ba33"
+  },
+  "plugin": {
+    "files": {
+      "code.js": {
+        "path": "figma-plugin/code.js",
+        "sha256": "9a0fd741031ee01582de4357b5d58f89e6f39e189d5fe7bd835436ac66c781a6"
+      },
+      "manifest.json": {
+        "path": "figma-plugin/manifest.json",
+        "sha256": "58c28f10fbfc0f7fa1ab71ef80418eb8c41a4d91242a80cf1026361666b6b626"
+      },
+      "ui.html": {
+        "path": "figma-plugin/ui.html",
+        "sha256": "56127ea40fb2b3dfc944e358e4e3d4db3e787b31457d53a2e5174c0a0acaea3c"
+      }
+    }
+  }
+}

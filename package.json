@@ -9,7 +9,7 @@
   },
   "scripts": {
     "setup": "npm --prefix src/bridge install && npm --prefix src/plugin install",
-    "build": "npm --prefix src/bridge run build && npm --prefix src/plugin run build",
+    "build": "npm --prefix src/bridge run build && npm --prefix src/plugin run build && node scripts/write-version.mjs",
     "build:bridge": "npm --prefix src/bridge run build",
     "build:plugin": "npm --prefix src/plugin run build",
     "test": "npm --prefix src/bridge test && npm --prefix src/bridge run test:win",

@@ -90,6 +90,10 @@ up changes.
   (the plugin isn't wedged, it's loading) — this stops grip killing a live load.
 - `GRIP_PERSISTENT=1` — disable idle-exit + lifetime ceiling (set by the
   launchd LaunchAgent, which owns the daemon's lifecycle).
+- `GRIP_NO_UPDATE_CHECK=1` — disable the daily update check and all update notices (explicit `update` / `grip_update install` still work).
+- `GRIP_UPDATE_BASE` — base URL for `bridge/version.json` + release files (default `https://raw.githubusercontent.com/spendolas/grip/main/`; https, or http on 127.0.0.1/localhost).
+- `GRIP_HOME` — override `~/.grip` (where the installer/updater put the bridge and plugin).
+- `GRIP_SUPERVISED=1` — set by the Login Item / systemd unit written by the installer: after a self-update the daemon just exits and the supervisor restarts it (otherwise it spawns its own replacement).
 - `GRIP_IPC_PATH` — override the leader's UNIX-socket path
   (default `tmpdir/grip-bridge.sock`).
 - `GRIP_FILE` — bind this agent to a Figma file at launch (fileKey, exact
@@ -97,6 +101,10 @@ up changes.
   calls route to that file without the agent calling `set_active_file`.
   Binds even before the file is open (resolves when it connects).
 - `GRIP_TOOLS` — comma list of tool categories/presets this agent loads (default `core` ≈ 35 tools; `all` = every tool). stdio: set as an env var (delivered as an IPC control frame); HTTP: pass `?tools=` on the `/mcp` URL. Cuts a headless agent's per-turn schema weight (~17k tokens (all) → ~5.5k (core)). Discover out-of-scope tools with `grip_capabilities`; reach anything via `run_script`. The fattest core/meta tool descriptions are trimmed to what+when, with full guidance available via `grip_capabilities {tool:'<name>'}` (`detail`).
+
+## Self-update
+
+`node ~/.grip/grip-bridge.mjs update [--check] [--yes] [--rollback]` (alias `--update`) checks / installs a newer release without starting a daemon. The same routine backs the `grip_update` MCP tool and the plugin strip's "↑ update" click. Plugin WS protocol additions (all optional, ignored by older peers): bridge → plugin `{type:'update', available, latest}` (on hello and on change) and `{type:'update_result', status, from?, to?, restart?, message?}`; plugin → bridge `{type:'update_request'}`. See the repo README (Updating) and CLAUDE.md.
 
 ## Important
 
