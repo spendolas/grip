@@ -92,7 +92,7 @@ jobs:
         run: node scripts/release-gate.mjs --version "$V" --tags-file tags.txt --release-file release.json --changelog CHANGELOG.md --notes-out notes.md
 
       - name: Install dependencies
-        run: npm run setup
+        run: npm ci --prefix src/bridge && npm ci --prefix src/plugin
 
       # The committed bundles ARE the release. A clean rebuild from source must
       # reproduce them byte for byte, otherwise someone changed source without
