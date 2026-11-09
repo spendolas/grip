@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  REQUIRED_ASSETS, GateError, parseVersion, compareVersions, extractNotes, isCompleteRelease, decide, main,
+  REQUIRED_ASSETS, INSTALL_MARKER, GateError, parseVersion, compareVersions, extractNotes, isCompleteRelease, decide, main,
+  installFooter, withInstallFooter,
 } from './release-gate.mjs';
 
 const CHANGELOG = `# Changelog
@@ -45,8 +46,8 @@ test('parseVersion / compareVersions', () => {
 });
 
 test('required assets match what the packager and updater use', () => {
-  assert.equal(REQUIRED_ASSETS.length, 7);
-  for (const n of ['grip-bridge.mjs', 'install.mjs', 'grip-plugin-code.js', 'grip-plugin-ui.html', 'grip-plugin-manifest.json', 'grip-install.zip', 'SHA256SUMS.txt']) {
+  assert.equal(REQUIRED_ASSETS.length, 8);
+  for (const n of ['grip-bridge.mjs', 'install.mjs', 'grip-plugin-code.js', 'grip-plugin-ui.html', 'grip-plugin-manifest.json', 'grip-install.zip', 'compat.json', 'SHA256SUMS.txt']) {
     assert.ok(REQUIRED_ASSETS.includes(n), n);
   }
 });
@@ -62,6 +63,25 @@ test('extractNotes returns the exact-version section only', () => {
   assert.equal(extractNotes('## 0.8.0\r\n\r\n**A.**\r\n\r\n- b\r\n', '0.8.0'), '**A.**\n\n- b\n', 'CRLF');
   assert.equal(extractNotes('## 1.0.0\n### Sub\n- x\n## 0.9.0\n', '1.0.0'), '### Sub\n- x\n', 'sub-headings stay inside');
   assert.equal(extractNotes('## 0.1.0\n', '0.1.0'), '\n', 'empty section yields blank');
+});
+
+test('a release without compat.json is not complete (it would never be offered)', () => {
+  const noCompat = full();
+  noCompat.assets = noCompat.assets.filter((a) => a.name !== 'compat.json');
+  assert.equal(isCompleteRelease(noCompat), false);
+  assert.equal(decide({ version: '0.8.0', tags: ['v0.8.0'], release: noCompat, changelog: CHANGELOG }).action, 'recover');
+});
+
+test('install footer: after the marker, tag-pinned README link, release pointer', () => {
+  const f = installFooter('0.9.0');
+  assert.match(f, /^\*\*Install:\*\* tell your agent `Install Grip from https:\/\/github\.com\/spendolas\/grip\/releases\/latest`/);
+  assert.ok(f.includes('(https://github.com/spendolas/grip/blob/v0.9.0/README.md#install-instructions-for-claude)'), 'tag-pinned README link');
+  assert.ok(!f.includes('/main/'), 'never points at main');
+  const body = withInstallFooter('**Nine.**\n\n- one\n\n\n', '0.9.0');
+  const [notes, footer] = body.split(INSTALL_MARKER + '\n');
+  assert.equal(notes, '**Nine.**\n\n- one\n\n', 'notes kept, trailing blank lines normalised, marker on its own line after a blank line');
+  assert.equal(footer, f + '\n');
+  assert.equal(INSTALL_MARKER, '<!-- grip-install -->');
 });
 
 test('isCompleteRelease', () => {
@@ -123,7 +143,8 @@ test('main: reads files, writes notes and GITHUB_OUTPUT', () => {
     '--changelog', join(d, 'CHANGELOG.md'), '--notes-out', join(d, 'notes.md')];
   const log = console.log; console.log = () => {};
   try { assert.equal(main(argv, { GITHUB_OUTPUT: out }), 'create'); } finally { console.log = log; }
-  assert.equal(readFileSync(join(d, 'notes.md'), 'utf8'), '**Nine.**\n\n- one\n- two\n');
+  assert.equal(readFileSync(join(d, 'notes.md'), 'utf8'), withInstallFooter('**Nine.**\n\n- one\n- two\n', '0.9.0'), 'every release body gets the install footer');
+  assert.match(readFileSync(join(d, 'notes.md'), 'utf8'), /\n\n<!-- grip-install -->\n\*\*Install:\*\*.*blob\/v0\.9\.0\/README\.md/s);
   assert.equal(readFileSync(out, 'utf8'), 'action=create\n');
 
   // empty release file (gh printed nothing) also means "no release"

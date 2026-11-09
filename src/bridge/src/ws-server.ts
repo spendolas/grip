@@ -3,6 +3,7 @@ import { v4 as uuid } from 'uuid';
 import { EventEmitter } from 'events';
 import type { McpSession, PluginSessionInfo, WSEvent, WSHello, WSResponse } from './types.js';
 import { BRIDGE_VERSION } from './types.js';
+import { compareSemver, isSemver } from './update.js';
 
 interface Pending {
   resolve: (result: unknown) => void;
@@ -32,6 +33,8 @@ interface Session {
   currentPageId: string;
   currentPageName: string;
   pluginVersion?: string;
+  // Oldest bridge the plugin says it works with (hello.minBridge, plugin 0.8.0+).
+  minBridge?: string;
   capabilities?: string[];
   lastPong: number;
   pingTimer?: NodeJS.Timeout;
@@ -42,10 +45,15 @@ interface Session {
   // HTTP Origin header of the WS upgrade (undefined for non-browser clients).
   // Used only to refuse update requests coming from a web page.
   origin?: string;
+  // Key of the last `update` frame sent to this session ('off' until the
+  // strip has been told something). Lets us skip duplicate frames.
+  updateSent?: string;
 }
 
 // Update state pushed to plugin strips (see update.ts / wireUpdateToBridge).
-export interface UpdateBroadcast { available: boolean; latest: string | null; headline?: string | null }
+// `available` is the SIGNAL (update available AND compatible with every
+// connected plugin), not the raw "a newer release exists".
+export interface UpdateBroadcast { available: boolean; latest: string | null; current?: string; headline?: string | null }
 
 // A Figma plugin iframe connects with Origin "null" (sandboxed) — or the
 // figma.com origin. A normal web page connecting to ws://localhost:7777 sends
@@ -629,17 +637,20 @@ export class PluginBridge extends EventEmitter {
       return;
     }
 
-    // User clicked "update" twice in the plugin strip. Older bridges drop this
-    // frame (no id/event/kind), older plugins never send it: compatible both ways.
+    // User clicked the purple strip. Older bridges drop this frame (no
+    // id/event/kind), older plugins never send it: compatible both ways.
+    // `version` is the version the user was shown; the handler installs only if
+    // the latest release still equals it.
     if ((msg as { type?: unknown }).type === 'update_request') {
       const sess = this.sessions.get(sessionId);
       if (!originAllowedForUpdate(sess?.origin)) {
         process.stderr.write(`[grip] update_request from ${sessionId.slice(0, 8)} refused (origin ${sess?.origin})\n`);
-        this.sendTo(sessionId, { type: 'update_result', status: 'error', message: 'update requests are only accepted from the Figma plugin' });
+        this.sendTo(sessionId, { type: 'update_result', status: 'error', code: 'origin', message: 'update requests are only accepted from the Figma plugin' });
         return;
       }
-      process.stderr.write(`[grip] update_request from ${sessionId.slice(0, 8)}\n`);
-      this.emit('update-request', { sessionId });
+      const reqVersion = (msg as { version?: unknown }).version;
+      process.stderr.write(`[grip] update_request from ${sessionId.slice(0, 8)} (version ${typeof reqVersion === 'string' ? reqVersion.slice(0, 32) : 'not given'})\n`);
+      this.emit('update-request', { sessionId, version: typeof reqVersion === 'string' ? reqVersion : undefined });
       return;
     }
 
@@ -703,6 +714,7 @@ export class PluginBridge extends EventEmitter {
     sess.currentPageName = hello.currentPageName;
     sess.helloAt = Date.now();
     sess.pluginVersion = hello.version ?? 'unknown';
+    sess.minBridge = typeof hello.minBridge === 'string' ? hello.minBridge : undefined;
     sess.capabilities = hello.capabilities ?? [];
     if (hello.version && hello.version !== BRIDGE_VERSION) {
       process.stderr.write(
@@ -713,21 +725,50 @@ export class PluginBridge extends EventEmitter {
     process.stderr.write(
       `[grip] hello ${sessionId.slice(0, 8)} v${sess.pluginVersion} → ${hello.fileName} / ${hello.currentPageName}\n`,
     );
-    // Tell this strip about a pending update straight away (no-op for old plugins).
-    if (this.updateState?.available) this.sendTo(sessionId, { type: 'update', ...this.updateState });
+    // The plugin needs a NEWER bridge than this one: the bridge is the stale side.
+    // Informational (grip_health shows it; it counts as "update recommended").
+    if (sess.minBridge && isSemver(sess.minBridge) && compareSemver(sess.minBridge, BRIDGE_VERSION) > 0) {
+      process.stderr.write(
+        `[grip] WARNING plugin ${sess.pluginVersion} in "${hello.fileName}" needs bridge >= ${sess.minBridge} but this is ${BRIDGE_VERSION}: the bridge is out of date, update it.\n`,
+      );
+    }
+    // Listeners (update signal) recompute against the new session list and
+    // broadcast; then make sure THIS strip has the current state (deduped).
     this.emit('session-change');
+    this.pushUpdate(sessionId);
   }
 
   // ---------- update notices ----------
 
   private updateState: UpdateBroadcast | null = null;
 
-  // Set by the daemon when the update state changes; broadcasts to every
-  // connected plugin and is replayed to each plugin on its hello.
+  // Set by the daemon whenever the update SIGNAL changes (new release, a
+  // plugin connecting/leaving...); sent to every connected strip and replayed
+  // to each plugin on its hello. Frames identical to the last one a session got
+  // are skipped. `null` = nothing known, strips are told "off".
   setUpdateState(s: UpdateBroadcast | null) {
     this.updateState = s;
-    if (!s) return;
-    for (const id of this.sessions.keys()) this.sendTo(id, { type: 'update', available: s.available, latest: s.latest, headline: s.headline ?? null });
+    for (const id of this.sessions.keys()) this.pushUpdate(id);
+  }
+
+  // Send the current update state to one strip (deduped; a fresh strip that
+  // has nothing to show is not sent a frame at all). `force` ignores the dedupe
+  // (used to re-push after a refused update_request).
+  pushUpdate(sessionId: string, force = false) {
+    const sess = this.sessions.get(sessionId);
+    if (!sess || sess.helloAt === 0) return;
+    const st = this.updateState;
+    const frame = {
+      type: 'update',
+      available: !!st?.available,
+      latest: st?.latest ?? null,
+      current: st?.current ?? BRIDGE_VERSION,
+      headline: st?.headline ?? null,
+    };
+    const key = frame.available ? JSON.stringify(frame) : 'off';
+    if (!force && key === (sess.updateSent ?? 'off')) return;
+    sess.updateSent = key;
+    this.sendTo(sessionId, frame);
   }
 
   // Send one JSON frame to one plugin session (best effort, never throws).
@@ -791,6 +832,9 @@ export class PluginBridge extends EventEmitter {
         currentPageId: s.currentPageId,
         currentPageName: s.currentPageName,
         pluginVersion: s.pluginVersion ?? 'unknown',
+        minBridge: s.minBridge ?? null,
+        // false until the plugin's hello arrives (version/file not known yet)
+        hello: s.helloAt > 0,
         capabilities: s.capabilities ?? [],
         wsReady: s.ws.readyState === WebSocket.OPEN,
         lastPongMsAgo: s.lastPong ? Date.now() - s.lastPong : null,

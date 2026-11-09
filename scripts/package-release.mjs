@@ -14,7 +14,12 @@
 //   grip-install.zip                                    grip/bridge/{grip-bridge.mjs,install.mjs}
 //                                                       + grip/figma-plugin/{manifest.json,code.js,ui.html};
 //                                                       what the README install steps and manual users use
-//   SHA256SUMS.txt                                      `<sha256>  <name>` for every asset above
+//   compat.json                                         { "version": <BRIDGE_VERSION>, "minPlugin": <MIN_PLUGIN_VERSION> }
+//                                                       generated from src/bridge/src/types.ts (single source
+//                                                       of truth): the oldest Figma plugin this bridge release
+//                                                       works with. The updater only signals/installs a release
+//                                                       whose compat.json verifies against SHA256SUMS.txt.
+//   SHA256SUMS.txt                                      `<sha256>  <name>` for every asset above (incl. compat.json)
 //
 // No dependencies, no `zip` binary: the zip is written by a ~40-line writer below,
 // byte-for-byte deterministic (fixed timestamps, sorted entries, fixed permissions).
@@ -44,6 +49,29 @@ export function readBridgeVersion(root) {
     /export const BRIDGE_VERSION = '([^']+)'/,
     'BRIDGE_VERSION in src/bridge/src/types.ts',
   );
+}
+
+export function readMinPluginVersion(root) {
+  return matchOrThrow(
+    readFileSync(join(root, 'src', 'bridge', 'src', 'types.ts'), 'utf8'),
+    /export const MIN_PLUGIN_VERSION = '([^']+)'/,
+    'MIN_PLUGIN_VERSION in src/bridge/src/types.ts',
+  );
+}
+
+// compat.json content: never hand-edited, always derived from types.ts.
+export function buildCompat(root, version) {
+  const minPlugin = readMinPluginVersion(root);
+  const nums = (v) => { const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(v); return m ? m.slice(1).map(Number) : null; };
+  const mp = nums(minPlugin), cur = nums(version.replace(/-.*$/, ''));
+  if (!mp) throw new PackageError(`MIN_PLUGIN_VERSION "${minPlugin}" is not major.minor.patch`);
+  for (let i = 0; i < 3; i++) {
+    if (mp[i] !== cur[i]) {
+      if (mp[i] > cur[i]) throw new PackageError(`MIN_PLUGIN_VERSION ${minPlugin} is newer than this release ${version}`);
+      break;
+    }
+  }
+  return Buffer.from(JSON.stringify({ version, minPlugin }, null, 2) + '\n');
 }
 
 // The four places a release version lives. All must agree, or the release is wrong.
@@ -196,6 +224,7 @@ export function packageRelease({ root, out }) {
     'grip-plugin-ui.html': src.pluginUi,
     'grip-plugin-manifest.json': src.pluginManifest,
     'grip-install.zip': zip,
+    'compat.json': buildCompat(root, version),
   };
   const sums = Object.keys(assets).sort()
     .map((n) => `${sha256(assets[n])}  ${n}\n`).join('');

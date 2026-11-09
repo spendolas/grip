@@ -1,6 +1,7 @@
 name: Release
 
-# Publishes a GitHub Release (7 assets, notes from CHANGELOG.md) when a push to
+# Publishes a GitHub Release (8 assets, notes from CHANGELOG.md plus an install
+# footer) when a push to
 # main touches the version, the changelog or the committed build artifacts.
 # scripts/release-gate.mjs decides create / recover / skip, so a push that does
 # not bump the version is a no-op for publishing (the build checks still run).
@@ -199,9 +200,11 @@ jobs:
         run: |
           set -euo pipefail
           ls -l artifact/dist
-          # The installer and the in-place updater download these by exact name;
+          # The installer and the in-place updater download these by exact name
+          # (compat.json tells the updater which Figma plugin versions this
+          # bridge works with: a release without it is never offered);
           # a release missing any of them would break installs or updates.
-          ASSETS="grip-bridge.mjs install.mjs grip-plugin-code.js grip-plugin-ui.html grip-plugin-manifest.json grip-install.zip"
+          ASSETS="grip-bridge.mjs install.mjs grip-plugin-code.js grip-plugin-ui.html grip-plugin-manifest.json grip-install.zip compat.json"
           for asset in $ASSETS SHA256SUMS.txt; do
             if [ ! -f "artifact/dist/$asset" ]; then
               echo "Required release asset missing from the build artifact: $asset"

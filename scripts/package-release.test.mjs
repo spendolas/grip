@@ -9,8 +9,8 @@ import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { inflateRawSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
-import { packageRelease, buildZip, crc32, checkLockstep, readLockstepVersions, PackageError } from './package-release.mjs';
-import { REQUIRED_ASSETS } from './release-gate.mjs';
+import { packageRelease, buildZip, crc32, checkLockstep, readLockstepVersions, readMinPluginVersion, buildCompat, PackageError } from './package-release.mjs';
+import { REQUIRED_ASSETS, INSTALL_MARKER } from './release-gate.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const sha = (b) => createHash('sha256').update(b).digest('hex');
@@ -99,6 +99,34 @@ test('packages every release asset with correct names and sums', () => {
   }
 });
 
+test('compat.json is generated from types.ts, and listed in SHA256SUMS.txt', () => {
+  const out = tmp('grip-pkg-');
+  const r = packageRelease({ root: ROOT, out });
+  const compat = JSON.parse(readFileSync(join(out, 'compat.json'), 'utf8'));
+  assert.deepEqual(Object.keys(compat), ['version', 'minPlugin']);
+  assert.equal(compat.version, r.version);
+  assert.equal(compat.minPlugin, readMinPluginVersion(ROOT));
+  assert.match(compat.minPlugin, /^\d+\.\d+\.\d+$/);
+  assert.ok(readFileSync(join(out, 'compat.json'), 'utf8').endsWith('\n'));
+  const sums = readFileSync(join(out, 'SHA256SUMS.txt'), 'utf8');
+  assert.ok(sums.includes(`${sha(readFileSync(join(out, 'compat.json')))}  compat.json`), 'compat.json is in SHA256SUMS.txt');
+  // the same bytes the updater would be handed; no hand-edited copy exists in the repo
+  assert.ok(!existsSync(join(ROOT, 'compat.json')) && !existsSync(join(ROOT, 'bridge', 'compat.json')));
+});
+
+test('compat.json: refuses a missing or nonsensical MIN_PLUGIN_VERSION', () => {
+  const r = scratchRoot();
+  const t = join(r, 'src', 'bridge', 'src', 'types.ts');
+  const orig = readFileSync(t, 'utf8');
+  writeFileSync(t, orig.replace(/export const MIN_PLUGIN_VERSION = '[^']+';/, ''));
+  assert.throws(() => packageRelease({ root: r, out: tmp('grip-pkg-') }), /MIN_PLUGIN_VERSION/);
+  writeFileSync(t, orig.replace(/MIN_PLUGIN_VERSION = '[^']+'/, "MIN_PLUGIN_VERSION = '99.0.0'"));
+  assert.throws(() => packageRelease({ root: r, out: tmp('grip-pkg-') }), /newer than this release/);
+  writeFileSync(t, orig.replace(/MIN_PLUGIN_VERSION = '[^']+'/, "MIN_PLUGIN_VERSION = 'soon'"));
+  assert.throws(() => packageRelease({ root: r, out: tmp('grip-pkg-') }), /not major\.minor\.patch/);
+  assert.deepEqual(JSON.parse(buildCompat(ROOT, '1.2.3')), { version: '1.2.3', minPlugin: readMinPluginVersion(ROOT) });
+});
+
 test('grip-install.zip has the install layout, contents and modes', () => {
   const out = tmp('grip-pkg-');
   packageRelease({ root: ROOT, out });
@@ -164,6 +192,12 @@ test('asset names agree with the updater (src/bridge/dist/update.js)', async (t)
   );
   assert.equal(U.ASSET_BRIDGE, 'grip-bridge.mjs');
   assert.equal(U.ASSET_SUMS, 'SHA256SUMS.txt');
+  assert.equal(U.ASSET_COMPAT, 'compat.json');
+  // the updater and the gate must cut the same footer marker
+  assert.equal(U.INSTALL_MARKER, INSTALL_MARKER);
+  // eight release assets in all; the updater downloads six of them (not install.mjs / the zip)
+  assert.equal(REQUIRED_ASSETS.length, 8);
+  assert.deepEqual([...U.UPDATE_ASSET_NAMES].sort(), ['SHA256SUMS.txt', 'compat.json', 'grip-bridge.mjs', 'grip-plugin-code.js', 'grip-plugin-manifest.json', 'grip-plugin-ui.html']);
   // ...and those figma-plugin files all exist
   for (const local of Object.values(U.PLUGIN_ASSETS)) assert.ok(existsSync(join(ROOT, 'figma-plugin', local)), local);
 });

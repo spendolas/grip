@@ -20,6 +20,16 @@ import { runProxy } from './proxy.js';
 import { isUpdateCli, runUpdateCli } from './update-cli.js';
 import { startUpdateChecks, setRestartHook, isManagedInstall, wireUpdateToBridge } from './update.js';
 
+// `--selftest`: the self-updater runs a freshly downloaded bridge once with this
+// flag BEFORE swapping it in (update.ts selfTestBridge). Reaching this line means
+// the whole bundle parsed and every import loaded. Print the version and exit:
+// no ports, no log file, no status file, nothing under ~/.grip is touched.
+if (process.argv.includes('--selftest')) {
+  process.stdout.write(`grip-bridge ${BRIDGE_VERSION} ok\n`, () => process.exit(0));
+  // keep the rest of the module from running while the write flushes
+  await new Promise<never>(() => {});
+}
+
 const WS_PORT = Number(process.env.GRIP_WS_PORT ?? 7777);
 const HTTP_PORT = Number(process.env.GRIP_HTTP_PORT ?? 7778);
 // IPC endpoint. On Windows, Node's local-domain sockets ARE named pipes and
@@ -205,6 +215,11 @@ async function runDaemon(bridge: PluginBridge) {
         httpSessions: http.sessionCount(),
         pluginCount: snap.pluginCount,
         pluginsReady: snap.plugins.filter((p) => p.wsReady).length,
+        // The CLI (`update`) has no WebSocket of its own: it reads the connected
+        // plugin versions from here to check compatibility before installing.
+        plugins: snap.plugins.map((p) => ({
+          pluginVersion: p.pluginVersion, fileName: p.fileName, wsReady: p.wsReady, hello: p.hello, minBridge: p.minBridge,
+        })),
         pendingCount: snap.pendingCount,
       }, null, 2));
     } catch {

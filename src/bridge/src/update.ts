@@ -3,14 +3,23 @@
 // Two halves:
 //   1. CHECK  — ask GitHub for the latest published Release of this repo
 //      (api.github.com/repos/spendolas/grip/releases/latest), compare its tag to
-//      BRIDGE_VERSION, remember the answer plus the release notes. The daemon
-//      does this ~30s after startup and every 24h. Pure information: it never
-//      downloads or installs anything, and every failure is silent.
-//   2. INSTALL — only when a human said yes (agent tool after the user agrees,
-//      the plugin's "click to confirm", or the CLI). Downloads the release's
-//      bridge + plugin assets and SHA256SUMS.txt, verifies every file against
-//      SHA256SUMS.txt and a size cap, and only THEN writes (tmp file + rename)
-//      into ~/.grip. A developer (git clone) install is never overwritten.
+//      BRIDGE_VERSION, remember the answer plus the release notes and the
+//      release's compat.json (the oldest Figma plugin it works with, verified
+//      against SHA256SUMS.txt). The daemon does this ~30s after startup and
+//      every 24h. Pure information: it never installs anything, and every
+//      failure is silent.
+//   2. INSTALL — only when a human said yes (the user's click on the purple
+//      plugin strip, an agent after the user agrees, or the CLI). Downloads the
+//      release's bridge + plugin assets and SHA256SUMS.txt, verifies every file
+//      against SHA256SUMS.txt and a size cap, runs the new bridge once with
+//      --selftest, and only THEN writes (tmp file + rename) into ~/.grip. A
+//      developer (git clone) install is never overwritten.
+//
+// COMPATIBILITY comes first. The published plugin is updated through Figma, not
+// by this updater, so a user's plugin can lag the bridge. An update is only
+// signalled (updateSignal) or installed when EVERY connected plugin is new
+// enough for it (compat.json minPlugin); a release without a verifiable
+// compat.json is neither signalled nor installable (the CLI's --force excepted).
 //
 // The Figma plugin's networkAccess is localhost-only, so the plugin never
 // touches the internet: this module (in the bridge) is the only code that does.
@@ -21,9 +30,9 @@
 // ALL logging goes to stderr — stdout is the MCP transport.
 
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import {
-  chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
+  chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, writeFileSync,
 } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
@@ -39,16 +48,29 @@ export const DEFAULT_RELEASES_API = 'https://api.github.com/repos/spendolas/grip
 // scripts/release-gate.mjs requires them; a test keeps all three in step.
 export const ASSET_BRIDGE = 'grip-bridge.mjs';
 export const ASSET_SUMS = 'SHA256SUMS.txt';
+export const ASSET_COMPAT = 'compat.json';   // { version, minPlugin }
 // release asset name -> file name inside ~/.grip/figma-plugin
 export const PLUGIN_ASSETS: Record<string, string> = {
   'grip-plugin-code.js': 'code.js',
   'grip-plugin-ui.html': 'ui.html',
   'grip-plugin-manifest.json': 'manifest.json',
 };
-export const UPDATE_ASSET_NAMES = [ASSET_BRIDGE, ...Object.keys(PLUGIN_ASSETS), ASSET_SUMS];
+export const UPDATE_ASSET_NAMES = [ASSET_BRIDGE, ...Object.keys(PLUGIN_ASSETS), ASSET_SUMS, ASSET_COMPAT];
+// release-page footer marker: everything from this line on is for GitHub
+// readers (install pointer), never part of an update notice. Appended by
+// scripts/release-gate.mjs (INSTALL_MARKER there).
+export const INSTALL_MARKER = '<!-- grip-install -->';
 
 const RELEASE_MAX_BYTES = 256 * 1024;
 const SUMS_MAX_BYTES = 64 * 1024;
+const COMPAT_MAX_BYTES = 4 * 1024;
+const NOTICE_INTERVAL_MS = 3 * 24 * 60 * 60 * 1000;   // agent notice: once per version per 3 days
+const SELFTEST_TIMEOUT_MS = 10_000;
+// GRIP_SELFTEST_TIMEOUT_MS can only LOWER the 10s ceiling (tests).
+function selftestTimeoutMs(): number {
+  const v = Number(process.env.GRIP_SELFTEST_TIMEOUT_MS);
+  return Number.isFinite(v) && v > 0 ? Math.min(v, SELFTEST_TIMEOUT_MS) : SELFTEST_TIMEOUT_MS;
+}
 const FILE_MAX_BYTES = 5 * 1024 * 1024;
 const MAX_ASSETS = 100;
 const NOTES_MAX_CHARS = 1200;
@@ -146,7 +168,11 @@ export function isSemver(v: unknown): v is string {
 
 // ---------- errors + HTTP ----------
 
-export class UpdateError extends Error {}
+// `code` lets callers (tool, WS, CLI) tell failure kinds apart:
+//   compat_unverified  the release has no compat.json, or it does not verify
+export class UpdateError extends Error {
+  constructor(message: string, readonly code?: string) { super(message); }
+}
 
 // GET a URL into memory. Enforces a hard byte cap (header AND streamed), an
 // overall deadline, and the HOST rule: the start URL and every redirect hop
@@ -236,10 +262,17 @@ export interface Release {
   assets: Record<string, ReleaseAsset>;    // by asset name
 }
 
+// Drop the release-page install footer (see INSTALL_MARKER): it is for people
+// reading the GitHub release, not for update notices.
+export function stripInstallFooter(body: string): string {
+  const i = body.indexOf(INSTALL_MARKER);
+  return i === -1 ? body : body.slice(0, i);
+}
+
 // "**A smoother install.**" -> "A smoother install." One line, plain text.
 export function releaseHeadline(body: unknown): string {
   if (typeof body !== 'string') return '';
-  for (const raw of body.split(/\r?\n/)) {
+  for (const raw of stripInstallFooter(body).split(/\r?\n/)) {
     const line = raw
       .replace(/^\s*(?:#{1,6}\s+|>\s*|[-*+]\s+)/, '')
       .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
@@ -254,7 +287,7 @@ export function releaseHeadline(body: unknown): string {
 // First ~1200 chars of the release body, cut at a line break when possible.
 export function releaseNotes(body: unknown, max: number = NOTES_MAX_CHARS): string {
   if (typeof body !== 'string') return '';
-  const t = body.replace(/\r\n/g, '\n').trim();
+  const t = stripInstallFooter(body).replace(/\r\n/g, '\n').trim();
   if (t.length <= max) return t;
   const cut = t.slice(0, max);
   const nl = cut.lastIndexOf('\n');
@@ -336,6 +369,108 @@ export function readInstallRecord(): InstallRecord {
 
 export const CLONE_NEXT_STEPS = ['git pull', 'node bridge/install.mjs'];
 
+// ---------- compatibility (bridge <-> plugin) ----------
+
+// What we know about one connected plugin window (a PluginBridge snapshot row).
+export interface PluginInfo {
+  pluginVersion?: string | null;
+  fileName?: string;
+  wsReady?: boolean;
+  hello?: boolean;               // false until the plugin's hello arrived (version not known yet)
+  minBridge?: string | null;     // the plugin says: I need a bridge >= this
+}
+
+export function pluginInfos(bridge: { snapshot(): { plugins: any[] } }): PluginInfo[] {
+  return bridge.snapshot().plugins.map((p) => ({
+    pluginVersion: p.pluginVersion, fileName: p.fileName, wsReady: p.wsReady, hello: p.hello, minBridge: p.minBridge,
+  }));
+}
+
+// A window that is open and has said hello. (A socket that has not helloed yet
+// is a moment away from being known; it must not flip the signal back and forth.)
+function connectedPlugins(plugins: PluginInfo[] | null | undefined): PluginInfo[] {
+  return (plugins ?? []).filter((p) => p.wsReady !== false && p.hello !== false);
+}
+
+export type PluginVerdict =
+  | { kind: 'ok' }
+  | { kind: 'incompatible'; reason: string }     // a connected plugin is too old for this release
+  | { kind: 'unverifiable'; reason: string };    // no connected plugin to check against
+
+// The rule: an update replaces the bridge for ALL Figma windows, so every
+// connected plugin must have a KNOWN version >= minPlugin. Unknown = incompatible.
+export function checkPluginCompat(minPlugin: string, latest: string, plugins: PluginInfo[] | null | undefined): PluginVerdict {
+  const live = connectedPlugins(plugins);
+  if (live.length === 0) {
+    return { kind: 'unverifiable', reason: 'no Grip plugin is connected, so compatibility cannot be verified; open the Grip plugin in Figma first' };
+  }
+  for (const p of live) {
+    const where = p.fileName ? ` in "${p.fileName}"` : '';
+    const v = p.pluginVersion;
+    if (!isSemver(v)) {
+      return { kind: 'incompatible', reason: `a Grip plugin${where} did not report a version, so it cannot be verified against ${latest} (needs >=${minPlugin}); update the Grip plugin in Figma first` };
+    }
+    if (compareSemver(v, minPlugin) < 0) {
+      return { kind: 'incompatible', reason: `plugin ${v}${where} is older than ${latest} requires (>=${minPlugin}); update the Grip plugin in Figma first` };
+    }
+  }
+  return { kind: 'ok' };
+}
+
+export interface UpdateSignal { signal: boolean; blockedReason?: string }
+
+// THE single decision for every signalling surface (the purple strip, the agent
+// notices, grip_health.update): signal only when an update is available AND at
+// least one plugin is connected AND every connected plugin is compatible. A
+// release whose compat.json is missing/unverifiable is never signalled (fail
+// closed). `blockedReason` explains a withheld signal (only set when an update
+// is available).
+export function updateSignal(state: UpdateState | null | undefined, plugins: PluginInfo[] | null | undefined): UpdateSignal {
+  if (!state || !state.available || !state.latest) return { signal: false };
+  if (!state.minPlugin) {
+    return { signal: false, blockedReason: `Grip ${state.latest} has no verified compatibility info (compat.json)${state.compatError ? ': ' + state.compatError : ''}, so it is not offered` };
+  }
+  const v = checkPluginCompat(state.minPlugin, state.latest, plugins);
+  return v.kind === 'ok' ? { signal: true } : { signal: false, blockedReason: v.reason };
+}
+
+// The reverse direction (informational): a connected plugin that needs a NEWER
+// bridge than this one. Then the bridge is the stale side, an update is recommended.
+export function bridgeStaleReason(plugins: PluginInfo[] | null | undefined): string | undefined {
+  for (const p of connectedPlugins(plugins)) {
+    if (p.minBridge && isSemver(p.minBridge) && compareSemver(p.minBridge, BRIDGE_VERSION) > 0) {
+      return `plugin ${p.pluginVersion ?? '?'}${p.fileName ? ` in "${p.fileName}"` : ''} needs Grip bridge >= ${p.minBridge} but this bridge is ${BRIDGE_VERSION}: update the bridge`;
+    }
+  }
+  return undefined;
+}
+
+// compat.json: { "version": "<release version>", "minPlugin": "<x.y.z>" },
+// generated by scripts/package-release.mjs from types.ts. Verified against
+// SHA256SUMS.txt before it is believed.
+async function fetchCompat(rel: Release, sums: Map<string, string>): Promise<{ minPlugin: string }> {
+  const fail = (why: string): never => {
+    throw new UpdateError(`release ${rel.version} has no verifiable compatibility info (${ASSET_COMPAT}): ${why}`, 'compat_unverified');
+  };
+  const want = sums.get(ASSET_COMPAT);
+  if (!want) return fail(`${ASSET_SUMS} does not list it`);
+  if (!rel.assets[ASSET_COMPAT]) return fail('the release has no such asset');
+  let buf: Buffer;
+  try { buf = await httpGet(rel.assets[ASSET_COMPAT].url, { maxBytes: COMPAT_MAX_BYTES, timeoutMs: MANIFEST_TIMEOUT_MS }); }
+  catch (err) { return fail((err as Error).message); }
+  if (sha256(buf) !== want) return fail(`it does not match ${ASSET_SUMS}`);
+  let j: any;
+  try { j = JSON.parse(buf.toString('utf8')); } catch { return fail('it is not valid JSON'); }
+  if (!j || j.version !== rel.version) return fail(`it describes version ${j?.version ?? '?'}, not ${rel.version}`);
+  if (!isSemver(j.minPlugin)) return fail('minPlugin is not a version');
+  if (compareSemver(j.minPlugin, rel.version) > 0) return fail('minPlugin is newer than the release itself');
+  return { minPlugin: j.minPlugin };
+}
+
+async function fetchSums(rel: Release): Promise<Map<string, string>> {
+  return parseSums((await downloadAsset(rel, ASSET_SUMS, SUMS_MAX_BYTES)).toString('utf8'));
+}
+
 // ---------- check + state ----------
 
 export interface UpdateState {
@@ -345,21 +480,28 @@ export interface UpdateState {
   checkedAt: string | null;   // ISO timestamp of the last SUCCESSFUL check
   headline?: string | null;   // one-line summary of the latest release (from its notes)
   notes?: string | null;      // first ~1200 chars of the latest release's notes
+  // The oldest Figma plugin the latest release works with (its compat.json,
+  // verified against SHA256SUMS.txt). null/absent = unknown: the release has no
+  // verifiable compat.json, so it is neither signalled nor installable.
+  minPlugin?: string | null;
+  compatError?: string | null;
   error?: string;             // set when the latest attempt failed (state is carried over)
 }
 
 let state: UpdateState | null = null;
 const listeners = new Set<(s: UpdateState) => void>();
+const noticeMemo = new Map<string, number>();   // version -> ms when an agent notice was last claimed
 
 export function getUpdateState(): UpdateState | null { return state; }
 export function onUpdateState(fn: (s: UpdateState) => void): () => void {
   listeners.add(fn);
   return () => { listeners.delete(fn); };
 }
-export function resetUpdateState(): void { state = null; }
+export function resetUpdateState(): void { state = null; noticeMemo.clear(); }
 
 function setState(next: UpdateState) {
-  const changed = !state || state.available !== next.available || state.latest !== next.latest;
+  const changed = !state || state.available !== next.available || state.latest !== next.latest
+    || (state.minPlugin ?? null) !== (next.minPlugin ?? null);
   state = next;
   if (changed) {
     for (const fn of listeners) {
@@ -369,6 +511,9 @@ function setState(next: UpdateState) {
 }
 
 function cachePath() { return join(gripHome(), 'update-check.json'); }
+function readCacheFile(): any {
+  try { return JSON.parse(readFileSync(cachePath(), 'utf8')); } catch { return null; }
+}
 
 function writeCache(s: UpdateState) {
   // Best effort, and never create ~/.grip just for a cache file (a daemon run
@@ -377,7 +522,9 @@ function writeCache(s: UpdateState) {
     if (!existsSync(gripHome())) return;
     writeFileSync(cachePath(), JSON.stringify({
       current: s.current, latest: s.latest, available: s.available, checkedAt: s.checkedAt,
-      headline: s.headline ?? null, notes: s.notes ?? null,
+      headline: s.headline ?? null, notes: s.notes ?? null, minPlugin: s.minPlugin ?? null,
+      // the notice throttle lives in the same file: carry it over
+      notifiedAt: readCacheFile()?.notifiedAt ?? {},
     }, null, 2));
   } catch { /* cache is best-effort */ }
 }
@@ -385,18 +532,63 @@ function writeCache(s: UpdateState) {
 // A cached answer, re-evaluated against the CURRENT version (the cache may
 // have been written by an older bridge that has since been updated).
 export function readCache(): UpdateState | null {
+  const j = readCacheFile();
+  if (!isSemver(j?.latest)) return null;
+  return {
+    current: BRIDGE_VERSION,
+    latest: j.latest,
+    available: compareSemver(j.latest, BRIDGE_VERSION) > 0,
+    checkedAt: typeof j.checkedAt === 'string' ? j.checkedAt : null,
+    headline: typeof j.headline === 'string' ? j.headline : null,
+    notes: typeof j.notes === 'string' ? j.notes : null,
+    minPlugin: isSemver(j.minPlugin) ? j.minPlugin : null,
+  };
+}
+
+// Agent notices (session instructions + first tool result) for a given `latest`
+// are shown at most once per 3 days ACROSS sessions: claim the slot. Returns
+// true when the caller may show the notice now (and records it, in memory and in
+// ~/.grip/update-check.json `notifiedAt`). The purple strip is not throttled;
+// grip_update {check} and grip_health always report the truth.
+export function claimNotice(version: string, now: number = Date.now()): boolean {
+  let last = noticeMemo.get(version) ?? 0;
+  const disk = readCacheFile()?.notifiedAt?.[version];
+  if (typeof disk === 'string' && !Number.isNaN(Date.parse(disk))) last = Math.max(last, Date.parse(disk));
+  if (last && now - last < NOTICE_INTERVAL_MS) return false;
+  noticeMemo.set(version, now);
   try {
-    const j = JSON.parse(readFileSync(cachePath(), 'utf8'));
-    if (!isSemver(j?.latest)) return null;
-    return {
-      current: BRIDGE_VERSION,
-      latest: j.latest,
-      available: compareSemver(j.latest, BRIDGE_VERSION) > 0,
-      checkedAt: typeof j.checkedAt === 'string' ? j.checkedAt : null,
-      headline: typeof j.headline === 'string' ? j.headline : null,
-      notes: typeof j.notes === 'string' ? j.notes : null,
-    };
-  } catch { return null; }
+    if (existsSync(gripHome())) {
+      const j = readCacheFile() ?? {};
+      const notifiedAt: Record<string, string> = { ...(j.notifiedAt ?? {}), [version]: new Date(now).toISOString() };
+      const keep = Object.entries(notifiedAt).sort((a, b) => (a[1] < b[1] ? 1 : -1)).slice(0, 10);
+      writeFileSync(cachePath(), JSON.stringify({ ...j, notifiedAt: Object.fromEntries(keep) }, null, 2));
+    }
+  } catch { /* best-effort */ }
+  return true;
+}
+
+// Release -> state, including the compat.json gate (only fetched when the
+// release is newer than this bridge). A missing/unverifiable compat.json does
+// not throw: the state says available:true, minPlugin:null, compatError — which
+// updateSignal() turns into "not offered".
+async function stateFromRelease(r: Release): Promise<UpdateState> {
+  const available = compareSemver(r.version, BRIDGE_VERSION) > 0;
+  let minPlugin: string | null = null;
+  let compatError: string | null = null;
+  if (available) {
+    try { minPlugin = (await fetchCompat(r, await fetchSums(r))).minPlugin; }
+    catch (err) { compatError = (err as Error).message; logErr(`update: ${r.version} will not be offered: ${compatError}`); }
+  }
+  return {
+    current: BRIDGE_VERSION,
+    latest: r.version,
+    available,
+    checkedAt: new Date().toISOString(),
+    headline: r.headline || null,
+    notes: r.notes || null,
+    minPlugin,
+    compatError,
+  };
 }
 
 // One network check. Never throws: on any failure it logs one stderr line and
@@ -405,14 +597,7 @@ export function readCache(): UpdateState | null {
 export async function checkForUpdate(api: string = releasesApi()): Promise<UpdateState> {
   try {
     const r = await fetchRelease(api);
-    const next: UpdateState = {
-      current: BRIDGE_VERSION,
-      latest: r.version,
-      available: compareSemver(r.version, BRIDGE_VERSION) > 0,
-      checkedAt: new Date().toISOString(),
-      headline: r.headline || null,
-      notes: r.notes || null,
-    };
+    const next = await stateFromRelease(r);
     setState(next);
     writeCache(next);
     if (next.available) logErr(`update: Grip ${next.latest} is available (running ${BRIDGE_VERSION})`);
@@ -427,6 +612,8 @@ export async function checkForUpdate(api: string = releasesApi()): Promise<Updat
       checkedAt: state?.checkedAt ?? null,
       headline: state?.headline ?? null,
       notes: state?.notes ?? null,
+      minPlugin: state?.minPlugin ?? null,
+      compatError: state?.compatError ?? null,
       error: msg,
     };
   }
@@ -458,23 +645,46 @@ function headlineClause(s: UpdateState): string {
 }
 export function updateNoticeText(s: UpdateState): string {
   return `Grip update available: ${s.current} → ${s.latest}.${headlineClause(s)} Tell the user and ask whether they want to update. ` +
-    `Do NOT install it on your own: only if the user explicitly says yes, call grip_update {action:'install'}.`;
+    `Do NOT install it on your own: only after the user explicitly says yes, call grip_update {action:'install', version:'${s.latest}'}.`;
 }
 export function updateInstructionsParagraph(s: UpdateState): string {
   return `\n\nA Grip update is available (${s.current} → ${s.latest}).${headlineClause(s)} Mention it to the user once, at a natural moment, ` +
-    `and ask if they want it. Never install without their explicit yes; if they agree, call grip_update {action:'install'}.`;
+    `and ask if they want it. Never install without their explicit yes; if they agree, call grip_update {action:'install', version:'${s.latest}'}.`;
 }
 
 // ---------- install ----------
 
+export interface InstallOptions {
+  api?: string;
+  // The version the user was shown. The update installs ONLY if the latest
+  // release still equals it (else status 'version_changed').
+  version: string;
+  // CLI only (--force): also overwrite a clone install, and install when
+  // compat.json is missing/unverifiable or no plugin can be checked.
+  force?: boolean;
+  // Plugin windows connected NOW (pluginInfos(bridge), or the status file's list
+  // for the CLI). null/[] = nothing to verify against.
+  plugins?: PluginInfo[] | null;
+  // CLI --yes: the user accepted that no plugin could be checked.
+  acceptUnverified?: boolean;
+  // Called once every check passed and BEFORE anything is downloaded: ask the
+  // person for the final yes. false -> status 'declined', nothing happens.
+  confirm?: (info: { from: string; to: string; headline: string | null }) => Promise<boolean>;
+}
+
 export interface InstallResult {
-  status: 'updated' | 'up_to_date' | 'already_installing' | 'clone_install';
+  status: 'updated' | 'up_to_date' | 'already_installing' | 'clone_install'
+    | 'version_changed' | 'incompatible_plugin' | 'plugins_unverifiable' | 'declined';
   from?: string;
   to?: string;
   home?: string;
   pluginFilesWritten?: string[];
   restart?: 'scheduled' | 'not_managed' | 'none';
   next?: string[];            // clone_install: the commands to run instead
+  reason?: string;            // incompatible_plugin / plugins_unverifiable: why
+  headline?: string | null;   // version_changed: what the new release is
+  notes?: string | null;
+  compatWarning?: string;     // --force installed without a verified compat.json
 }
 
 let installing = false;
@@ -520,12 +730,43 @@ async function downloadVerified(rel: Release, name: string, sums: Map<string, st
   return buf;
 }
 
-// The install routine shared by the MCP tool, the plugin's update_request and
-// the CLI. Everything is downloaded AND verified in memory before the first
-// byte is written, so a failure at any point leaves ~/.grip untouched.
+// Run the downloaded bridge ONCE with --selftest before it replaces anything:
+// it must print exactly `grip-bridge <version> ok` and exit 0 within 10s
+// (it binds no ports and touches no ~/.grip state). Written next to the target
+// so it is the same kind of file in the same kind of place, and removed again.
+async function selfTestBridge(buf: Buffer, home: string, version: string): Promise<void> {
+  const tmp = join(home, `grip-bridge.selftest-${process.pid}-${Date.now()}.mjs`);
+  writeFileSync(tmp, buf, { mode: 0o755 });
+  try {
+    const out = await new Promise<string>((res, rej) => {
+      execFile(process.execPath, [tmp, '--selftest'], {
+        timeout: selftestTimeoutMs(), encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024,
+      }, (err, stdout, stderr) => {
+        if (err) {
+          // Node prints the uncaught error's own line before its stack and "Node.js vNN": prefer that one.
+          const lines = String(stderr || err.message).split('\n').map((l) => l.trim()).filter(Boolean);
+          const why = (err as any).killed
+            ? `no answer within ${selftestTimeoutMs() < 1000 ? selftestTimeoutMs() + 'ms' : Math.round(selftestTimeoutMs() / 1000) + 's'}`
+            : (lines.find((l) => /error/i.test(l)) ?? lines[0] ?? 'it exited with an error').slice(0, 160);
+          rej(new UpdateError(`the downloaded bridge failed its self-test (${why}); nothing was changed.`, 'selftest_failed'));
+        } else res(String(stdout));
+      });
+    });
+    if (out.trim() !== `grip-bridge ${version} ok`) {
+      throw new UpdateError(`the downloaded bridge failed its self-test (it reported "${out.trim().slice(0, 80)}", expected "grip-bridge ${version} ok"); nothing was changed.`, 'selftest_failed');
+    }
+  } finally {
+    try { rmSync(tmp, { force: true }); } catch { /* ignore */ }
+  }
+}
+
+// The install routine shared by the plugin's update_request, the MCP tool and
+// the CLI. Order: pin (the user must have seen THIS version) -> clone guard ->
+// compat.json verified -> connected plugins compatible (re-verified NOW) ->
+// everything downloaded + verified in memory -> new bridge self-tested -> only
+// then writes (atomic per file). A failure at any point leaves ~/.grip untouched.
 // Does not restart anything — see installAndScheduleRestart().
-// `force` is for the CLI only: it overwrites a clone install's ~/.grip copy.
-export async function installUpdate(o: { api?: string; force?: boolean } = {}): Promise<InstallResult> {
+export async function installUpdate(o: InstallOptions): Promise<InstallResult> {
   if (installing) return { status: 'already_installing' };
   installing = true;
   try {
@@ -533,31 +774,74 @@ export async function installUpdate(o: { api?: string; force?: boolean } = {}): 
     const rel = await fetchRelease(api).catch((err: Error) => {
       throw new UpdateError(`could not read the latest release: ${err.message}`);
     });
-    // Keep the shared state honest even though this wasn't a scheduled check.
     const available = compareSemver(rel.version, BRIDGE_VERSION) > 0;
-    setState({
-      current: BRIDGE_VERSION, latest: rel.version, available, checkedAt: new Date().toISOString(),
-      headline: rel.headline || null, notes: rel.notes || null,
-    });
-    if (!available) return { status: 'up_to_date', from: BRIDGE_VERSION, to: rel.version };
+    if (!available) {
+      // Keep the shared state honest even though this wasn't a scheduled check.
+      setState({
+        current: BRIDGE_VERSION, latest: rel.version, available, checkedAt: new Date().toISOString(),
+        headline: rel.headline || null, notes: rel.notes || null, minPlugin: null, compatError: null,
+      });
+      return { status: 'up_to_date', from: BRIDGE_VERSION, to: rel.version };
+    }
 
     // Never update a developer install over the top of its clone: git pull does that.
     if (!o.force && readInstallRecord().source === 'clone') {
       return { status: 'clone_install', from: BRIDGE_VERSION, to: rel.version, next: CLONE_NEXT_STEPS };
     }
 
+    const sums = await fetchSums(rel);
+
+    // compat.json: verified, or the release is not installable (CLI --force excepted).
+    let minPlugin: string | null = null;
+    let compatError: string | null = null;
+    try { minPlugin = (await fetchCompat(rel, sums)).minPlugin; }
+    catch (err) { compatError = (err as Error).message; }
+    // Keep the shared state (and with it the strip / notices) honest.
+    setState({
+      current: BRIDGE_VERSION, latest: rel.version, available, checkedAt: new Date().toISOString(),
+      headline: rel.headline || null, notes: rel.notes || null, minPlugin, compatError,
+    });
+
+    if (o.version !== rel.version) {
+      return { status: 'version_changed', from: BRIDGE_VERSION, to: rel.version, headline: rel.headline || null, notes: rel.notes || null };
+    }
+
+    let compatWarning: string | undefined;
+    if (!minPlugin) {
+      if (!o.force) throw new UpdateError(compatError ?? `release ${rel.version} has no verifiable compatibility info`, 'compat_unverified');
+      compatWarning = `WARNING: ${compatError}. Installing anyway because of --force: nothing checked that your Figma plugin works with ${rel.version}.`;
+      logErr(`update: ${compatWarning}`);
+    } else {
+      const verdict = checkPluginCompat(minPlugin, rel.version, o.plugins);
+      if (verdict.kind === 'incompatible') return { status: 'incompatible_plugin', from: BRIDGE_VERSION, to: rel.version, reason: verdict.reason };
+      if (verdict.kind === 'unverifiable' && !(o.acceptUnverified || o.force)) {
+        return { status: 'plugins_unverifiable', from: BRIDGE_VERSION, to: rel.version, reason: verdict.reason };
+      }
+    }
+
+    if (o.confirm && !(await o.confirm({ from: BRIDGE_VERSION, to: rel.version, headline: rel.headline || null }))) {
+      return { status: 'declined', from: BRIDGE_VERSION, to: rel.version };
+    }
+
     // 1. download + verify everything first
-    const sums = parseSums((await downloadAsset(rel, ASSET_SUMS, SUMS_MAX_BYTES)).toString('utf8'));
     const bridgeBuf = await downloadVerified(rel, ASSET_BRIDGE, sums);
     const pluginBufs: Array<[string, Buffer]> = [];
     for (const [assetName, localName] of Object.entries(PLUGIN_ASSETS)) {
       pluginBufs.push([localName, await downloadVerified(rel, assetName, sums)]);
     }
 
-    // 2. write (atomic per file), only inside ~/.grip
+    // 2. the new bridge must run (and say its own version) before anything is replaced
     const home = resolve(gripHome());
     const within = (p: string) => resolve(p).startsWith(home + sep);
+    const homeExisted = existsSync(home);
     mkdirSync(home, { recursive: true });
+    try { await selfTestBridge(bridgeBuf, home, rel.version); }
+    catch (err) {
+      if (!homeExisted) { try { rmdirSync(home); } catch { /* not empty / ignore */ } }
+      throw err;
+    }
+
+    // 3. write (atomic per file), only inside ~/.grip
     const pluginDir = join(home, 'figma-plugin');
     mkdirSync(pluginDir, { recursive: true });
     const written: string[] = [];
@@ -581,14 +865,14 @@ export async function installUpdate(o: { api?: string; force?: boolean } = {}): 
     try { writeInstallRecord('release', rel.version); } catch { /* the record is advisory */ }
 
     logErr(`update: installed ${BRIDGE_VERSION} -> ${rel.version} into ${home}`);
-    return { status: 'updated', from: BRIDGE_VERSION, to: rel.version, home, pluginFilesWritten: written };
+    return { status: 'updated', from: BRIDGE_VERSION, to: rel.version, home, pluginFilesWritten: written, ...(compatWarning ? { compatWarning } : {}) };
   } finally {
     installing = false;
   }
 }
 
 // Put the previous bridge back (written by the last install). Bridge only: the
-// plugin files in ~/.grip/figma-plugin are left as they are.
+// plugin files in ~/.grip/figma-plugin stay at the NEW version.
 export function rollbackBridge(): { restored: string } {
   const home = gripHome();
   const prev = join(home, 'grip-bridge.prev.mjs');
@@ -621,8 +905,8 @@ export function isManagedInstall(): boolean {
 
 // install, then (daemon only) schedule the restart ~1s out so the tool/WS
 // response has flushed. The new process comes from ~/.grip/grip-bridge.mjs.
-export async function installAndScheduleRestart(o: { force?: boolean } = {}): Promise<InstallResult> {
-  const r = await installUpdate({ force: o.force });
+export async function installAndScheduleRestart(o: InstallOptions): Promise<InstallResult> {
+  const r = await installUpdate(o);
   if (r.status !== 'updated') return r;
   if (!restartHook) return { ...r, restart: 'none' };
   if (!restartManaged) {
@@ -646,6 +930,26 @@ function processCommandLine(pid: number): string | null {
     }
     return execFileSync('ps', ['-o', 'command=', '-p', String(pid)],
       { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null;
+  } catch { return null; }
+}
+
+// The plugin windows a RUNNING daemon reports in its status file (the CLI has no
+// WebSocket of its own). null = cannot tell: no daemon, a stale file, or a
+// daemon older than 0.8.0 that does not list its plugins.
+export function readDaemonPlugins(): PluginInfo[] | null {
+  try {
+    const j = JSON.parse(readFileSync(statusFilePath(), 'utf8'));
+    const pid = Number(j?.pid);
+    if (!Number.isInteger(pid) || pid <= 1) return null;
+    try { process.kill(pid, 0); } catch { return null; }
+    if (!Array.isArray(j.plugins)) return null;
+    return j.plugins.map((p: any) => ({
+      pluginVersion: typeof p?.pluginVersion === 'string' ? p.pluginVersion : null,
+      fileName: typeof p?.fileName === 'string' ? p.fileName : undefined,
+      wsReady: p?.wsReady !== false,
+      hello: p?.hello !== false,
+      minBridge: typeof p?.minBridge === 'string' ? p.minBridge : null,
+    }));
   } catch { return null; }
 }
 
@@ -677,25 +981,58 @@ export function stopRunningDaemon(): { stopped: boolean; note: string } {
 
 // ---------- plugin strip wiring ----------
 
-// Connect update state to the Figma plugin strip: the bridge pushes
-// {type:'update', available, latest, headline?} to every plugin (on hello and on change),
-// and a plugin's {type:'update_request'} (the user's second click on the
-// indicator) runs the same install routine as the grip_update tool. The
-// outcome goes back as {type:'update_result', status, from?, to?, message?}.
+// Connect the update SIGNAL to the Figma plugin strip. The bridge pushes
+//   {type:'update', available, latest, current, headline}
+// to every plugin (on hello and whenever the signal changes), where `available`
+// is updateSignal().signal: an update exists AND every connected plugin is
+// compatible with it. It is recomputed whenever the update state changes or a
+// plugin connects/disconnects. The strip turns purple on `available:true`; one
+// click sends {type:'update_request', version:'<the version shown>'} and the
+// outcome comes back as
+//   {type:'update_result', status, from?, to?, restart?, next?, code?, message?, latest?}
+// (status 'updated' | 'up_to_date' | 'already_installing' | 'clone_install' |
+// 'error'; on 'error' `code` is version_changed | incompatible_plugin |
+// plugins_unverifiable | compat_unverified | selftest_failed | version_required |
+// origin | install_failed). Older plugins ignore all of this.
 export function wireUpdateToBridge(bridge: PluginBridge): () => void {
-  const push = (s: UpdateState | null) => bridge.setUpdateState(s ? { available: s.available, latest: s.latest, headline: s.headline ?? null } : null);
-  push(getUpdateState());
-  const off = onUpdateState(push);
-  const onRequest = async (e: { sessionId: string }) => {
+  let lastBlocked = '';
+  const recompute = () => {
+    const s = updatesDisabled() ? null : getUpdateState();
+    const plugins = pluginInfos(bridge);
+    const sig = updateSignal(s, plugins);
+    const blocked = s?.available && !sig.signal ? (sig.blockedReason ?? '') : '';
+    if (blocked && blocked !== lastBlocked) logErr(`update: Grip ${s!.latest} is available but not offered: ${blocked}`);
+    lastBlocked = blocked;
+    bridge.setUpdateState(s ? { available: sig.signal, latest: s.latest, current: BRIDGE_VERSION, headline: s.headline ?? null } : null);
+  };
+  recompute();
+  const offState = onUpdateState(recompute);
+  bridge.on('session-change', recompute);
+
+  const onRequest = async (e: { sessionId: string; version?: string }) => {
     let msg: Record<string, unknown>;
     try {
-      const r = await installAndScheduleRestart();
-      msg = { type: 'update_result', status: r.status, from: r.from, to: r.to, restart: r.restart, next: r.next };
+      if (!e.version) {
+        msg = { type: 'update_result', status: 'error', code: 'version_required', message: 'this Grip plugin did not say which version you were shown; reload the plugin in Figma and try again' };
+      } else {
+        const r = await installAndScheduleRestart({ version: e.version, plugins: pluginInfos(bridge) });
+        if (r.status === 'version_changed') {
+          msg = { type: 'update_result', status: 'error', code: 'version_changed', latest: r.to, message: `Grip ${r.to} is now the latest release (you were shown ${e.version}); the strip refreshes so you can review it` };
+        } else if (r.status === 'incompatible_plugin' || r.status === 'plugins_unverifiable') {
+          msg = { type: 'update_result', status: 'error', code: r.status, message: r.reason };
+        } else {
+          msg = { type: 'update_result', status: r.status, from: r.from, to: r.to, restart: r.restart, next: r.next };
+        }
+      }
     } catch (err) {
-      msg = { type: 'update_result', status: 'error', message: (err as Error).message };
+      const code = err instanceof UpdateError && err.code ? err.code : 'install_failed';
+      msg = { type: 'update_result', status: 'error', code, message: (err as Error).message };
     }
     bridge.sendTo(e.sessionId, msg);
+    // The state may have changed under the user (a newer release, a refused
+    // install): after the result, make sure this strip shows the truth again.
+    if (msg.status === 'error') { recompute(); bridge.pushUpdate(e.sessionId, true); }
   };
   bridge.on('update-request', onRequest);
-  return () => { off(); bridge.off('update-request', onRequest); };
+  return () => { offState(); bridge.off('session-change', recompute); bridge.off('update-request', onRequest); };
 }

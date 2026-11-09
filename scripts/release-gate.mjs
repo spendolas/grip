@@ -6,14 +6,15 @@
 // scripts/release-gate.test.mjs; the CLI at the bottom is what the workflow runs.
 //
 // Modelled on Gaffer's gate (spendolas/gaffer-ae). Differences: Grip's changelog
-// headings are `## 0.8.0` (exact version, no "v"), and a release has 7 assets.
+// headings are `## 0.8.0` (exact version, no "v"), a release has 8 assets, and the
+// notes written for the release get an install footer (withInstallFooter).
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Every file a release must carry. The in-place updater downloads five of them
+// Every file a release must carry. The in-place updater downloads six of them
 // by exact name (see src/bridge/src/update.ts: ASSET_BRIDGE, PLUGIN_ASSETS,
-// ASSET_SUMS); grip-install.zip and install.mjs are for fresh installs.
+// ASSET_SUMS, ASSET_COMPAT); grip-install.zip and install.mjs are for fresh installs.
 export const REQUIRED_ASSETS = [
   'grip-bridge.mjs',
   'install.mjs',
@@ -21,8 +22,26 @@ export const REQUIRED_ASSETS = [
   'grip-plugin-ui.html',
   'grip-plugin-manifest.json',
   'grip-install.zip',
+  'compat.json',
   'SHA256SUMS.txt',
 ];
+
+// Everything from this line on in a release body is for people reading the
+// GitHub release page. The updater cuts it (src/bridge/src/update.ts:
+// INSTALL_MARKER) so update notices never carry it.
+export const INSTALL_MARKER = '<!-- grip-install -->';
+
+export function installFooter(version) {
+  return '**Install:** tell your agent `Install Grip from https://github.com/spendolas/grip/releases/latest` '
+    + '\u2014 the steps are in the '
+    + `[README for this release](https://github.com/spendolas/grip/blob/v${version}/README.md#install-instructions-for-claude), `
+    + 'so the instructions always match the files attached to this release.';
+}
+
+// The release body: the CHANGELOG notes, then the marker line, then the footer.
+export function withInstallFooter(notes, version) {
+  return notes.replace(/\s+$/, '') + '\n\n' + INSTALL_MARKER + '\n' + installFooter(version) + '\n';
+}
 
 export class GateError extends Error {}
 
@@ -150,7 +169,7 @@ export function main(argv, env) {
   const release = releaseText === '' ? null : JSON.parse(releaseText);
   const changelog = readFileSync(args.changelog, 'utf8');
   const { action, notes } = decide({ version: args.version, tags, release, changelog });
-  if (notes !== null) writeFileSync(args['notes-out'], notes);
+  if (notes !== null) writeFileSync(args['notes-out'], withInstallFooter(notes, args.version));
   if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `action=${action}\n`);
   console.log(`release-gate: v${args.version} -> ${action}`);
   return action;

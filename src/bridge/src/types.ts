@@ -4,6 +4,18 @@
 // plugin's PLUGIN_VERSION on a release bump.
 export const BRIDGE_VERSION = '0.8.0';
 
+// The OLDEST Figma plugin version this bridge supports. The published plugin is
+// updated through Figma, not by the bridge's self-updater, so an installed
+// plugin can lag the bridge. The bridge refuses to signal or install an update
+// to a bridge version that the connected plugins cannot talk to (see
+// updateSignal in update.ts). Packaged into the release as compat.json by
+// scripts/package-release.mjs — this line is the single source of truth.
+// Raise it ONLY when a bridge release needs plugin features/protocol that older
+// plugins lack, and publish the new plugin in Figma BEFORE cutting that release.
+// 0.7.0: the bridge's `hello` contract (version + capabilities + fileKey) and
+// every plugin method the bridge calls exist in 0.7.0; 0.8.0 added no methods.
+export const MIN_PLUGIN_VERSION = '0.7.0';
+
 export interface WSRequest {
   id: string;
   method: string;
@@ -24,6 +36,8 @@ export interface WSEvent {
 export interface WSHello {
   kind: 'hello';
   version?: string;
+  // The oldest bridge this plugin works with (informational; plugin 0.8.0+).
+  minBridge?: string;
   capabilities?: string[];
   fileKey: string;
   fileName: string;
@@ -70,6 +84,11 @@ export interface McpSession {
   // True once this session has been shown the "update available" notice on a
   // tool result (it is appended to the FIRST successful result only, once).
   updateNoticeSent: boolean;
+  // True when the notice throttle (once per 3 days per version, across
+  // sessions) was claimed for this session at creation, i.e. the session
+  // `instructions` already carry the paragraph; the first tool result then
+  // carries the matching notice.
+  updateNoticeGranted?: boolean;
 }
 
 export interface SerializedPaint {
