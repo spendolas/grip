@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
 
 // Tool definitions. The handler in mcp-server.ts forwards `name` and the
 // validated `params` over WS to the plugin, where the actual Plugin API
@@ -521,7 +520,7 @@ export const TOOLS: ToolDef[] = [
     schema: z.object({
       nodeId: z.string(),
       property: z.string(),
-      value: z.any(),
+      value: z.any().optional(),
     }),
   },
   {
@@ -541,7 +540,7 @@ export const TOOLS: ToolDef[] = [
       width: z.number().positive().optional(),
       height: z.number().positive().optional(),
       componentId: z.string().optional(),
-      props: z.record(z.any()).optional(),
+      props: z.record(z.string(), z.any()).optional(),
       selectAfter: z.boolean().optional(),
     }),
   },
@@ -560,7 +559,7 @@ export const TOOLS: ToolDef[] = [
       index: z.number().int().nonnegative().optional(),
       spec: z.object({
         type: z.string(),
-        props: z.record(z.any()).optional(),
+        props: z.record(z.string(), z.any()).optional(),
         children: z.array(z.any()).optional(),
       }).passthrough(),
     }),
@@ -574,7 +573,7 @@ export const TOOLS: ToolDef[] = [
     schema: z.object({
       variableId: z.string(),
       modeId: z.string(),
-      value: z.any(),
+      value: z.any().optional(),
     }),
   },
   {
@@ -589,7 +588,7 @@ export const TOOLS: ToolDef[] = [
       styleId: z.string().optional(),
       name: z.string(),
       type: z.enum(['PAINT', 'TEXT', 'EFFECT', 'GRID']),
-      value: z.any(),
+      value: z.any().optional(),
     }),
   },
   // ---------- selection / viewport ----------
@@ -780,7 +779,7 @@ export const TOOLS: ToolDef[] = [
       name: z.string().optional(),
       description: z.string().optional(),
       scopes: z.array(z.string()).optional(),
-      codeSyntax: z.record(z.string().nullable()).optional(),
+      codeSyntax: z.record(z.string(), z.string().nullable()).optional(),
       hiddenFromPublishing: z.boolean().optional(),
     }),
   },
@@ -837,7 +836,7 @@ export const TOOLS: ToolDef[] = [
     description: 'Pre-load a font so subsequent text writes do not throw. Omit style: loads all.',
     detail:
       "Shape {family, style?, variationSettings?}. With style: loads that one style -> {success, family, style}. Without style: loads EVERY style of the family (variable and static families; Figma FontNameInput) -> {success, family, style:null, allStyles:true}; if the client rejects a style-less load it falls back to the legacy 'Regular' default -> {success, family, style:'Regular', allStyles:false}. variationSettings (e.g. {wght:550}) is accepted for symmetry with node.fontName but ignored by loading (it affects rendering only) and echoed back when style is omitted. set_node_property fontName, set_text_range_property fontName and set_style TEXT already auto-load what they need.",
-    schema: z.object({ family: z.string(), style: z.string().optional(), variationSettings: z.record(z.number()).optional() }),
+    schema: z.object({ family: z.string(), style: z.string().optional(), variationSettings: z.record(z.string(), z.number()).optional() }),
   },
   {
     name: 'set_reactions',
@@ -1072,8 +1071,8 @@ export const TOOLS: ToolDef[] = [
     schema: z.object({
       scope: z.string().optional(),
       types: z.array(NodeTypeEnum).optional(),
-      pluginData: z.record(z.any()).optional(),
-      sharedPluginData: z.record(z.any()).optional(),
+      pluginData: z.record(z.string(), z.any()).optional(),
+      sharedPluginData: z.record(z.string(), z.any()).optional(),
       maxResults: z.number().int().positive().optional(),
     }),
   },
@@ -1211,7 +1210,7 @@ export const TOOLS: ToolDef[] = [
     detail: "op=create_row: create a new canvas row (was slides_create_canvas_row) — {}. op=get_grid: read the current canvas grid (was slides_get_canvas_grid) — {}. op=set_grid: set the canvas grid (was slides_set_canvas_grid) — {grid}. op=move_nodes: move nodes to a (row, column) coordinate (was slides_move_nodes_to_coord) — {nodeIds, row, column}. op=focus: the slide shown in single-slide view (page.focusedSlide) — {} reads {focusedSlideId}; {nodeId: '<SLIDE id>'} focuses it; {nodeId: null} clears. (SLIDE nodes also carry isSkippedSlide: read in get_node, write via set_node_property.)",
     schema: z.object({ op: z.enum(['create_row', 'get_grid', 'set_grid', 'move_nodes', 'focus']) }).passthrough(),
   },
-  { name: 'set_slide_transition', description: 'Slides editor: set transition on a SLIDE node.', schema: z.object({ nodeId: z.string(), transition: z.any() }) },
+  { name: 'set_slide_transition', description: 'Slides editor: set transition on a SLIDE node.', schema: z.object({ nodeId: z.string(), transition: z.any().optional() }) },
   { name: 'get_slide_transition', description: 'Slides editor: read a SLIDE node\'s transition.', schema: z.object({ nodeId: z.string() }) },
   {
     name: 'ui', category: 'misc',
@@ -1219,7 +1218,7 @@ export const TOOLS: ToolDef[] = [
     detail: "op=show: show the plugin window (was ui_show) — {}. op=hide: hide the plugin window (was ui_hide) — {}. op=resize: resize the plugin window (was ui_resize) — {width, height}. op=reposition: reposition the plugin window (was ui_reposition) — {x, y}.",
     schema: z.object({ op: z.enum(['show', 'hide', 'resize', 'reposition']) }).passthrough(),
   },
-  { name: 'set_relaunch_data', description: "Attach plugin re-entry buttons to a node. data: { command: tooltip }.", schema: z.object({ nodeId: z.string(), data: z.record(z.string()) }) },
+  { name: 'set_relaunch_data', description: "Attach plugin re-entry buttons to a node. data: { command: tooltip }.", schema: z.object({ nodeId: z.string(), data: z.record(z.string(), z.string()) }) },
   { name: 'get_relaunch_data', description: 'Read relaunch data on a node.', schema: z.object({ nodeId: z.string() }) },
   { name: 'get_top_level_frame', description: 'Find the top-level FRAME ancestor of a node.', schema: z.object({ nodeId: z.string() }) },
   { name: 'get_text_content', description: 'Walk a subtree and return every TEXT node\'s characters.', schema: z.object({ nodeId: z.string() }) },
@@ -1299,8 +1298,8 @@ export const TOOLS: ToolDef[] = [
     schema: z.object({ op: z.enum(['apply', 'remove']) }).passthrough(),
   },
   { name: 'set_timeline_duration', description: 'Set a Motion timeline\'s duration (seconds). timelineId from get_animations timelines[].id.', schema: z.object({ nodeId: z.string(), timelineId: z.string(), duration: z.number().nonnegative() }) },
-  { name: 'spring_to_normalized', description: 'Figma Motion helper: convert physical spring params to a normalized easing curve. `spring` forwarded to figma.motion.physicalSpringToNormalized.', schema: z.object({ spring: z.any() }) },
-  { name: 'map_nodes', description: "Bulk-edit matched nodes with a Grip-owned, chunked, yielding loop — the SAFE way to set X on every matching node without freezing Figma. `query` must have `types` or `scope`; then one of `set`, `delete:true`, `rename`, `swap`, or `applyStyle`. Returns {matched, applied, truncated}. Call grip_capabilities {tool:'map_nodes'} for query fields, op params, and budget/chunk tuning.", detail: "`query`: {types:[...] (uses fast findAllWithCriteria), name, nameFlags, scope:<nodeId subtree>, page}. `query` must have `types` or `scope` (a bare page-wide match is refused). Bounded by `budget` (default 10000) with `chunk` (default 200). Prefer this over run_script for uniform bulk mutations. `set`: property→value map, like set_node_property. `delete:true`: removes matched nodes. `rename:{find,replace,regex?}`: `find`/`replace` are literal substring substitution unless `regex:true` (then `find` is a RegExp source, global flag). `swap:{componentKey?,componentId?}`: resolves `componentKey` via importComponentByKeyAsync or `componentId` via getNode, then swaps it onto each matched INSTANCE (non-instance matches are skipped). `applyStyle:{styleId,type?}`: `type` selects the style slot — fill|text|effect|grid|stroke — defaulting to fill.", schema: z.object({ query: z.object({ types: z.union([z.string(), z.array(z.string())]).optional(), name: z.string().optional(), nameFlags: z.string().optional(), scope: z.string().optional(), page: z.string().optional() }), set: z.record(z.any()).optional(), delete: z.boolean().optional(), rename: z.object({ find: z.string(), replace: z.string(), regex: z.boolean().optional() }).optional(), swap: z.object({ componentKey: z.string().optional(), componentId: z.string().optional() }).optional(), applyStyle: z.object({ styleId: z.string(), type: z.enum(['fill', 'text', 'effect', 'grid', 'stroke']).optional() }).optional(), budget: z.number().int().positive().optional(), chunk: z.number().int().positive().optional() }) },
+  { name: 'spring_to_normalized', description: 'Figma Motion helper: convert physical spring params to a normalized easing curve. `spring` forwarded to figma.motion.physicalSpringToNormalized.', schema: z.object({ spring: z.any().optional() }) },
+  { name: 'map_nodes', description: "Bulk-edit matched nodes with a Grip-owned, chunked, yielding loop — the SAFE way to set X on every matching node without freezing Figma. `query` must have `types` or `scope`; then one of `set`, `delete:true`, `rename`, `swap`, or `applyStyle`. Returns {matched, applied, truncated}. Call grip_capabilities {tool:'map_nodes'} for query fields, op params, and budget/chunk tuning.", detail: "`query`: {types:[...] (uses fast findAllWithCriteria), name, nameFlags, scope:<nodeId subtree>, page}. `query` must have `types` or `scope` (a bare page-wide match is refused). Bounded by `budget` (default 10000) with `chunk` (default 200). Prefer this over run_script for uniform bulk mutations. `set`: property→value map, like set_node_property. `delete:true`: removes matched nodes. `rename:{find,replace,regex?}`: `find`/`replace` are literal substring substitution unless `regex:true` (then `find` is a RegExp source, global flag). `swap:{componentKey?,componentId?}`: resolves `componentKey` via importComponentByKeyAsync or `componentId` via getNode, then swaps it onto each matched INSTANCE (non-instance matches are skipped). `applyStyle:{styleId,type?}`: `type` selects the style slot — fill|text|effect|grid|stroke — defaulting to fill.", schema: z.object({ query: z.object({ types: z.union([z.string(), z.array(z.string())]).optional(), name: z.string().optional(), nameFlags: z.string().optional(), scope: z.string().optional(), page: z.string().optional() }), set: z.record(z.string(), z.any()).optional(), delete: z.boolean().optional(), rename: z.object({ find: z.string(), replace: z.string(), regex: z.boolean().optional() }).optional(), swap: z.object({ componentKey: z.string().optional(), componentId: z.string().optional() }).optional(), applyStyle: z.object({ styleId: z.string(), type: z.enum(['fill', 'text', 'effect', 'grid', 'stroke']).optional() }).optional(), budget: z.number().int().positive().optional(), chunk: z.number().int().positive().optional() }) },
   {
     name: 'run_script',
     description:
@@ -1343,7 +1342,7 @@ export const TOOLS: ToolDef[] = [
       start: z.number().int().nonnegative(),
       end: z.number().int().nonnegative(),
       property: z.string(),
-      value: z.any(),
+      value: z.any().optional(),
     }),
   },
 
@@ -1385,6 +1384,36 @@ const richReadProps = {
     description: 'Whitelist of top-level fields to include. Omit to return all. Opt-in only (never in default output, name them here): resolvedVariableModes ({collectionId: modeId}), resolvedVariableModeNames (adds collection/mode names), inferredVariables ({field: [variableId]}).',
   },
 };
+
+// zod 4's native toJSONSchema is more verbose than the zod 3 converter we used to ship in
+// ways that mean nothing to an agent but cost tokens in every tools/list: safe-integer
+// min/max on every `.int()`, `propertyNames:{type:'string'}` on records, `items:{}` on
+// untyped arrays, and `{}` where zod 3 wrote `true` on passthrough objects. Normalise them
+// back so the published descriptors are what they were before the migration.
+const SAFE_INT = Number.MAX_SAFE_INTEGER;
+function normalizeJsonSchema(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(normalizeJsonSchema);
+  if (!node || typeof node !== 'object') return node;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+    if (k === 'maximum' && v === SAFE_INT) continue;
+    if (k === 'minimum' && v === -SAFE_INT) continue;
+    if (k === 'propertyNames' && JSON.stringify(v) === '{"type":"string"}') continue;
+    if (k === 'items' && v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0) continue;
+    if (k === 'additionalProperties' && v && typeof v === 'object' && Object.keys(v).length === 0) {
+      // passthrough object -> `true` (zod 3); z.record(string, any) stays `{}` (zod 3 wrote `{}` there too).
+      out[k] = 'properties' in node ? true : v;
+      continue;
+    }
+    // `properties` / `$defs` values are schemas keyed by user names: recurse into the values only.
+    if ((k === 'properties' || k === 'definitions' || k === '$defs' || k === 'patternProperties') && v && typeof v === 'object') {
+      out[k] = Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([pk, pv]) => [pk, normalizeJsonSchema(pv)]));
+      continue;
+    }
+    out[k] = normalizeJsonSchema(v);
+  }
+  return out;
+}
 
 export function toolInputSchema(name: string): Record<string, unknown> {
   switch (name) {
@@ -2441,9 +2470,11 @@ export function toolInputSchema(name: string): Record<string, unknown> {
       const def = TOOLS.find((t) => t.name === name);
       if (def?.schema) {
         try {
-          const js = zodToJsonSchema(def.schema, { $refStrategy: 'none', target: 'jsonSchema7' }) as Record<string, unknown>;
-          delete (js as Record<string, unknown>).$schema;
-          return js;
+          // io:'output' keeps `additionalProperties:false` on plain (strip) objects, as the
+          // zod 3 converter emitted; `reused:'inline'` = no $ref hoisting.
+          const js = z.toJSONSchema(def.schema, { target: 'draft-7', io: 'output', reused: 'inline', unrepresentable: 'any' }) as Record<string, unknown>;
+          delete js.$schema;
+          return normalizeJsonSchema(js) as Record<string, unknown>;
         } catch {
           /* fall through to the permissive default */
         }

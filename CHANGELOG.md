@@ -14,6 +14,7 @@ Newest first. Each `## <version>` heading is the exact version number; the GitHu
 - Grip looks once a day whether a newer version exists. Set `GRIP_NO_UPDATE_CHECK=1` to turn that off completely.
 - Installing is now one download: tell your agent "Install Grip from https://github.com/spendolas/grip/releases/latest" and the steps in the README fetch a single zip from that release, verify it, and run the installer.
 - If you installed from a git clone, Grip never overwrites that install. Update it with `git pull`, `npm run build` and `node bridge/install.mjs`.
+- Bridge schemas moved to zod 4, which fixes the one dependency advisory the audit used to accept (zod memory exhaustion on oversized lists). The tool descriptions agents see are unchanged, and the dependency audit now has no accepted advisories.
 
 ## 0.7.0
 

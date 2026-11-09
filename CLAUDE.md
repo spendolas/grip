@@ -74,7 +74,7 @@ bridge/src/
   socket-transport.ts MCP SDK Transport over a Node socket (newline JSON-RPC)
   proxy.ts            shim pipe: stdin↔socket↔stdout + typed-error-on-drop + reconnect signal
   mcp-server.ts       per-session Server() factory; event fan-out; grip_health/grip_diagnose; call logging
-  tools.ts            zod schemas + JSON-Schema descriptors for the tools
+  tools.ts            zod 4 schemas + JSON-Schema descriptors for the tools (z.toJSONSchema + normalizeJsonSchema keep them byte-identical to the old zod 3 output)
   serializer.ts       hex/depth helpers (real serialization is in plugin)
   types.ts            shared interfaces (McpSession, PluginSessionInfo, WSHello w/ version+capabilities)
 plugin/
