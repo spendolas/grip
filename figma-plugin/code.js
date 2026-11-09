@@ -5169,6 +5169,13 @@ async function upsertStyle(params) {
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
 const PLUGIN_VERSION = '0.8.0';
+// The oldest bridge this plugin works with. Sent in `hello` (ui.html forwards the
+// full hello). Informational for now: a bridge that sees minBridge > its own
+// version knows IT is the stale side, logs it, shows it in grip_health and counts
+// it as "update recommended". Bridge-side counterpart: MIN_PLUGIN_VERSION in
+// src/bridge/src/types.ts. Raise only when this plugin needs bridge features
+// older bridges lack.
+const MIN_BRIDGE_VERSION = '0.7.0';
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
 // if two builds share a number). 'nodeBudget' = bounded serialize is live.
@@ -5178,6 +5185,7 @@ function sendHello() {
     figma.ui.postMessage({
         kind: 'hello',
         version: PLUGIN_VERSION,
+        minBridge: MIN_BRIDGE_VERSION,
         capabilities: PLUGIN_CAPABILITIES,
         fileKey: (_a = figma.fileKey) !== null && _a !== void 0 ? _a : figma.root.id,
         fileName: figma.root.name,
@@ -5234,11 +5242,11 @@ figma.ui.onmessage = async (msg) => {
     }
     // The strip is clickable while disconnected. The plugin alone cannot start
     // the bridge — Figma's sandbox can't launch a local process — so the only
-    // useful thing it can offer is where to go and install it. Opening the
-    // README rather than a separate hosted page keeps one copy of the install
-    // instructions instead of two that drift apart.
+    // useful thing it can offer is where to go and install it. The latest release
+    // page is the pointer: each release links the README at its own tag, so the
+    // install steps and the downloadable files always match.
     if (msg && msg.kind === 'openSetup') {
-        figma.openExternal('https://github.com/spendolas/grip#install');
+        figma.openExternal('https://github.com/spendolas/grip/releases/latest');
         return;
     }
     if (!msg || msg.kind !== 'request')

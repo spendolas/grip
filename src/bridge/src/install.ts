@@ -291,8 +291,8 @@ if (INSTALL_TYPE === 'clone') {
   log('Updating later: this is a developer install. Run `git pull && node bridge/install.mjs`');
   log('in your clone (the in-place updater never overwrites a clone install).');
 } else {
-  log('Updating later: ask your agent to "update Grip", click the ↑ update label in the');
-  log(`plugin strip when it appears, or run: node ${ENTRY} update`);
+  log('Updating later: ask your agent to "update Grip", click the plugin strip when it');
+  log(`turns purple, or run: node ${ENTRY} update`);
 }
 log();
 if (!wantHttp) log('  (on-demand: nothing stays running; the first call starts it.)');

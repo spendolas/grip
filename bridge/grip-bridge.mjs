@@ -10584,6 +10584,881 @@ import { EventEmitter } from "events";
 // src/types.ts
 var BRIDGE_VERSION = "0.8.0";
 
+// src/update.ts
+import { createHash } from "node:crypto";
+import { execFile, execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  rmdirSync,
+  writeFileSync
+} from "node:fs";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { homedir } from "node:os";
+import { dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+var DEFAULT_RELEASES_API = "https://api.github.com/repos/spendolas/grip/releases/latest";
+var ASSET_BRIDGE = "grip-bridge.mjs";
+var ASSET_SUMS = "SHA256SUMS.txt";
+var ASSET_COMPAT = "compat.json";
+var PLUGIN_ASSETS = {
+  "grip-plugin-code.js": "code.js",
+  "grip-plugin-ui.html": "ui.html",
+  "grip-plugin-manifest.json": "manifest.json"
+};
+var UPDATE_ASSET_NAMES = [ASSET_BRIDGE, ...Object.keys(PLUGIN_ASSETS), ASSET_SUMS, ASSET_COMPAT];
+var INSTALL_MARKER = "<!-- grip-install -->";
+var RELEASE_MAX_BYTES = 256 * 1024;
+var SUMS_MAX_BYTES = 64 * 1024;
+var COMPAT_MAX_BYTES = 4 * 1024;
+var NOTICE_INTERVAL_MS = 3 * 24 * 60 * 60 * 1e3;
+var SELFTEST_TIMEOUT_MS = 1e4;
+function selftestTimeoutMs() {
+  const v = Number(process.env.GRIP_SELFTEST_TIMEOUT_MS);
+  return Number.isFinite(v) && v > 0 ? Math.min(v, SELFTEST_TIMEOUT_MS) : SELFTEST_TIMEOUT_MS;
+}
+var FILE_MAX_BYTES = 5 * 1024 * 1024;
+var MAX_ASSETS = 100;
+var NOTES_MAX_CHARS = 1200;
+var HEADLINE_MAX_CHARS = 160;
+var MANIFEST_TIMEOUT_MS = 5e3;
+var DOWNLOAD_TIMEOUT_MS = 3e4;
+var MAX_REDIRECTS = 3;
+var CHECK_DELAY_MS = 3e4;
+var CHECK_INTERVAL_MS = 24 * 60 * 60 * 1e3;
+function logErr(msg) {
+  process.stderr.write(`[grip] ${msg}
+`);
+}
+function gripHome() {
+  return process.env.GRIP_HOME || join(homedir(), ".grip");
+}
+function statusFilePath() {
+  return process.env.GRIP_STATUS_PATH ?? join(homedir(), ".grip-bridge.status");
+}
+function updatesDisabled() {
+  const v = process.env.GRIP_NO_UPDATE_CHECK;
+  return v === "1" || v === "true";
+}
+function normalizeUrl(raw) {
+  let u;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  const loopback = u.hostname === "127.0.0.1" || u.hostname === "localhost";
+  if (!(u.protocol === "https:" || u.protocol === "http:" && loopback)) return null;
+  if (u.username || u.password) return null;
+  u.hash = "";
+  return u.toString();
+}
+var warnedApi = false;
+function releasesApi() {
+  const raw = process.env.GRIP_RELEASES_API?.trim();
+  if (!raw) return DEFAULT_RELEASES_API;
+  const norm = normalizeUrl(raw);
+  if (norm) return norm;
+  if (!warnedApi) {
+    warnedApi = true;
+    logErr(`update: ignoring GRIP_RELEASES_API=${raw} (must be https, or http on 127.0.0.1/localhost); using the default`);
+  }
+  return DEFAULT_RELEASES_API;
+}
+function overrideOrigin() {
+  if (!process.env.GRIP_RELEASES_API?.trim()) return null;
+  try {
+    return new URL(releasesApi()).origin;
+  } catch {
+    return null;
+  }
+}
+var ALLOWED_HOSTS = ["github.com", "api.github.com"];
+function hostAllowed(u) {
+  const extra = overrideOrigin();
+  if (extra && u.origin === extra) return true;
+  if (u.protocol !== "https:" || u.username || u.password) return false;
+  if (u.port !== "" && u.port !== "443") return false;
+  const h = u.hostname.toLowerCase();
+  return ALLOWED_HOSTS.includes(h) || h.endsWith(".githubusercontent.com");
+}
+var SEMVER_RE = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?:-([0-9A-Za-z.-]{1,32}))?$/;
+function compareSemver(a, b) {
+  const pa = SEMVER_RE.exec(a), pb = SEMVER_RE.exec(b);
+  if (!pa || !pb) return 0;
+  for (let i = 1; i <= 3; i++) {
+    const d = Number(pa[i]) - Number(pb[i]);
+    if (d !== 0) return d < 0 ? -1 : 1;
+  }
+  const ra = pa[4], rb = pb[4];
+  if (ra === rb) return 0;
+  if (!ra) return 1;
+  if (!rb) return -1;
+  return ra < rb ? -1 : 1;
+}
+function isSemver(v) {
+  return typeof v === "string" && SEMVER_RE.test(v);
+}
+var UpdateError = class extends Error {
+  constructor(message, code) {
+    super(message);
+    this.code = code;
+  }
+  code;
+};
+function httpGet(url, o) {
+  return new Promise((resolveP, rejectP) => {
+    let u;
+    try {
+      u = new URL(url);
+    } catch {
+      rejectP(new UpdateError(`bad URL: ${url}`));
+      return;
+    }
+    if (!hostAllowed(u)) {
+      rejectP(new UpdateError(`refused: ${u.host} is not an allowed update host`));
+      return;
+    }
+    let settled = false;
+    let timer;
+    const done = (err, buf) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (err) rejectP(err);
+      else resolveP(buf);
+    };
+    const doRequest = u.protocol === "https:" ? httpsRequest : httpRequest;
+    const req = doRequest(u, {
+      method: "GET",
+      headers: { "user-agent": `grip-bridge/${BRIDGE_VERSION}`, accept: "*/*", ...o.headers ?? {} }
+    }, (res) => {
+      const status = res.statusCode ?? 0;
+      if (status >= 300 && status < 400 && res.headers.location) {
+        res.resume();
+        const left = o.redirectsLeft ?? MAX_REDIRECTS;
+        if (left <= 0) {
+          done(new UpdateError("too many redirects"));
+          return;
+        }
+        let next;
+        try {
+          next = new URL(res.headers.location, u).toString();
+        } catch {
+          done(new UpdateError("bad redirect location"));
+          return;
+        }
+        httpGet(next, { ...o, redirectsLeft: left - 1 }).then(
+          (b) => done(null, b),
+          (e) => done(e)
+        );
+        return;
+      }
+      if (status !== 200) {
+        res.resume();
+        const hint = status === 403 || status === 429 ? " (GitHub rate limit? try again later)" : "";
+        done(new UpdateError(`HTTP ${status} for ${u.pathname}${hint}`));
+        return;
+      }
+      const declared = Number(res.headers["content-length"] ?? 0);
+      if (declared > o.maxBytes) {
+        req.destroy();
+        done(new UpdateError(`${u.pathname}: too large (${declared} bytes, cap ${o.maxBytes})`));
+        return;
+      }
+      const chunks = [];
+      let total = 0;
+      res.on("data", (c) => {
+        total += c.length;
+        if (total > o.maxBytes) {
+          req.destroy();
+          done(new UpdateError(`${u.pathname}: too large (over ${o.maxBytes} bytes)`));
+          return;
+        }
+        chunks.push(c);
+      });
+      res.on("end", () => done(null, Buffer.concat(chunks)));
+      res.on("error", (e) => done(new UpdateError(`download failed: ${e.message}`)));
+      res.on("aborted", () => done(new UpdateError("download aborted")));
+    });
+    req.on("error", (e) => done(new UpdateError(`network error: ${e.message}`)));
+    req.end();
+    timer = setTimeout(() => {
+      req.destroy();
+      done(new UpdateError(`timed out after ${Math.round(o.timeoutMs / 1e3)}s`));
+    }, o.timeoutMs);
+  });
+}
+function stripInstallFooter(body) {
+  const i = body.indexOf(INSTALL_MARKER);
+  return i === -1 ? body : body.slice(0, i);
+}
+function releaseHeadline(body) {
+  if (typeof body !== "string") return "";
+  for (const raw of stripInstallFooter(body).split(/\r?\n/)) {
+    const line = raw.replace(/^\s*(?:#{1,6}\s+|>\s*|[-*+]\s+)/, "").replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/(\*\*|__|\*|_|`|~~)/g, "").replace(/\s+/g, " ").trim();
+    if (line) return line.length > HEADLINE_MAX_CHARS ? line.slice(0, HEADLINE_MAX_CHARS - 1).trimEnd() + "\u2026" : line;
+  }
+  return "";
+}
+function releaseNotes(body, max = NOTES_MAX_CHARS) {
+  if (typeof body !== "string") return "";
+  const t = stripInstallFooter(body).replace(/\r\n/g, "\n").trim();
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max);
+  const nl = cut.lastIndexOf("\n");
+  return (nl > max * 0.6 ? cut.slice(0, nl) : cut).trimEnd() + "\n\u2026";
+}
+function parseRelease(buf) {
+  let j;
+  try {
+    j = JSON.parse(buf.toString("utf8"));
+  } catch {
+    throw new UpdateError("the releases API did not return valid JSON");
+  }
+  if (!j || typeof j !== "object") throw new UpdateError("the releases API returned an unexpected shape");
+  if (j.draft === true || j.prerelease === true) throw new UpdateError("the latest release is a draft or prerelease; ignoring it");
+  const tag = typeof j.tag_name === "string" ? j.tag_name.replace(/^v/, "") : "";
+  if (!isSemver(tag)) throw new UpdateError("the latest release has no valid version tag");
+  const assets = {};
+  const list = Array.isArray(j.assets) ? j.assets : [];
+  if (list.length > MAX_ASSETS) throw new UpdateError("the latest release lists too many assets");
+  for (const a of list) {
+    if (!a || typeof a.name !== "string" || typeof a.browser_download_url !== "string") continue;
+    if (!/^[A-Za-z0-9._-]{1,100}$/.test(a.name)) continue;
+    assets[a.name] = { name: a.name, url: a.browser_download_url, size: typeof a.size === "number" ? a.size : void 0 };
+  }
+  return { version: tag, notes: releaseNotes(j.body), headline: releaseHeadline(j.body), assets };
+}
+async function fetchRelease(api = releasesApi()) {
+  const buf = await httpGet(api, {
+    maxBytes: RELEASE_MAX_BYTES,
+    timeoutMs: MANIFEST_TIMEOUT_MS,
+    headers: { accept: "application/vnd.github+json" }
+  });
+  return parseRelease(buf);
+}
+function parseSums(text) {
+  const out2 = /* @__PURE__ */ new Map();
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^([0-9a-fA-F]{64}) [ *]?(\S+)$/.exec(line.trim());
+    if (!m) continue;
+    const name = m[2], hash = m[1].toLowerCase();
+    if (out2.has(name) && out2.get(name) !== hash) throw new UpdateError(`SHA256SUMS.txt lists ${name} twice with different hashes`);
+    out2.set(name, hash);
+  }
+  return out2;
+}
+function installRecordPath() {
+  return join(gripHome(), "install.json");
+}
+function writeInstallRecord(source, version2) {
+  mkdirSync(gripHome(), { recursive: true });
+  atomicWrite(installRecordPath(), Buffer.from(JSON.stringify({ source, version: version2 }, null, 2) + "\n"));
+}
+function readInstallRecord() {
+  try {
+    const j = JSON.parse(readFileSync(installRecordPath(), "utf8"));
+    return { source: j?.source === "clone" ? "clone" : "release", version: typeof j?.version === "string" ? j.version : "" };
+  } catch {
+    return { source: "release", version: "" };
+  }
+}
+var CLONE_NEXT_STEPS = ["git pull", "node bridge/install.mjs"];
+function pluginInfos(bridge) {
+  return bridge.snapshot().plugins.map((p) => ({
+    pluginVersion: p.pluginVersion,
+    fileName: p.fileName,
+    wsReady: p.wsReady,
+    hello: p.hello,
+    minBridge: p.minBridge
+  }));
+}
+function connectedPlugins(plugins) {
+  return (plugins ?? []).filter((p) => p.wsReady !== false && p.hello !== false);
+}
+function checkPluginCompat(minPlugin, latest, plugins) {
+  const live = connectedPlugins(plugins);
+  if (live.length === 0) {
+    return { kind: "unverifiable", reason: "no Grip plugin is connected, so compatibility cannot be verified; open the Grip plugin in Figma first" };
+  }
+  for (const p of live) {
+    const where = p.fileName ? ` in "${p.fileName}"` : "";
+    const v = p.pluginVersion;
+    if (!isSemver(v)) {
+      return { kind: "incompatible", reason: `a Grip plugin${where} did not report a version, so it cannot be verified against ${latest} (needs >=${minPlugin}); update the Grip plugin in Figma first` };
+    }
+    if (compareSemver(v, minPlugin) < 0) {
+      return { kind: "incompatible", reason: `plugin ${v}${where} is older than ${latest} requires (>=${minPlugin}); update the Grip plugin in Figma first` };
+    }
+  }
+  return { kind: "ok" };
+}
+function updateSignal(state2, plugins) {
+  if (!state2 || !state2.available || !state2.latest) return { signal: false };
+  if (!state2.minPlugin) {
+    return { signal: false, blockedReason: `Grip ${state2.latest} has no verified compatibility info (compat.json)${state2.compatError ? ": " + state2.compatError : ""}, so it is not offered` };
+  }
+  const v = checkPluginCompat(state2.minPlugin, state2.latest, plugins);
+  return v.kind === "ok" ? { signal: true } : { signal: false, blockedReason: v.reason };
+}
+function bridgeStaleReason(plugins) {
+  for (const p of connectedPlugins(plugins)) {
+    if (p.minBridge && isSemver(p.minBridge) && compareSemver(p.minBridge, BRIDGE_VERSION) > 0) {
+      return `plugin ${p.pluginVersion ?? "?"}${p.fileName ? ` in "${p.fileName}"` : ""} needs Grip bridge >= ${p.minBridge} but this bridge is ${BRIDGE_VERSION}: update the bridge`;
+    }
+  }
+  return void 0;
+}
+async function fetchCompat(rel, sums) {
+  const fail = (why) => {
+    throw new UpdateError(`release ${rel.version} has no verifiable compatibility info (${ASSET_COMPAT}): ${why}`, "compat_unverified");
+  };
+  const want = sums.get(ASSET_COMPAT);
+  if (!want) return fail(`${ASSET_SUMS} does not list it`);
+  if (!rel.assets[ASSET_COMPAT]) return fail("the release has no such asset");
+  let buf;
+  try {
+    buf = await httpGet(rel.assets[ASSET_COMPAT].url, { maxBytes: COMPAT_MAX_BYTES, timeoutMs: MANIFEST_TIMEOUT_MS });
+  } catch (err) {
+    return fail(err.message);
+  }
+  if (sha256(buf) !== want) return fail(`it does not match ${ASSET_SUMS}`);
+  let j;
+  try {
+    j = JSON.parse(buf.toString("utf8"));
+  } catch {
+    return fail("it is not valid JSON");
+  }
+  if (!j || j.version !== rel.version) return fail(`it describes version ${j?.version ?? "?"}, not ${rel.version}`);
+  if (!isSemver(j.minPlugin)) return fail("minPlugin is not a version");
+  if (compareSemver(j.minPlugin, rel.version) > 0) return fail("minPlugin is newer than the release itself");
+  return { minPlugin: j.minPlugin };
+}
+async function fetchSums(rel) {
+  return parseSums((await downloadAsset(rel, ASSET_SUMS, SUMS_MAX_BYTES)).toString("utf8"));
+}
+var state = null;
+var listeners = /* @__PURE__ */ new Set();
+var noticeMemo = /* @__PURE__ */ new Map();
+function getUpdateState() {
+  return state;
+}
+function onUpdateState(fn) {
+  listeners.add(fn);
+  return () => {
+    listeners.delete(fn);
+  };
+}
+function setState(next) {
+  const changed = !state || state.available !== next.available || state.latest !== next.latest || (state.minPlugin ?? null) !== (next.minPlugin ?? null);
+  state = next;
+  if (changed) {
+    for (const fn of listeners) {
+      try {
+        fn(next);
+      } catch (err) {
+        logErr(`update: listener failed: ${err.message}`);
+      }
+    }
+  }
+}
+function cachePath() {
+  return join(gripHome(), "update-check.json");
+}
+function readCacheFile() {
+  try {
+    return JSON.parse(readFileSync(cachePath(), "utf8"));
+  } catch {
+    return null;
+  }
+}
+function writeCache(s) {
+  try {
+    if (!existsSync(gripHome())) return;
+    writeFileSync(cachePath(), JSON.stringify({
+      current: s.current,
+      latest: s.latest,
+      available: s.available,
+      checkedAt: s.checkedAt,
+      headline: s.headline ?? null,
+      notes: s.notes ?? null,
+      minPlugin: s.minPlugin ?? null,
+      // the notice throttle lives in the same file: carry it over
+      notifiedAt: readCacheFile()?.notifiedAt ?? {}
+    }, null, 2));
+  } catch {
+  }
+}
+function readCache() {
+  const j = readCacheFile();
+  if (!isSemver(j?.latest)) return null;
+  return {
+    current: BRIDGE_VERSION,
+    latest: j.latest,
+    available: compareSemver(j.latest, BRIDGE_VERSION) > 0,
+    checkedAt: typeof j.checkedAt === "string" ? j.checkedAt : null,
+    headline: typeof j.headline === "string" ? j.headline : null,
+    notes: typeof j.notes === "string" ? j.notes : null,
+    minPlugin: isSemver(j.minPlugin) ? j.minPlugin : null
+  };
+}
+function claimNotice(version2, now = Date.now()) {
+  let last = noticeMemo.get(version2) ?? 0;
+  const disk = readCacheFile()?.notifiedAt?.[version2];
+  if (typeof disk === "string" && !Number.isNaN(Date.parse(disk))) last = Math.max(last, Date.parse(disk));
+  if (last && now - last < NOTICE_INTERVAL_MS) return false;
+  noticeMemo.set(version2, now);
+  try {
+    if (existsSync(gripHome())) {
+      const j = readCacheFile() ?? {};
+      const notifiedAt = { ...j.notifiedAt ?? {}, [version2]: new Date(now).toISOString() };
+      const keep = Object.entries(notifiedAt).sort((a, b) => a[1] < b[1] ? 1 : -1).slice(0, 10);
+      writeFileSync(cachePath(), JSON.stringify({ ...j, notifiedAt: Object.fromEntries(keep) }, null, 2));
+    }
+  } catch {
+  }
+  return true;
+}
+async function stateFromRelease(r) {
+  const available = compareSemver(r.version, BRIDGE_VERSION) > 0;
+  let minPlugin = null;
+  let compatError = null;
+  if (available) {
+    try {
+      minPlugin = (await fetchCompat(r, await fetchSums(r))).minPlugin;
+    } catch (err) {
+      compatError = err.message;
+      logErr(`update: ${r.version} will not be offered: ${compatError}`);
+    }
+  }
+  return {
+    current: BRIDGE_VERSION,
+    latest: r.version,
+    available,
+    checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    headline: r.headline || null,
+    notes: r.notes || null,
+    minPlugin,
+    compatError
+  };
+}
+async function checkForUpdate(api = releasesApi()) {
+  try {
+    const r = await fetchRelease(api);
+    const next = await stateFromRelease(r);
+    setState(next);
+    writeCache(next);
+    if (next.available) logErr(`update: Grip ${next.latest} is available (running ${BRIDGE_VERSION})`);
+    return next;
+  } catch (err) {
+    const msg = err.message;
+    logErr(`update: check failed (${msg})`);
+    return {
+      current: BRIDGE_VERSION,
+      latest: state?.latest ?? null,
+      available: state?.available ?? false,
+      checkedAt: state?.checkedAt ?? null,
+      headline: state?.headline ?? null,
+      notes: state?.notes ?? null,
+      minPlugin: state?.minPlugin ?? null,
+      compatError: state?.compatError ?? null,
+      error: msg
+    };
+  }
+}
+function startUpdateChecks(o = {}) {
+  if (updatesDisabled()) {
+    logErr("update: automatic checks disabled (GRIP_NO_UPDATE_CHECK)");
+    return () => {
+    };
+  }
+  const cached2 = readCache();
+  if (cached2) setState(cached2);
+  const run = () => {
+    void checkForUpdate();
+  };
+  const t = setTimeout(run, o.delayMs ?? CHECK_DELAY_MS);
+  const i = setInterval(run, o.intervalMs ?? CHECK_INTERVAL_MS);
+  t.unref();
+  i.unref();
+  return () => {
+    clearTimeout(t);
+    clearInterval(i);
+  };
+}
+function headlineClause(s) {
+  return s.headline ? ` What's new, per the release notes: "${s.headline}".` : "";
+}
+function updateNoticeText(s) {
+  return `Grip update available: ${s.current} \u2192 ${s.latest}.${headlineClause(s)} Tell the user and ask whether they want to update. Do NOT install it on your own: only after the user explicitly says yes, call grip_update {action:'install', version:'${s.latest}'}.`;
+}
+function updateInstructionsParagraph(s) {
+  return `
+
+A Grip update is available (${s.current} \u2192 ${s.latest}).${headlineClause(s)} Mention it to the user once, at a natural moment, and ask if they want it. Never install without their explicit yes; if they agree, call grip_update {action:'install', version:'${s.latest}'}.`;
+}
+var installing = false;
+function atomicWrite(dest, data, mode) {
+  const tmp = `${dest}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    writeFileSync(tmp, data, mode !== void 0 ? { mode } : void 0);
+    renameSync(tmp, dest);
+  } catch (err) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+    }
+    throw err;
+  }
+}
+function sha256(buf) {
+  return createHash("sha256").update(buf).digest("hex");
+}
+async function downloadAsset(rel, name, cap) {
+  const a = rel.assets[name];
+  if (!a) {
+    throw new UpdateError(`release ${rel.version} has no ${name} asset yet. It may still be uploading; nothing was changed, retry in a few minutes.`);
+  }
+  try {
+    return await httpGet(a.url, { maxBytes: cap, timeoutMs: DOWNLOAD_TIMEOUT_MS });
+  } catch (err) {
+    throw new UpdateError(`could not download ${name}: ${err.message}. Nothing was changed; try again in a few minutes.`);
+  }
+}
+async function downloadVerified(rel, name, sums) {
+  const want = sums.get(name);
+  if (!want) throw new UpdateError(`${ASSET_SUMS} does not list ${name}; refusing to install. Nothing was changed.`);
+  const buf = await downloadAsset(rel, name, FILE_MAX_BYTES);
+  const size = rel.assets[name].size;
+  if (size !== void 0 && size !== buf.length) {
+    throw new UpdateError(`${name} size mismatch (release says ${size}, got ${buf.length}); nothing was changed, retry in a few minutes.`);
+  }
+  if (sha256(buf) !== want) {
+    throw new UpdateError(`${name} failed its sha256 check against ${ASSET_SUMS}. Nothing was changed; retry in a few minutes, and if it keeps failing do not install and report it.`);
+  }
+  return buf;
+}
+async function selfTestBridge(buf, home, version2) {
+  const tmp = join(home, `grip-bridge.selftest-${process.pid}-${Date.now()}.mjs`);
+  writeFileSync(tmp, buf, { mode: 493 });
+  try {
+    const out2 = await new Promise((res, rej) => {
+      execFile(process.execPath, [tmp, "--selftest"], {
+        timeout: selftestTimeoutMs(),
+        encoding: "utf8",
+        windowsHide: true,
+        maxBuffer: 64 * 1024
+      }, (err, stdout, stderr) => {
+        if (err) {
+          const lines = String(stderr || err.message).split("\n").map((l) => l.trim()).filter(Boolean);
+          const why = err.killed ? `no answer within ${selftestTimeoutMs() < 1e3 ? selftestTimeoutMs() + "ms" : Math.round(selftestTimeoutMs() / 1e3) + "s"}` : (lines.find((l) => /error/i.test(l)) ?? lines[0] ?? "it exited with an error").slice(0, 160);
+          rej(new UpdateError(`the downloaded bridge failed its self-test (${why}); nothing was changed.`, "selftest_failed"));
+        } else res(String(stdout));
+      });
+    });
+    if (out2.trim() !== `grip-bridge ${version2} ok`) {
+      throw new UpdateError(`the downloaded bridge failed its self-test (it reported "${out2.trim().slice(0, 80)}", expected "grip-bridge ${version2} ok"); nothing was changed.`, "selftest_failed");
+    }
+  } finally {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+    }
+  }
+}
+async function installUpdate(o) {
+  if (installing) return { status: "already_installing" };
+  installing = true;
+  try {
+    const api = o.api ?? releasesApi();
+    const rel = await fetchRelease(api).catch((err) => {
+      throw new UpdateError(`could not read the latest release: ${err.message}`);
+    });
+    const available = compareSemver(rel.version, BRIDGE_VERSION) > 0;
+    if (!available) {
+      setState({
+        current: BRIDGE_VERSION,
+        latest: rel.version,
+        available,
+        checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        headline: rel.headline || null,
+        notes: rel.notes || null,
+        minPlugin: null,
+        compatError: null
+      });
+      return { status: "up_to_date", from: BRIDGE_VERSION, to: rel.version };
+    }
+    if (!o.force && readInstallRecord().source === "clone") {
+      return { status: "clone_install", from: BRIDGE_VERSION, to: rel.version, next: CLONE_NEXT_STEPS };
+    }
+    const sums = await fetchSums(rel);
+    let minPlugin = null;
+    let compatError = null;
+    try {
+      minPlugin = (await fetchCompat(rel, sums)).minPlugin;
+    } catch (err) {
+      compatError = err.message;
+    }
+    setState({
+      current: BRIDGE_VERSION,
+      latest: rel.version,
+      available,
+      checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      headline: rel.headline || null,
+      notes: rel.notes || null,
+      minPlugin,
+      compatError
+    });
+    if (o.version !== rel.version) {
+      return { status: "version_changed", from: BRIDGE_VERSION, to: rel.version, headline: rel.headline || null, notes: rel.notes || null };
+    }
+    let compatWarning;
+    if (!minPlugin) {
+      if (!o.force) throw new UpdateError(compatError ?? `release ${rel.version} has no verifiable compatibility info`, "compat_unverified");
+      compatWarning = `WARNING: ${compatError}. Installing anyway because of --force: nothing checked that your Figma plugin works with ${rel.version}.`;
+      logErr(`update: ${compatWarning}`);
+    } else {
+      const verdict = checkPluginCompat(minPlugin, rel.version, o.plugins);
+      if (verdict.kind === "incompatible") return { status: "incompatible_plugin", from: BRIDGE_VERSION, to: rel.version, reason: verdict.reason };
+      if (verdict.kind === "unverifiable" && !(o.acceptUnverified || o.force)) {
+        return { status: "plugins_unverifiable", from: BRIDGE_VERSION, to: rel.version, reason: verdict.reason };
+      }
+    }
+    if (o.confirm && !await o.confirm({ from: BRIDGE_VERSION, to: rel.version, headline: rel.headline || null })) {
+      return { status: "declined", from: BRIDGE_VERSION, to: rel.version };
+    }
+    const bridgeBuf = await downloadVerified(rel, ASSET_BRIDGE, sums);
+    const pluginBufs = [];
+    for (const [assetName, localName] of Object.entries(PLUGIN_ASSETS)) {
+      pluginBufs.push([localName, await downloadVerified(rel, assetName, sums)]);
+    }
+    const home = resolve(gripHome());
+    const within = (p) => resolve(p).startsWith(home + sep);
+    const homeExisted = existsSync(home);
+    mkdirSync(home, { recursive: true });
+    try {
+      await selfTestBridge(bridgeBuf, home, rel.version);
+    } catch (err) {
+      if (!homeExisted) {
+        try {
+          rmdirSync(home);
+        } catch {
+        }
+      }
+      throw err;
+    }
+    const pluginDir = join(home, "figma-plugin");
+    mkdirSync(pluginDir, { recursive: true });
+    const written = [];
+    for (const [name, buf] of pluginBufs) {
+      const dest = join(pluginDir, name);
+      if (!within(dest)) throw new UpdateError(`refusing to write outside ${home}`);
+      atomicWrite(dest, buf);
+      written.push(name);
+    }
+    const entry = join(home, "grip-bridge.mjs");
+    const prev = join(home, "grip-bridge.prev.mjs");
+    if (!within(entry) || !within(prev)) throw new UpdateError(`refusing to write outside ${home}`);
+    if (existsSync(entry)) {
+      const tmp = `${prev}.tmp-${process.pid}-${Date.now()}`;
+      try {
+        copyFileSync(entry, tmp);
+        renameSync(tmp, prev);
+      } catch (err) {
+        try {
+          rmSync(tmp, { force: true });
+        } catch {
+        }
+        throw err;
+      }
+    }
+    atomicWrite(entry, bridgeBuf, 493);
+    try {
+      chmodSync(entry, 493);
+    } catch {
+    }
+    try {
+      writeInstallRecord("release", rel.version);
+    } catch {
+    }
+    logErr(`update: installed ${BRIDGE_VERSION} -> ${rel.version} into ${home}`);
+    return { status: "updated", from: BRIDGE_VERSION, to: rel.version, home, pluginFilesWritten: written, ...compatWarning ? { compatWarning } : {} };
+  } finally {
+    installing = false;
+  }
+}
+function rollbackBridge() {
+  const home = gripHome();
+  const prev = join(home, "grip-bridge.prev.mjs");
+  const entry = join(home, "grip-bridge.mjs");
+  if (!existsSync(prev)) throw new UpdateError(`no previous version to restore (${prev} does not exist)`);
+  atomicWrite(entry, readFileSync(prev), 493);
+  try {
+    chmodSync(entry, 493);
+  } catch {
+  }
+  return { restored: prev };
+}
+var restartHook = null;
+var restartManaged = false;
+function setRestartHook(fn, managed) {
+  restartHook = fn;
+  restartManaged = managed;
+}
+function isManagedInstall() {
+  try {
+    const self = realpathSync(fileURLToPath(import.meta.url));
+    return self === realpathSync(join(gripHome(), "grip-bridge.mjs"));
+  } catch {
+    return false;
+  }
+}
+async function installAndScheduleRestart(o) {
+  const r = await installUpdate(o);
+  if (r.status !== "updated") return r;
+  if (!restartHook) return { ...r, restart: "none" };
+  if (!restartManaged) {
+    logErr("update: this bridge is not running from ~/.grip/grip-bridge.mjs, so it is not restarting; start the installed copy to use the new version");
+    return { ...r, restart: "not_managed" };
+  }
+  const delay = Number(process.env.GRIP_UPDATE_RESTART_DELAY_MS ?? 1e3);
+  const hook = restartHook;
+  setTimeout(() => {
+    try {
+      hook();
+    } catch (err) {
+      logErr(`update: restart failed: ${err.message}`);
+    }
+  }, delay);
+  return { ...r, restart: "scheduled" };
+}
+function processCommandLine(pid) {
+  try {
+    if (process.platform === "win32") {
+      return execFileSync(
+        "powershell",
+        [
+          "-NoProfile",
+          "-Command",
+          `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`
+        ],
+        { encoding: "utf8", timeout: 8e3, stdio: ["ignore", "pipe", "ignore"] }
+      ).trim() || null;
+    }
+    return execFileSync(
+      "ps",
+      ["-o", "command=", "-p", String(pid)],
+      { encoding: "utf8", timeout: 5e3, stdio: ["ignore", "pipe", "ignore"] }
+    ).trim() || null;
+  } catch {
+    return null;
+  }
+}
+function readDaemonPlugins() {
+  try {
+    const j = JSON.parse(readFileSync(statusFilePath(), "utf8"));
+    const pid = Number(j?.pid);
+    if (!Number.isInteger(pid) || pid <= 1) return null;
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return null;
+    }
+    if (!Array.isArray(j.plugins)) return null;
+    return j.plugins.map((p) => ({
+      pluginVersion: typeof p?.pluginVersion === "string" ? p.pluginVersion : null,
+      fileName: typeof p?.fileName === "string" ? p.fileName : void 0,
+      wsReady: p?.wsReady !== false,
+      hello: p?.hello !== false,
+      minBridge: typeof p?.minBridge === "string" ? p.minBridge : null
+    }));
+  } catch {
+    return null;
+  }
+}
+function stopRunningDaemon() {
+  let pid;
+  try {
+    const j = JSON.parse(readFileSync(statusFilePath(), "utf8"));
+    pid = Number(j?.pid);
+  } catch {
+    return { stopped: false, note: "no running Grip daemon found (no status file)" };
+  }
+  if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) {
+    return { stopped: false, note: "status file has no usable daemon pid; left it alone" };
+  }
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return { stopped: false, note: "status file is stale (that process is gone)" };
+  }
+  const cmd = processCommandLine(pid);
+  if (!cmd) return { stopped: false, note: `could not verify pid ${pid} is a Grip daemon; left it running (restart your agent / Figma plugin to pick up the new bridge)` };
+  if (!/grip-bridge/.test(cmd) || !/--daemon/.test(cmd)) {
+    return { stopped: false, note: `pid ${pid} does not look like a Grip daemon; left it alone` };
+  }
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch (err) {
+    return { stopped: false, note: `could not stop pid ${pid}: ${err.message}` };
+  }
+  return { stopped: true, note: `stopped the running Grip daemon (pid ${pid}); the new version starts on the next agent call` };
+}
+function wireUpdateToBridge(bridge) {
+  let lastBlocked = "";
+  const recompute = () => {
+    const s = updatesDisabled() ? null : getUpdateState();
+    const plugins = pluginInfos(bridge);
+    const sig = updateSignal(s, plugins);
+    const blocked = s?.available && !sig.signal ? sig.blockedReason ?? "" : "";
+    if (blocked && blocked !== lastBlocked) logErr(`update: Grip ${s.latest} is available but not offered: ${blocked}`);
+    lastBlocked = blocked;
+    bridge.setUpdateState(s ? { available: sig.signal, latest: s.latest, current: BRIDGE_VERSION, headline: s.headline ?? null } : null);
+  };
+  recompute();
+  const offState = onUpdateState(recompute);
+  bridge.on("session-change", recompute);
+  const onRequest = async (e) => {
+    let msg;
+    try {
+      if (!e.version) {
+        msg = { type: "update_result", status: "error", code: "version_required", message: "this Grip plugin did not say which version you were shown; reload the plugin in Figma and try again" };
+      } else {
+        const r = await installAndScheduleRestart({ version: e.version, plugins: pluginInfos(bridge) });
+        if (r.status === "version_changed") {
+          msg = { type: "update_result", status: "error", code: "version_changed", latest: r.to, message: `Grip ${r.to} is now the latest release (you were shown ${e.version}); the strip refreshes so you can review it` };
+        } else if (r.status === "incompatible_plugin" || r.status === "plugins_unverifiable") {
+          msg = { type: "update_result", status: "error", code: r.status, message: r.reason };
+        } else {
+          msg = { type: "update_result", status: r.status, from: r.from, to: r.to, restart: r.restart, next: r.next };
+        }
+      }
+    } catch (err) {
+      const code = err instanceof UpdateError && err.code ? err.code : "install_failed";
+      msg = { type: "update_result", status: "error", code, message: err.message };
+    }
+    bridge.sendTo(e.sessionId, msg);
+    if (msg.status === "error") {
+      recompute();
+      bridge.pushUpdate(e.sessionId, true);
+    }
+  };
+  bridge.on("update-request", onRequest);
+  return () => {
+    offState();
+    bridge.off("session-change", recompute);
+    bridge.off("update-request", onRequest);
+  };
+}
+
 // src/ws-server.ts
 function originAllowedForUpdate(origin) {
   if (origin === void 0 || origin === "" || origin === "null") return true;
@@ -11039,12 +11914,13 @@ var PluginBridge = class _PluginBridge extends EventEmitter {
       if (!originAllowedForUpdate(sess?.origin)) {
         process.stderr.write(`[grip] update_request from ${sessionId.slice(0, 8)} refused (origin ${sess?.origin})
 `);
-        this.sendTo(sessionId, { type: "update_result", status: "error", message: "update requests are only accepted from the Figma plugin" });
+        this.sendTo(sessionId, { type: "update_result", status: "error", code: "origin", message: "update requests are only accepted from the Figma plugin" });
         return;
       }
-      process.stderr.write(`[grip] update_request from ${sessionId.slice(0, 8)}
+      const reqVersion = msg.version;
+      process.stderr.write(`[grip] update_request from ${sessionId.slice(0, 8)} (version ${typeof reqVersion === "string" ? reqVersion.slice(0, 32) : "not given"})
 `);
-      this.emit("update-request", { sessionId });
+      this.emit("update-request", { sessionId, version: typeof reqVersion === "string" ? reqVersion : void 0 });
       return;
     }
     if ("event" in msg) {
@@ -11093,6 +11969,7 @@ var PluginBridge = class _PluginBridge extends EventEmitter {
     sess.currentPageName = hello.currentPageName;
     sess.helloAt = Date.now();
     sess.pluginVersion = hello.version ?? "unknown";
+    sess.minBridge = typeof hello.minBridge === "string" ? hello.minBridge : void 0;
     sess.capabilities = hello.capabilities ?? [];
     if (hello.version && hello.version !== BRIDGE_VERSION) {
       process.stderr.write(
@@ -11104,17 +11981,43 @@ var PluginBridge = class _PluginBridge extends EventEmitter {
       `[grip] hello ${sessionId.slice(0, 8)} v${sess.pluginVersion} \u2192 ${hello.fileName} / ${hello.currentPageName}
 `
     );
-    if (this.updateState?.available) this.sendTo(sessionId, { type: "update", ...this.updateState });
+    if (sess.minBridge && isSemver(sess.minBridge) && compareSemver(sess.minBridge, BRIDGE_VERSION) > 0) {
+      process.stderr.write(
+        `[grip] WARNING plugin ${sess.pluginVersion} in "${hello.fileName}" needs bridge >= ${sess.minBridge} but this is ${BRIDGE_VERSION}: the bridge is out of date, update it.
+`
+      );
+    }
     this.emit("session-change");
+    this.pushUpdate(sessionId);
   }
   // ---------- update notices ----------
   updateState = null;
-  // Set by the daemon when the update state changes; broadcasts to every
-  // connected plugin and is replayed to each plugin on its hello.
+  // Set by the daemon whenever the update SIGNAL changes (new release, a
+  // plugin connecting/leaving...); sent to every connected strip and replayed
+  // to each plugin on its hello. Frames identical to the last one a session got
+  // are skipped. `null` = nothing known, strips are told "off".
   setUpdateState(s) {
     this.updateState = s;
-    if (!s) return;
-    for (const id of this.sessions.keys()) this.sendTo(id, { type: "update", available: s.available, latest: s.latest, headline: s.headline ?? null });
+    for (const id of this.sessions.keys()) this.pushUpdate(id);
+  }
+  // Send the current update state to one strip (deduped; a fresh strip that
+  // has nothing to show is not sent a frame at all). `force` ignores the dedupe
+  // (used to re-push after a refused update_request).
+  pushUpdate(sessionId, force = false) {
+    const sess = this.sessions.get(sessionId);
+    if (!sess || sess.helloAt === 0) return;
+    const st = this.updateState;
+    const frame = {
+      type: "update",
+      available: !!st?.available,
+      latest: st?.latest ?? null,
+      current: st?.current ?? BRIDGE_VERSION,
+      headline: st?.headline ?? null
+    };
+    const key = frame.available ? JSON.stringify(frame) : "off";
+    if (!force && key === (sess.updateSent ?? "off")) return;
+    sess.updateSent = key;
+    this.sendTo(sessionId, frame);
   }
   // Send one JSON frame to one plugin session (best effort, never throws).
   sendTo(sessionId, msg) {
@@ -11172,6 +12075,9 @@ var PluginBridge = class _PluginBridge extends EventEmitter {
         currentPageId: s.currentPageId,
         currentPageName: s.currentPageName,
         pluginVersion: s.pluginVersion ?? "unknown",
+        minBridge: s.minBridge ?? null,
+        // false until the plugin's hello arrives (version/file not known yet)
+        hello: s.helloAt > 0,
         capabilities: s.capabilities ?? [],
         wsReady: s.ws.readyState === import_websocket.default.OPEN,
         lastPongMsAgo: s.lastPong ? Date.now() - s.lastPong : null,
@@ -24047,8 +24953,9 @@ var TOOLS = [
   {
     name: "grip_update",
     category: "meta",
-    description: "Check for / install a Grip update. 'install' ONLY after the user explicitly says yes.",
-    schema: external_exports.object({ action: external_exports.enum(["check", "install"]).optional() })
+    description: "Check for / install a Grip update. 'install' needs version + the user's explicit yes.",
+    detail: "action 'check' (default) reports {current, latest, available, minPlugin, signalled, blockedReason?, headline, notes}: tell the user what is new; signalled:false with blockedReason means the release is NOT offered (e.g. a connected Figma plugin is too old: they must update the plugin in Figma first) and you must not install it. action 'install' REQUIRES version:'<x.y.z>' = the exact `latest` you showed the user, and only after the user explicitly said yes; the bridge installs only if that is still the latest release (else error version_changed with the new version and notes: show them and ask again). Where the MCP client supports elicitation the bridge itself asks the user to confirm (decline/timeout => {status:'declined'}); otherwise YOUR explicit-yes duty is the only consent, so never install on your own. Refusals (nothing installed): incompatible_plugin (a connected plugin is older than the release needs), plugins_unverifiable (no Grip plugin connected: ask the user to open it in Figma first), compat_unverified (release lacks a verified compat.json), selftest_failed. Success => {status:'updated', from, to, restart, consent, next[]}; the bridge restarts ~1s later, retry once on a connection error. clone_install => developer install, run next[] in the clone. Rollback restores the bridge only; the plugin files stay at the new version.",
+    schema: external_exports.object({ action: external_exports.enum(["check", "install"]).optional(), version: external_exports.string().optional() })
   },
   {
     name: "get_deep_link",
@@ -26038,7 +26945,11 @@ function toolInputSchema(name) {
           action: {
             type: "string",
             enum: ["check", "install"],
-            description: "'check' (default) reports whether a newer Grip exists. 'install' downloads + verifies + installs it and restarts the bridge: call it ONLY after the user has explicitly agreed."
+            description: "'check' (default) reports whether a newer Grip exists. 'install' downloads + verifies + installs it and restarts the bridge: call it ONLY after the user has explicitly agreed, and pass version."
+          },
+          version: {
+            type: "string",
+            description: "install only, REQUIRED: the exact latest version (x.y.z) you showed the user. Refused with version_changed if a newer release exists now."
           }
         },
         additionalProperties: false
@@ -26069,619 +26980,6 @@ function toolInputSchema(name) {
       return { type: "object" };
     }
   }
-}
-
-// src/update.ts
-import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
-import {
-  chmodSync,
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  realpathSync,
-  renameSync,
-  rmSync,
-  writeFileSync
-} from "node:fs";
-import { request as httpRequest } from "node:http";
-import { request as httpsRequest } from "node:https";
-import { homedir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
-var DEFAULT_RELEASES_API = "https://api.github.com/repos/spendolas/grip/releases/latest";
-var ASSET_BRIDGE = "grip-bridge.mjs";
-var ASSET_SUMS = "SHA256SUMS.txt";
-var PLUGIN_ASSETS = {
-  "grip-plugin-code.js": "code.js",
-  "grip-plugin-ui.html": "ui.html",
-  "grip-plugin-manifest.json": "manifest.json"
-};
-var UPDATE_ASSET_NAMES = [ASSET_BRIDGE, ...Object.keys(PLUGIN_ASSETS), ASSET_SUMS];
-var RELEASE_MAX_BYTES = 256 * 1024;
-var SUMS_MAX_BYTES = 64 * 1024;
-var FILE_MAX_BYTES = 5 * 1024 * 1024;
-var MAX_ASSETS = 100;
-var NOTES_MAX_CHARS = 1200;
-var HEADLINE_MAX_CHARS = 160;
-var MANIFEST_TIMEOUT_MS = 5e3;
-var DOWNLOAD_TIMEOUT_MS = 3e4;
-var MAX_REDIRECTS = 3;
-var CHECK_DELAY_MS = 3e4;
-var CHECK_INTERVAL_MS = 24 * 60 * 60 * 1e3;
-function logErr(msg) {
-  process.stderr.write(`[grip] ${msg}
-`);
-}
-function gripHome() {
-  return process.env.GRIP_HOME || join(homedir(), ".grip");
-}
-function statusFilePath() {
-  return process.env.GRIP_STATUS_PATH ?? join(homedir(), ".grip-bridge.status");
-}
-function updatesDisabled() {
-  const v = process.env.GRIP_NO_UPDATE_CHECK;
-  return v === "1" || v === "true";
-}
-function normalizeUrl(raw) {
-  let u;
-  try {
-    u = new URL(raw);
-  } catch {
-    return null;
-  }
-  const loopback = u.hostname === "127.0.0.1" || u.hostname === "localhost";
-  if (!(u.protocol === "https:" || u.protocol === "http:" && loopback)) return null;
-  if (u.username || u.password) return null;
-  u.hash = "";
-  return u.toString();
-}
-var warnedApi = false;
-function releasesApi() {
-  const raw = process.env.GRIP_RELEASES_API?.trim();
-  if (!raw) return DEFAULT_RELEASES_API;
-  const norm = normalizeUrl(raw);
-  if (norm) return norm;
-  if (!warnedApi) {
-    warnedApi = true;
-    logErr(`update: ignoring GRIP_RELEASES_API=${raw} (must be https, or http on 127.0.0.1/localhost); using the default`);
-  }
-  return DEFAULT_RELEASES_API;
-}
-function overrideOrigin() {
-  if (!process.env.GRIP_RELEASES_API?.trim()) return null;
-  try {
-    return new URL(releasesApi()).origin;
-  } catch {
-    return null;
-  }
-}
-var ALLOWED_HOSTS = ["github.com", "api.github.com"];
-function hostAllowed(u) {
-  const extra = overrideOrigin();
-  if (extra && u.origin === extra) return true;
-  if (u.protocol !== "https:" || u.username || u.password) return false;
-  if (u.port !== "" && u.port !== "443") return false;
-  const h = u.hostname.toLowerCase();
-  return ALLOWED_HOSTS.includes(h) || h.endsWith(".githubusercontent.com");
-}
-var SEMVER_RE = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?:-([0-9A-Za-z.-]{1,32}))?$/;
-function compareSemver(a, b) {
-  const pa = SEMVER_RE.exec(a), pb = SEMVER_RE.exec(b);
-  if (!pa || !pb) return 0;
-  for (let i = 1; i <= 3; i++) {
-    const d = Number(pa[i]) - Number(pb[i]);
-    if (d !== 0) return d < 0 ? -1 : 1;
-  }
-  const ra = pa[4], rb = pb[4];
-  if (ra === rb) return 0;
-  if (!ra) return 1;
-  if (!rb) return -1;
-  return ra < rb ? -1 : 1;
-}
-function isSemver(v) {
-  return typeof v === "string" && SEMVER_RE.test(v);
-}
-var UpdateError = class extends Error {
-};
-function httpGet(url, o) {
-  return new Promise((resolveP, rejectP) => {
-    let u;
-    try {
-      u = new URL(url);
-    } catch {
-      rejectP(new UpdateError(`bad URL: ${url}`));
-      return;
-    }
-    if (!hostAllowed(u)) {
-      rejectP(new UpdateError(`refused: ${u.host} is not an allowed update host`));
-      return;
-    }
-    let settled = false;
-    let timer;
-    const done = (err, buf) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      if (err) rejectP(err);
-      else resolveP(buf);
-    };
-    const doRequest = u.protocol === "https:" ? httpsRequest : httpRequest;
-    const req = doRequest(u, {
-      method: "GET",
-      headers: { "user-agent": `grip-bridge/${BRIDGE_VERSION}`, accept: "*/*", ...o.headers ?? {} }
-    }, (res) => {
-      const status = res.statusCode ?? 0;
-      if (status >= 300 && status < 400 && res.headers.location) {
-        res.resume();
-        const left = o.redirectsLeft ?? MAX_REDIRECTS;
-        if (left <= 0) {
-          done(new UpdateError("too many redirects"));
-          return;
-        }
-        let next;
-        try {
-          next = new URL(res.headers.location, u).toString();
-        } catch {
-          done(new UpdateError("bad redirect location"));
-          return;
-        }
-        httpGet(next, { ...o, redirectsLeft: left - 1 }).then(
-          (b) => done(null, b),
-          (e) => done(e)
-        );
-        return;
-      }
-      if (status !== 200) {
-        res.resume();
-        const hint = status === 403 || status === 429 ? " (GitHub rate limit? try again later)" : "";
-        done(new UpdateError(`HTTP ${status} for ${u.pathname}${hint}`));
-        return;
-      }
-      const declared = Number(res.headers["content-length"] ?? 0);
-      if (declared > o.maxBytes) {
-        req.destroy();
-        done(new UpdateError(`${u.pathname}: too large (${declared} bytes, cap ${o.maxBytes})`));
-        return;
-      }
-      const chunks = [];
-      let total = 0;
-      res.on("data", (c) => {
-        total += c.length;
-        if (total > o.maxBytes) {
-          req.destroy();
-          done(new UpdateError(`${u.pathname}: too large (over ${o.maxBytes} bytes)`));
-          return;
-        }
-        chunks.push(c);
-      });
-      res.on("end", () => done(null, Buffer.concat(chunks)));
-      res.on("error", (e) => done(new UpdateError(`download failed: ${e.message}`)));
-      res.on("aborted", () => done(new UpdateError("download aborted")));
-    });
-    req.on("error", (e) => done(new UpdateError(`network error: ${e.message}`)));
-    req.end();
-    timer = setTimeout(() => {
-      req.destroy();
-      done(new UpdateError(`timed out after ${Math.round(o.timeoutMs / 1e3)}s`));
-    }, o.timeoutMs);
-  });
-}
-function releaseHeadline(body) {
-  if (typeof body !== "string") return "";
-  for (const raw of body.split(/\r?\n/)) {
-    const line = raw.replace(/^\s*(?:#{1,6}\s+|>\s*|[-*+]\s+)/, "").replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/(\*\*|__|\*|_|`|~~)/g, "").replace(/\s+/g, " ").trim();
-    if (line) return line.length > HEADLINE_MAX_CHARS ? line.slice(0, HEADLINE_MAX_CHARS - 1).trimEnd() + "\u2026" : line;
-  }
-  return "";
-}
-function releaseNotes(body, max = NOTES_MAX_CHARS) {
-  if (typeof body !== "string") return "";
-  const t = body.replace(/\r\n/g, "\n").trim();
-  if (t.length <= max) return t;
-  const cut = t.slice(0, max);
-  const nl = cut.lastIndexOf("\n");
-  return (nl > max * 0.6 ? cut.slice(0, nl) : cut).trimEnd() + "\n\u2026";
-}
-function parseRelease(buf) {
-  let j;
-  try {
-    j = JSON.parse(buf.toString("utf8"));
-  } catch {
-    throw new UpdateError("the releases API did not return valid JSON");
-  }
-  if (!j || typeof j !== "object") throw new UpdateError("the releases API returned an unexpected shape");
-  if (j.draft === true || j.prerelease === true) throw new UpdateError("the latest release is a draft or prerelease; ignoring it");
-  const tag = typeof j.tag_name === "string" ? j.tag_name.replace(/^v/, "") : "";
-  if (!isSemver(tag)) throw new UpdateError("the latest release has no valid version tag");
-  const assets = {};
-  const list = Array.isArray(j.assets) ? j.assets : [];
-  if (list.length > MAX_ASSETS) throw new UpdateError("the latest release lists too many assets");
-  for (const a of list) {
-    if (!a || typeof a.name !== "string" || typeof a.browser_download_url !== "string") continue;
-    if (!/^[A-Za-z0-9._-]{1,100}$/.test(a.name)) continue;
-    assets[a.name] = { name: a.name, url: a.browser_download_url, size: typeof a.size === "number" ? a.size : void 0 };
-  }
-  return { version: tag, notes: releaseNotes(j.body), headline: releaseHeadline(j.body), assets };
-}
-async function fetchRelease(api = releasesApi()) {
-  const buf = await httpGet(api, {
-    maxBytes: RELEASE_MAX_BYTES,
-    timeoutMs: MANIFEST_TIMEOUT_MS,
-    headers: { accept: "application/vnd.github+json" }
-  });
-  return parseRelease(buf);
-}
-function parseSums(text) {
-  const out2 = /* @__PURE__ */ new Map();
-  for (const line of text.split(/\r?\n/)) {
-    const m = /^([0-9a-fA-F]{64}) [ *]?(\S+)$/.exec(line.trim());
-    if (!m) continue;
-    const name = m[2], hash = m[1].toLowerCase();
-    if (out2.has(name) && out2.get(name) !== hash) throw new UpdateError(`SHA256SUMS.txt lists ${name} twice with different hashes`);
-    out2.set(name, hash);
-  }
-  return out2;
-}
-function installRecordPath() {
-  return join(gripHome(), "install.json");
-}
-function writeInstallRecord(source, version2) {
-  mkdirSync(gripHome(), { recursive: true });
-  atomicWrite(installRecordPath(), Buffer.from(JSON.stringify({ source, version: version2 }, null, 2) + "\n"));
-}
-function readInstallRecord() {
-  try {
-    const j = JSON.parse(readFileSync(installRecordPath(), "utf8"));
-    return { source: j?.source === "clone" ? "clone" : "release", version: typeof j?.version === "string" ? j.version : "" };
-  } catch {
-    return { source: "release", version: "" };
-  }
-}
-var CLONE_NEXT_STEPS = ["git pull", "node bridge/install.mjs"];
-var state = null;
-var listeners = /* @__PURE__ */ new Set();
-function getUpdateState() {
-  return state;
-}
-function onUpdateState(fn) {
-  listeners.add(fn);
-  return () => {
-    listeners.delete(fn);
-  };
-}
-function setState(next) {
-  const changed = !state || state.available !== next.available || state.latest !== next.latest;
-  state = next;
-  if (changed) {
-    for (const fn of listeners) {
-      try {
-        fn(next);
-      } catch (err) {
-        logErr(`update: listener failed: ${err.message}`);
-      }
-    }
-  }
-}
-function cachePath() {
-  return join(gripHome(), "update-check.json");
-}
-function writeCache(s) {
-  try {
-    if (!existsSync(gripHome())) return;
-    writeFileSync(cachePath(), JSON.stringify({
-      current: s.current,
-      latest: s.latest,
-      available: s.available,
-      checkedAt: s.checkedAt,
-      headline: s.headline ?? null,
-      notes: s.notes ?? null
-    }, null, 2));
-  } catch {
-  }
-}
-function readCache() {
-  try {
-    const j = JSON.parse(readFileSync(cachePath(), "utf8"));
-    if (!isSemver(j?.latest)) return null;
-    return {
-      current: BRIDGE_VERSION,
-      latest: j.latest,
-      available: compareSemver(j.latest, BRIDGE_VERSION) > 0,
-      checkedAt: typeof j.checkedAt === "string" ? j.checkedAt : null,
-      headline: typeof j.headline === "string" ? j.headline : null,
-      notes: typeof j.notes === "string" ? j.notes : null
-    };
-  } catch {
-    return null;
-  }
-}
-async function checkForUpdate(api = releasesApi()) {
-  try {
-    const r = await fetchRelease(api);
-    const next = {
-      current: BRIDGE_VERSION,
-      latest: r.version,
-      available: compareSemver(r.version, BRIDGE_VERSION) > 0,
-      checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      headline: r.headline || null,
-      notes: r.notes || null
-    };
-    setState(next);
-    writeCache(next);
-    if (next.available) logErr(`update: Grip ${next.latest} is available (running ${BRIDGE_VERSION})`);
-    return next;
-  } catch (err) {
-    const msg = err.message;
-    logErr(`update: check failed (${msg})`);
-    return {
-      current: BRIDGE_VERSION,
-      latest: state?.latest ?? null,
-      available: state?.available ?? false,
-      checkedAt: state?.checkedAt ?? null,
-      headline: state?.headline ?? null,
-      notes: state?.notes ?? null,
-      error: msg
-    };
-  }
-}
-function startUpdateChecks(o = {}) {
-  if (updatesDisabled()) {
-    logErr("update: automatic checks disabled (GRIP_NO_UPDATE_CHECK)");
-    return () => {
-    };
-  }
-  const cached2 = readCache();
-  if (cached2) setState(cached2);
-  const run = () => {
-    void checkForUpdate();
-  };
-  const t = setTimeout(run, o.delayMs ?? CHECK_DELAY_MS);
-  const i = setInterval(run, o.intervalMs ?? CHECK_INTERVAL_MS);
-  t.unref();
-  i.unref();
-  return () => {
-    clearTimeout(t);
-    clearInterval(i);
-  };
-}
-function headlineClause(s) {
-  return s.headline ? ` What's new, per the release notes: "${s.headline}".` : "";
-}
-function updateNoticeText(s) {
-  return `Grip update available: ${s.current} \u2192 ${s.latest}.${headlineClause(s)} Tell the user and ask whether they want to update. Do NOT install it on your own: only if the user explicitly says yes, call grip_update {action:'install'}.`;
-}
-function updateInstructionsParagraph(s) {
-  return `
-
-A Grip update is available (${s.current} \u2192 ${s.latest}).${headlineClause(s)} Mention it to the user once, at a natural moment, and ask if they want it. Never install without their explicit yes; if they agree, call grip_update {action:'install'}.`;
-}
-var installing = false;
-function atomicWrite(dest, data, mode) {
-  const tmp = `${dest}.tmp-${process.pid}-${Date.now()}`;
-  try {
-    writeFileSync(tmp, data, mode !== void 0 ? { mode } : void 0);
-    renameSync(tmp, dest);
-  } catch (err) {
-    try {
-      rmSync(tmp, { force: true });
-    } catch {
-    }
-    throw err;
-  }
-}
-function sha256(buf) {
-  return createHash("sha256").update(buf).digest("hex");
-}
-async function downloadAsset(rel, name, cap) {
-  const a = rel.assets[name];
-  if (!a) {
-    throw new UpdateError(`release ${rel.version} has no ${name} asset yet. It may still be uploading; nothing was changed, retry in a few minutes.`);
-  }
-  try {
-    return await httpGet(a.url, { maxBytes: cap, timeoutMs: DOWNLOAD_TIMEOUT_MS });
-  } catch (err) {
-    throw new UpdateError(`could not download ${name}: ${err.message}. Nothing was changed; try again in a few minutes.`);
-  }
-}
-async function downloadVerified(rel, name, sums) {
-  const want = sums.get(name);
-  if (!want) throw new UpdateError(`${ASSET_SUMS} does not list ${name}; refusing to install. Nothing was changed.`);
-  const buf = await downloadAsset(rel, name, FILE_MAX_BYTES);
-  const size = rel.assets[name].size;
-  if (size !== void 0 && size !== buf.length) {
-    throw new UpdateError(`${name} size mismatch (release says ${size}, got ${buf.length}); nothing was changed, retry in a few minutes.`);
-  }
-  if (sha256(buf) !== want) {
-    throw new UpdateError(`${name} failed its sha256 check against ${ASSET_SUMS}. Nothing was changed; retry in a few minutes, and if it keeps failing do not install and report it.`);
-  }
-  return buf;
-}
-async function installUpdate(o = {}) {
-  if (installing) return { status: "already_installing" };
-  installing = true;
-  try {
-    const api = o.api ?? releasesApi();
-    const rel = await fetchRelease(api).catch((err) => {
-      throw new UpdateError(`could not read the latest release: ${err.message}`);
-    });
-    const available = compareSemver(rel.version, BRIDGE_VERSION) > 0;
-    setState({
-      current: BRIDGE_VERSION,
-      latest: rel.version,
-      available,
-      checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      headline: rel.headline || null,
-      notes: rel.notes || null
-    });
-    if (!available) return { status: "up_to_date", from: BRIDGE_VERSION, to: rel.version };
-    if (!o.force && readInstallRecord().source === "clone") {
-      return { status: "clone_install", from: BRIDGE_VERSION, to: rel.version, next: CLONE_NEXT_STEPS };
-    }
-    const sums = parseSums((await downloadAsset(rel, ASSET_SUMS, SUMS_MAX_BYTES)).toString("utf8"));
-    const bridgeBuf = await downloadVerified(rel, ASSET_BRIDGE, sums);
-    const pluginBufs = [];
-    for (const [assetName, localName] of Object.entries(PLUGIN_ASSETS)) {
-      pluginBufs.push([localName, await downloadVerified(rel, assetName, sums)]);
-    }
-    const home = resolve(gripHome());
-    const within = (p) => resolve(p).startsWith(home + sep);
-    mkdirSync(home, { recursive: true });
-    const pluginDir = join(home, "figma-plugin");
-    mkdirSync(pluginDir, { recursive: true });
-    const written = [];
-    for (const [name, buf] of pluginBufs) {
-      const dest = join(pluginDir, name);
-      if (!within(dest)) throw new UpdateError(`refusing to write outside ${home}`);
-      atomicWrite(dest, buf);
-      written.push(name);
-    }
-    const entry = join(home, "grip-bridge.mjs");
-    const prev = join(home, "grip-bridge.prev.mjs");
-    if (!within(entry) || !within(prev)) throw new UpdateError(`refusing to write outside ${home}`);
-    if (existsSync(entry)) {
-      const tmp = `${prev}.tmp-${process.pid}-${Date.now()}`;
-      try {
-        copyFileSync(entry, tmp);
-        renameSync(tmp, prev);
-      } catch (err) {
-        try {
-          rmSync(tmp, { force: true });
-        } catch {
-        }
-        throw err;
-      }
-    }
-    atomicWrite(entry, bridgeBuf, 493);
-    try {
-      chmodSync(entry, 493);
-    } catch {
-    }
-    try {
-      writeInstallRecord("release", rel.version);
-    } catch {
-    }
-    logErr(`update: installed ${BRIDGE_VERSION} -> ${rel.version} into ${home}`);
-    return { status: "updated", from: BRIDGE_VERSION, to: rel.version, home, pluginFilesWritten: written };
-  } finally {
-    installing = false;
-  }
-}
-function rollbackBridge() {
-  const home = gripHome();
-  const prev = join(home, "grip-bridge.prev.mjs");
-  const entry = join(home, "grip-bridge.mjs");
-  if (!existsSync(prev)) throw new UpdateError(`no previous version to restore (${prev} does not exist)`);
-  atomicWrite(entry, readFileSync(prev), 493);
-  try {
-    chmodSync(entry, 493);
-  } catch {
-  }
-  return { restored: prev };
-}
-var restartHook = null;
-var restartManaged = false;
-function setRestartHook(fn, managed) {
-  restartHook = fn;
-  restartManaged = managed;
-}
-function isManagedInstall() {
-  try {
-    const self = realpathSync(fileURLToPath(import.meta.url));
-    return self === realpathSync(join(gripHome(), "grip-bridge.mjs"));
-  } catch {
-    return false;
-  }
-}
-async function installAndScheduleRestart(o = {}) {
-  const r = await installUpdate({ force: o.force });
-  if (r.status !== "updated") return r;
-  if (!restartHook) return { ...r, restart: "none" };
-  if (!restartManaged) {
-    logErr("update: this bridge is not running from ~/.grip/grip-bridge.mjs, so it is not restarting; start the installed copy to use the new version");
-    return { ...r, restart: "not_managed" };
-  }
-  const delay = Number(process.env.GRIP_UPDATE_RESTART_DELAY_MS ?? 1e3);
-  const hook = restartHook;
-  setTimeout(() => {
-    try {
-      hook();
-    } catch (err) {
-      logErr(`update: restart failed: ${err.message}`);
-    }
-  }, delay);
-  return { ...r, restart: "scheduled" };
-}
-function processCommandLine(pid) {
-  try {
-    if (process.platform === "win32") {
-      return execFileSync(
-        "powershell",
-        [
-          "-NoProfile",
-          "-Command",
-          `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`
-        ],
-        { encoding: "utf8", timeout: 8e3, stdio: ["ignore", "pipe", "ignore"] }
-      ).trim() || null;
-    }
-    return execFileSync(
-      "ps",
-      ["-o", "command=", "-p", String(pid)],
-      { encoding: "utf8", timeout: 5e3, stdio: ["ignore", "pipe", "ignore"] }
-    ).trim() || null;
-  } catch {
-    return null;
-  }
-}
-function stopRunningDaemon() {
-  let pid;
-  try {
-    const j = JSON.parse(readFileSync(statusFilePath(), "utf8"));
-    pid = Number(j?.pid);
-  } catch {
-    return { stopped: false, note: "no running Grip daemon found (no status file)" };
-  }
-  if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) {
-    return { stopped: false, note: "status file has no usable daemon pid; left it alone" };
-  }
-  try {
-    process.kill(pid, 0);
-  } catch {
-    return { stopped: false, note: "status file is stale (that process is gone)" };
-  }
-  const cmd = processCommandLine(pid);
-  if (!cmd) return { stopped: false, note: `could not verify pid ${pid} is a Grip daemon; left it running (restart your agent / Figma plugin to pick up the new bridge)` };
-  if (!/grip-bridge/.test(cmd) || !/--daemon/.test(cmd)) {
-    return { stopped: false, note: `pid ${pid} does not look like a Grip daemon; left it alone` };
-  }
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch (err) {
-    return { stopped: false, note: `could not stop pid ${pid}: ${err.message}` };
-  }
-  return { stopped: true, note: `stopped the running Grip daemon (pid ${pid}); the new version starts on the next agent call` };
-}
-function wireUpdateToBridge(bridge) {
-  const push = (s) => bridge.setUpdateState(s ? { available: s.available, latest: s.latest, headline: s.headline ?? null } : null);
-  push(getUpdateState());
-  const off = onUpdateState(push);
-  const onRequest = async (e) => {
-    let msg;
-    try {
-      const r = await installAndScheduleRestart();
-      msg = { type: "update_result", status: r.status, from: r.from, to: r.to, restart: r.restart, next: r.next };
-    } catch (err) {
-      msg = { type: "update_result", status: "error", message: err.message };
-    }
-    bridge.sendTo(e.sessionId, msg);
-  };
-  bridge.on("update-request", onRequest);
-  return () => {
-    off();
-    bridge.off("update-request", onRequest);
-  };
 }
 
 // src/mcp-server.ts
@@ -26819,14 +27117,21 @@ function createSession(bridge) {
     toolScopeSpec: null,
     updateNoticeSent: false
   };
+  let updateParagraph = "";
+  if (!updatesDisabled()) {
+    const u = getUpdateState();
+    if (u && updateSignal(u, pluginInfos(bridge)).signal) {
+      if (claimNotice(u.latest)) {
+        session.updateNoticeGranted = true;
+        updateParagraph = updateInstructionsParagraph(u);
+      } else session.updateNoticeSent = true;
+    }
+  }
   const server = new Server(
     { name: "grip", version: BRIDGE_VERSION },
     {
       capabilities: { tools: { listChanged: true }, logging: {} },
-      instructions: "Grip is a live connection to Figma. Use these tools for anything involving Figma \u2014 reading or editing a document, page, frame, component, style, variable or the current selection.\n\nGrip drives the Figma app itself through a plugin, so it sees the file the user has open right now, including unsaved and unpublished changes, and can write back to it. Other Figma integrations read published data over the REST API and cannot edit the canvas \u2014 for the document the user is looking at, use Grip.\n\nStart with get_page_context (cheap: which file and page, how many nodes selected). If it reports no plugin connected, the user needs to run the Grip plugin in Figma \u2014 say so rather than reporting that you have no Figma access." + (() => {
-        const u = getUpdateState();
-        return u?.available && !updatesDisabled() ? updateInstructionsParagraph(u) : "";
-      })()
+      instructions: "Grip is a live connection to Figma. Use these tools for anything involving Figma \u2014 reading or editing a document, page, frame, component, style, variable or the current selection.\n\nGrip drives the Figma app itself through a plugin, so it sees the file the user has open right now, including unsaved and unpublished changes, and can write back to it. Other Figma integrations read published data over the REST API and cannot edit the canvas \u2014 for the document the user is looking at, use Grip.\n\nStart with get_page_context (cheap: which file and page, how many nodes selected). If it reports no plugin connected, the user needs to run the Grip plugin in Figma \u2014 say so rather than reporting that you have no Figma access." + updateParagraph
     }
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -26858,9 +27163,11 @@ ${args.code}
         session.updateNoticeSent = true;
       } else if (!updatesDisabled()) {
         const u = getUpdateState();
-        if (u?.available) {
+        if (u && updateSignal(u, pluginInfos(bridge)).signal) {
+          if (session.updateNoticeGranted || claimNotice(u.latest)) {
+            res.content.push({ type: "text", text: updateNoticeText(u) });
+          }
           session.updateNoticeSent = true;
-          res.content.push({ type: "text", text: updateNoticeText(u) });
         }
       }
     }
@@ -26901,27 +27208,57 @@ ${args.code}
           activeFileId: session.activeFileId,
           subscriptions: session.subscriptions
         },
-        update: updateSummary()
+        update: updateSummary(void 0, pluginInfos(bridge))
       });
     }
     if (name === "grip_update") {
-      const action = parsed.data.action ?? "check";
+      const { action = "check", version: version2 } = parsed.data;
+      const plugins = pluginInfos(bridge);
       if (action === "check") {
         if (updatesDisabled()) {
-          return okResult({ ...updateSummary(), disabled: true, note: "Automatic update checks are off (GRIP_NO_UPDATE_CHECK). Nothing was contacted. If the user wants to update, call grip_update {action:'install'} after they agree." });
+          return okResult({ ...updateSummary(void 0, plugins), disabled: true, note: "Automatic update checks are off (GRIP_NO_UPDATE_CHECK). Nothing was contacted. If the user wants to update, call grip_update {action:'install', version} after they agree." });
         }
         const s = await checkForUpdate();
+        const sum = updateSummary(s, plugins);
         return okResult({
-          ...updateSummary(s),
+          ...sum,
           // What's new, from the release notes (first ~1200 chars). Relay it to the user.
           headline: s.headline ?? null,
           notes: s.notes ?? null,
           ...s.error ? { error: s.error } : {},
-          note: s.available ? `Update available. Tell the user what's new (headline/notes) and ask if they want it; only if they say yes, call grip_update {action:'install'}.` : s.error ? "Could not reach the update server; nothing changed." : "Grip is up to date."
+          note: s.available ? sum.signalled ? `Update available. Tell the user what's new (headline/notes) and ask if they want it; only after they say yes, call grip_update {action:'install', version:'${s.latest}'}.` : `Update ${s.latest} exists but is NOT offered: ${sum.blockedReason}. Do not install it.` : s.error ? "Could not reach the update server; nothing changed." : "Grip is up to date."
         });
       }
+      if (!version2) {
+        return errorResult(`version_required: grip_update {action:'install'} needs version:'<x.y.z>', the exact version you told the user about (call grip_update {action:'check'} and read \`latest\`), and only after the user explicitly said yes.`);
+      }
+      let consent = "agent_attested";
       try {
-        const r = await installAndScheduleRestart();
+        const r = await installAndScheduleRestart({
+          version: version2,
+          plugins,
+          // The user must really agree: where the client can ask them (MCP
+          // elicitation) we ask here; the agent's "they said yes" alone is only
+          // accepted from clients that cannot ask.
+          confirm: async (info) => {
+            const a = await askUserToConfirm(server, `Install Grip ${info.from} \u2192 ${info.to}?${info.headline ? " " + info.headline : ""}`);
+            if (a === "accept") consent = "user_confirmed";
+            return a !== "decline";
+          }
+        });
+        if (r.status === "declined") return okResult({ status: "declined", note: "The user declined. Nothing was installed or changed." });
+        if (r.status === "version_changed") {
+          return { isError: true, content: [{ type: "text", text: JSON.stringify({
+            error: "version_changed",
+            requested: version2,
+            latest: r.to,
+            headline: r.headline,
+            notes: r.notes,
+            note: `The latest release is now ${r.to}, not ${version2}. Nothing was installed. Tell the user what ${r.to} is and ask again; if they agree, call grip_update {action:'install', version:'${r.to}'}.`
+          }, null, 2) }] };
+        }
+        if (r.status === "incompatible_plugin") return errorResult(`incompatible_plugin: ${r.reason}. Nothing was installed.`);
+        if (r.status === "plugins_unverifiable") return errorResult("plugins_unverifiable: no Grip plugin is connected. Open the Grip plugin in Figma first so compatibility can be verified, then try again. Nothing was installed.");
         if (r.status === "up_to_date") return okResult({ status: "up_to_date", current: BRIDGE_VERSION, latest: r.to });
         if (r.status === "already_installing") return okResult({ status: "already_installing", note: "An update is already being installed; wait a few seconds." });
         if (r.status === "clone_install") {
@@ -26939,10 +27276,11 @@ ${args.code}
           to: r.to,
           restart: r.restart,
           pluginFilesWritten: r.pluginFilesWritten,
+          consent,
           next: installNextSteps(r.restart)
         });
       } catch (err) {
-        return errorResult(`update failed: ${err.message}`);
+        return errorResult(`${err instanceof UpdateError && err.code ? err.code + ": " : ""}update failed: ${err.message}`);
       }
     }
     if (name === "grip_diagnose") {
@@ -27170,13 +27508,42 @@ function destroySession(live) {
 function activeSessionCount() {
   return liveSessions.length;
 }
-function updateSummary(s = getUpdateState()) {
+function updateSummary(s = getUpdateState(), plugins = []) {
+  const sig = updateSignal(s, plugins);
+  const stale = bridgeStaleReason(plugins);
   return {
     current: BRIDGE_VERSION,
     latest: s?.latest ?? null,
     available: s?.available ?? false,
-    checkedAt: s?.checkedAt ?? null
+    checkedAt: s?.checkedAt ?? null,
+    minPlugin: s?.minPlugin ?? null,
+    signalled: sig.signal && !updatesDisabled(),
+    ...sig.blockedReason ? { blockedReason: sig.blockedReason } : {},
+    // A connected plugin needs a NEWER bridge than this one: the bridge is the stale side.
+    ...stale ? { bridgeStale: stale, updateRecommended: true } : {}
   };
+}
+async function askUserToConfirm(server, message) {
+  const caps = server.getClientCapabilities()?.elicitation;
+  if (!caps) return "unsupported";
+  const requestedSchema = { type: "object", properties: {} };
+  const t = Number(process.env.GRIP_ELICIT_TIMEOUT_MS);
+  const timeout = Number.isFinite(t) && t > 0 ? Math.min(t, 6e4) : 6e4;
+  try {
+    let res;
+    if (caps.form) {
+      res = await server.elicitInput({ message, requestedSchema }, { timeout });
+    } else if (Object.keys(caps).length === 0) {
+      res = await server.request({ method: "elicitation/create", params: { mode: "form", message, requestedSchema } }, ElicitResultSchema, { timeout });
+    } else {
+      return "unsupported";
+    }
+    return res.action === "accept" ? "accept" : "decline";
+  } catch (err) {
+    process.stderr.write(`[grip] update confirmation failed, treating as declined: ${err.message}
+`);
+    return "decline";
+  }
 }
 function installNextSteps(restart) {
   const steps = [];
@@ -27188,7 +27555,7 @@ function installNextSteps(restart) {
     steps.push("Restart your agent / the Grip bridge to load the new version.");
   }
   steps.push("Figma plugin: if the user imported it from ~/.grip/figma-plugin it was updated in place; they should re-run the plugin (or have Plugins > Development > Hot reload plugin on). If they imported it from a git clone instead, they need to `git pull` there or re-import ~/.grip/figma-plugin/manifest.json.");
-  steps.push("Undo: `node ~/.grip/grip-bridge.mjs update --rollback` restores the previous bridge.");
+  steps.push("Undo: `node ~/.grip/grip-bridge.mjs update --rollback` restores the previous bridge (the plugin files stay at the new version).");
   return steps;
 }
 function pluginResult(tool, method, result) {
@@ -29063,12 +29430,14 @@ function confirm(question) {
 async function runUpdateCli(argv) {
   const flags = new Set(argv.slice(3));
   const yes = flags.has("--yes") || flags.has("-y");
+  const force = flags.has("--force");
+  const checkOnly = flags.has("--check");
   const entry = `${gripHome()}/grip-bridge.mjs`;
   if (flags.has("--rollback")) {
     try {
       const r = rollbackBridge();
       out(`Restored the previous bridge from ${r.restored}.`);
-      out("(Plugin files in ~/.grip/figma-plugin are left as they are.)");
+      out("(Only the bridge goes back: the plugin files in ~/.grip/figma-plugin stay at the new version.)");
       out(stopRunningDaemon().note);
       return 0;
     } catch (err) {
@@ -29081,7 +29450,7 @@ async function runUpdateCli(argv) {
   const s = await checkForUpdate();
   if (s.error) {
     out(`Could not check for updates: ${s.error}`);
-    return flags.has("--check") ? 0 : 1;
+    return checkOnly ? 0 : 1;
   }
   if (!s.available) {
     out(`You are up to date (latest is ${s.latest}).`);
@@ -29093,15 +29462,33 @@ async function runUpdateCli(argv) {
     out(s.notes);
     out();
   } else if (s.headline) out(s.headline);
-  const force = flags.has("--force");
   const clone2 = readInstallRecord().source === "clone";
-  if (clone2 && !force && !flags.has("--check")) {
+  const plugins = readDaemonPlugins();
+  let unverifiable = false;
+  if (s.minPlugin) {
+    out(`Grip ${s.latest} needs a Figma plugin >= ${s.minPlugin}.`);
+    const v = checkPluginCompat(s.minPlugin, s.latest, plugins);
+    if (v.kind === "incompatible") {
+      out(`Not installing: ${v.reason}.`);
+      return checkOnly ? 0 : 1;
+    }
+    if (v.kind === "unverifiable") {
+      unverifiable = true;
+      out(`Could not verify your plugin: ${plugins === null ? "no running Grip bridge to ask (or one older than 0.8.0)" : v.reason}.`);
+      out("To have it checked, open the Grip plugin in Figma (with the bridge running) and re-run. Otherwise confirm with --yes that your plugin is current.");
+    }
+  } else {
+    out(`WARNING: Grip ${s.latest} has no verified compatibility info (${s.compatError ?? "compat.json missing"}).`);
+    out(`It is not offered to agents or the plugin, and it is not installed${force ? " ... except that --force was given: nothing will check that your plugin works with it." : " (--force overrides, at your own risk)."}`);
+    if (!force) return checkOnly ? 0 : 1;
+  }
+  if (clone2 && !force && !checkOnly) {
     out("This is a developer install (Grip was installed from a git clone), so it is not overwritten.");
     out(`Update it from your clone instead: ${CLONE_NEXT_STEPS.join(" && ")}`);
     out("(To replace it with the released build anyway, re-run with --force.)");
     return 0;
   }
-  if (flags.has("--check")) {
+  if (checkOnly) {
     if (clone2) out(`This is a developer install: update it from your clone with ${CLONE_NEXT_STEPS.join(" && ")}`);
     else out(`Install it with: node ${entry} update`);
     return 0;
@@ -29111,13 +29498,14 @@ async function runUpdateCli(argv) {
       out("Not installing: no terminal to confirm on. Re-run with --yes to install.");
       return 1;
     }
-    if (!await confirm(`Download and install ${s.latest} into ${gripHome()}? [y/N] `)) {
+    const q = unverifiable ? `Plugin compatibility could NOT be verified. Download and install ${s.latest} into ${gripHome()} anyway? [y/N] ` : `Download and install ${s.latest} into ${gripHome()}? [y/N] `;
+    if (!await confirm(q)) {
       out("Cancelled. Nothing was changed.");
       return 0;
     }
   }
   try {
-    const r = await installUpdate({ force });
+    const r = await installUpdate({ version: s.latest, force, plugins, acceptUnverified: true });
     if (r.status === "up_to_date") {
       out("Already up to date.");
       return 0;
@@ -29130,9 +29518,23 @@ async function runUpdateCli(argv) {
       out(`Developer install: run ${CLONE_NEXT_STEPS.join(" && ")} in your clone.`);
       return 0;
     }
+    if (r.status === "version_changed") {
+      out(`The latest release changed to ${r.to} while installing. Nothing was installed; re-run to review it.`);
+      return 1;
+    }
+    if (r.status === "incompatible_plugin" || r.status === "plugins_unverifiable") {
+      out(`Not installing: ${r.reason}.`);
+      return 1;
+    }
+    if (r.status === "declined") {
+      out("Cancelled. Nothing was changed.");
+      return 0;
+    }
+    if (r.compatWarning) out(r.compatWarning);
     out(`Updated ${r.from} -> ${r.to}.`);
     out(`  bridge  -> ${entry}  (previous kept as grip-bridge.prev.mjs; undo with: node ${entry} update --rollback)`);
     if (r.pluginFilesWritten?.length) out(`  plugin  -> ${gripHome()}/figma-plugin (${r.pluginFilesWritten.join(", ")})`);
+    out("Rolling back restores the bridge only; the plugin files stay at the new version.");
     out(stopRunningDaemon().note);
     out("If you imported the plugin from a git clone instead of ~/.grip/figma-plugin, run `git pull` there (or import ~/.grip/figma-plugin/manifest.json in Figma).");
     return 0;
@@ -29145,6 +29547,12 @@ async function runUpdateCli(argv) {
 
 // src/index.ts
 Error.stackTraceLimit = 3;
+if (process.argv.includes("--selftest")) {
+  process.stdout.write(`grip-bridge ${BRIDGE_VERSION} ok
+`, () => process.exit(0));
+  await new Promise(() => {
+  });
+}
 var WS_PORT = Number(process.env.GRIP_WS_PORT ?? 7777);
 var HTTP_PORT = Number(process.env.GRIP_HTTP_PORT ?? 7778);
 var IS_WIN = process.platform === "win32";
@@ -29290,6 +29698,15 @@ async function runDaemon(bridge) {
         httpSessions: http.sessionCount(),
         pluginCount: snap.pluginCount,
         pluginsReady: snap.plugins.filter((p) => p.wsReady).length,
+        // The CLI (`update`) has no WebSocket of its own: it reads the connected
+        // plugin versions from here to check compatibility before installing.
+        plugins: snap.plugins.map((p) => ({
+          pluginVersion: p.pluginVersion,
+          fileName: p.fileName,
+          wsReady: p.wsReady,
+          hello: p.hello,
+          minBridge: p.minBridge
+        })),
         pendingCount: snap.pendingCount
       }, null, 2));
     } catch {

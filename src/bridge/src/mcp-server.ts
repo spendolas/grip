@@ -3,6 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ElicitResultSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { v4 as uuid } from 'uuid';
 import { readFile, writeFile, stat, open, mkdir } from 'node:fs/promises';
@@ -17,7 +18,8 @@ import type { McpSession, WSEvent } from './types.js';
 import { BRIDGE_VERSION } from './types.js';
 import {
   getUpdateState, updatesDisabled, checkForUpdate, installAndScheduleRestart, updateNoticeText,
-  updateInstructionsParagraph, type UpdateState,
+  updateInstructionsParagraph, updateSignal, pluginInfos, claimNotice, bridgeStaleReason, UpdateError,
+  type UpdateState, type PluginInfo,
 } from './update.js';
 
 // File extension per export format, for auto temp-file naming.
@@ -198,6 +200,18 @@ export function createSession(bridge: PluginBridge): LiveSession {
     toolScopeSpec: null,
     updateNoticeSent: false,
   };
+  // Agent update notice (this paragraph + the first tool result's text block):
+  // only when an update is signalled (available AND compatible with every
+  // connected plugin) and not already shown for this version in the last 3
+  // days, across sessions. The purple strip is not throttled.
+  let updateParagraph = '';
+  if (!updatesDisabled()) {
+    const u = getUpdateState();
+    if (u && updateSignal(u, pluginInfos(bridge)).signal) {
+      if (claimNotice(u.latest!)) { session.updateNoticeGranted = true; updateParagraph = updateInstructionsParagraph(u); }
+      else session.updateNoticeSent = true;   // throttled: nothing more to show this session
+    }
+  }
   // `instructions` is returned with initialize and injected into the agent's
   // context once — unlike tool descriptions, it costs nothing per tool and is
   // not subject to the per-description budget.
@@ -224,7 +238,7 @@ export function createSession(bridge: PluginBridge): LiveSession {
         'Start with get_page_context (cheap: which file and page, how many nodes selected). ' +
         'If it reports no plugin connected, the user needs to run the Grip plugin in Figma — ' +
         'say so rather than reporting that you have no Figma access.' +
-        (() => { const u = getUpdateState(); return u?.available && !updatesDisabled() ? updateInstructionsParagraph(u) : ''; })(),
+        updateParagraph,
     },
   );
 
@@ -257,16 +271,19 @@ export function createSession(bridge: PluginBridge): LiveSession {
     const res = await handleCall(name, args);
     // Update notice: ONE extra text block on the first SUCCESSFUL result of
     // this session (never on errors, never on grip_update itself), only while
-    // an update is actually available. content[0] is untouched, so callers
-    // that parse the first block as JSON keep working.
+    // the update is signalled (available AND compatible with every connected
+    // plugin) and the 3-day per-version throttle allows it. content[0] is
+    // untouched, so callers that parse the first block as JSON keep working.
     if (!(res as any)?.isError && !session.updateNoticeSent) {
       if (name === 'grip_update') {
         session.updateNoticeSent = true;
       } else if (!updatesDisabled()) {
         const u = getUpdateState();
-        if (u?.available) {
-          session.updateNoticeSent = true;
-          (res as any).content.push({ type: 'text' as const, text: updateNoticeText(u) });
+        if (u && updateSignal(u, pluginInfos(bridge)).signal) {
+          if (session.updateNoticeGranted || claimNotice(u.latest!)) {
+            (res as any).content.push({ type: 'text' as const, text: updateNoticeText(u) });
+          }
+          session.updateNoticeSent = true;   // shown, or throttled: not again this session
         }
       }
     }
@@ -311,29 +328,57 @@ export function createSession(bridge: PluginBridge): LiveSession {
           activeFileId: session.activeFileId,
           subscriptions: session.subscriptions,
         },
-        update: updateSummary(),
+        update: updateSummary(undefined, pluginInfos(bridge)),
       });
     }
     if (name === 'grip_update') {
-      const action = (parsed.data as { action?: 'check' | 'install' }).action ?? 'check';
+      const { action = 'check', version } = parsed.data as { action?: 'check' | 'install'; version?: string };
+      const plugins = pluginInfos(bridge);
       if (action === 'check') {
         if (updatesDisabled()) {
-          return okResult({ ...updateSummary(), disabled: true, note: 'Automatic update checks are off (GRIP_NO_UPDATE_CHECK). Nothing was contacted. If the user wants to update, call grip_update {action:\'install\'} after they agree.' });
+          return okResult({ ...updateSummary(undefined, plugins), disabled: true, note: 'Automatic update checks are off (GRIP_NO_UPDATE_CHECK). Nothing was contacted. If the user wants to update, call grip_update {action:\'install\', version} after they agree.' });
         }
         const s = await checkForUpdate();
+        const sum = updateSummary(s, plugins);
         return okResult({
-          ...updateSummary(s),
+          ...sum,
           // What's new, from the release notes (first ~1200 chars). Relay it to the user.
           headline: s.headline ?? null,
           notes: s.notes ?? null,
           ...(s.error ? { error: s.error } : {}),
           note: s.available
-            ? `Update available. Tell the user what's new (headline/notes) and ask if they want it; only if they say yes, call grip_update {action:'install'}.`
+            ? (sum.signalled
+              ? `Update available. Tell the user what's new (headline/notes) and ask if they want it; only after they say yes, call grip_update {action:'install', version:'${s.latest}'}.`
+              : `Update ${s.latest} exists but is NOT offered: ${sum.blockedReason}. Do not install it.`)
             : s.error ? 'Could not reach the update server; nothing changed.' : 'Grip is up to date.',
         });
       }
+      if (!version) {
+        return errorResult(`version_required: grip_update {action:'install'} needs version:'<x.y.z>', the exact version you told the user about (call grip_update {action:'check'} and read \`latest\`), and only after the user explicitly said yes.`);
+      }
+      let consent: 'user_confirmed' | 'agent_attested' = 'agent_attested';
       try {
-        const r = await installAndScheduleRestart();
+        const r = await installAndScheduleRestart({
+          version,
+          plugins,
+          // The user must really agree: where the client can ask them (MCP
+          // elicitation) we ask here; the agent's "they said yes" alone is only
+          // accepted from clients that cannot ask.
+          confirm: async (info) => {
+            const a = await askUserToConfirm(server, `Install Grip ${info.from} → ${info.to}?${info.headline ? ' ' + info.headline : ''}`);
+            if (a === 'accept') consent = 'user_confirmed';
+            return a !== 'decline';
+          },
+        });
+        if (r.status === 'declined') return okResult({ status: 'declined', note: 'The user declined. Nothing was installed or changed.' });
+        if (r.status === 'version_changed') {
+          return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify({
+            error: 'version_changed', requested: version, latest: r.to, headline: r.headline, notes: r.notes,
+            note: `The latest release is now ${r.to}, not ${version}. Nothing was installed. Tell the user what ${r.to} is and ask again; if they agree, call grip_update {action:'install', version:'${r.to}'}.`,
+          }, null, 2) }] };
+        }
+        if (r.status === 'incompatible_plugin') return errorResult(`incompatible_plugin: ${r.reason}. Nothing was installed.`);
+        if (r.status === 'plugins_unverifiable') return errorResult('plugins_unverifiable: no Grip plugin is connected. Open the Grip plugin in Figma first so compatibility can be verified, then try again. Nothing was installed.');
         if (r.status === 'up_to_date') return okResult({ status: 'up_to_date', current: BRIDGE_VERSION, latest: r.to });
         if (r.status === 'already_installing') return okResult({ status: 'already_installing', note: 'An update is already being installed; wait a few seconds.' });
         if (r.status === 'clone_install') {
@@ -351,10 +396,11 @@ export function createSession(bridge: PluginBridge): LiveSession {
           to: r.to,
           restart: r.restart,
           pluginFilesWritten: r.pluginFilesWritten,
+          consent,
           next: installNextSteps(r.restart),
         });
       } catch (err) {
-        return errorResult(`update failed: ${(err as Error).message}`);
+        return errorResult(`${err instanceof UpdateError && err.code ? err.code + ': ' : ''}update failed: ${(err as Error).message}`);
       }
     }
     if (name === 'grip_diagnose') {
@@ -664,13 +710,49 @@ export async function connectStdio(bridge: PluginBridge): Promise<LiveSession> {
   return live;
 }
 
-function updateSummary(s: UpdateState | null = getUpdateState()) {
+// Always the truth (never throttled): what exists, what it needs, and whether
+// the bridge offers it (`signalled`) or why not (`blockedReason`).
+function updateSummary(s: UpdateState | null = getUpdateState(), plugins: PluginInfo[] = []) {
+  const sig = updateSignal(s, plugins);
+  const stale = bridgeStaleReason(plugins);
   return {
     current: BRIDGE_VERSION,
     latest: s?.latest ?? null,
     available: s?.available ?? false,
     checkedAt: s?.checkedAt ?? null,
+    minPlugin: s?.minPlugin ?? null,
+    signalled: sig.signal && !updatesDisabled(),
+    ...(sig.blockedReason ? { blockedReason: sig.blockedReason } : {}),
+    // A connected plugin needs a NEWER bridge than this one: the bridge is the stale side.
+    ...(stale ? { bridgeStale: stale, updateRecommended: true } : {}),
   };
+}
+
+// Ask the person (not the agent) to confirm an install, through MCP elicitation
+// (a form-less confirm). 'unsupported' = this client cannot ask; anything but an
+// explicit accept (decline, cancel, timeout after 60s, error) counts as a decline.
+async function askUserToConfirm(server: Server, message: string): Promise<'accept' | 'decline' | 'unsupported'> {
+  const caps = server.getClientCapabilities()?.elicitation;
+  if (!caps) return 'unsupported';
+  const requestedSchema = { type: 'object' as const, properties: {} };
+  // 60s at most (GRIP_ELICIT_TIMEOUT_MS can only lower it; tests).
+  const t = Number(process.env.GRIP_ELICIT_TIMEOUT_MS);
+  const timeout = Number.isFinite(t) && t > 0 ? Math.min(t, 60_000) : 60_000;
+  try {
+    let res;
+    if (caps.form) {
+      res = await server.elicitInput({ message, requestedSchema }, { timeout });
+    } else if (Object.keys(caps).length === 0) {
+      // `elicitation: {}` is the older spelling of form support
+      res = await server.request({ method: 'elicitation/create', params: { mode: 'form', message, requestedSchema } }, ElicitResultSchema, { timeout });
+    } else {
+      return 'unsupported';   // url-only client
+    }
+    return res.action === 'accept' ? 'accept' : 'decline';
+  } catch (err) {
+    process.stderr.write(`[grip] update confirmation failed, treating as declined: ${(err as Error).message}\n`);
+    return 'decline';
+  }
 }
 
 // What the agent should tell the user after a successful install.
@@ -684,7 +766,7 @@ function installNextSteps(restart: string | undefined): string[] {
     steps.push('Restart your agent / the Grip bridge to load the new version.');
   }
   steps.push('Figma plugin: if the user imported it from ~/.grip/figma-plugin it was updated in place; they should re-run the plugin (or have Plugins > Development > Hot reload plugin on). If they imported it from a git clone instead, they need to `git pull` there or re-import ~/.grip/figma-plugin/manifest.json.');
-  steps.push('Undo: `node ~/.grip/grip-bridge.mjs update --rollback` restores the previous bridge.');
+  steps.push('Undo: `node ~/.grip/grip-bridge.mjs update --rollback` restores the previous bridge (the plugin files stay at the new version).');
   return steps;
 }
 

@@ -8,18 +8,19 @@
         --c-connected: #19e54c;
         --c-warning: #e5c319;
         --c-error: #e53519;
+        /* Update available: the ONE colour used by no other state (grey / green /
+           yellow / red are taken), a clear violet that stays distinct from all
+           four on both light and dark canvases. */
+        --c-update: #a855f7;
       }
       html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
-      body { position: relative; }
       #state {
         width: 100%;
         height: 100%;
         background: var(--c-disconnected);
         transition: background 180ms ease;
       }
-      /* Clickable only while there is no bridge — that is the one state where
-         the plugin has something useful to offer (where to install it). When
-         connected, a stray click must not navigate anything. */
+      /* Clickable while there is no bridge (where to install it) ... */
       #state.actionable { cursor: pointer; }
       #state.actionable:hover { filter: brightness(1.08); }
       #state.connected { background: var(--c-connected); }
@@ -30,36 +31,25 @@
         50% { opacity: 0.55; }
       }
       #state.pulsing { animation: grip-pulse 900ms ease-in-out infinite; }
-      /* Update indicator: additive, a sibling OVER the strip (so the strip's
-         colour/pulse are untouched). Hidden unless the bridge announced a newer
-         Grip. Two clicks: the first asks to confirm, the second installs. */
-      #upd {
-        display: none;
-        position: absolute;
-        right: 4px;
-        top: 50%;
-        transform: translateY(-50%);
-        max-width: 112px;
-        box-sizing: border-box;
-        padding: 3px 7px;
-        border-radius: 9px;
-        background: rgba(255, 255, 255, 0.62);
-        color: rgba(0, 0, 0, 0.78);
-        font: 600 10px/1 system-ui, -apple-system, 'Segoe UI', sans-serif;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        cursor: pointer;
-        user-select: none;
+      /* ... and while a compatible update is waiting: purple, pulsing slowly.
+         One click installs it. Defined after .connected/.pulsing so it wins. */
+      @keyframes grip-update-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.6; }
       }
-      #upd.show { display: block; }
-      #upd:hover { background: rgba(255, 255, 255, 0.85); }
-      #upd.confirm { background: #fff; }
+      #state.update { background: var(--c-update); animation: grip-update-pulse 1600ms ease-in-out infinite; }
+      #state.update.clickable { cursor: pointer; }
+      #state.update.clickable:hover { filter: brightness(1.1); }
+      /* Installing: still purple, but a faster, shallower pulse (work in progress). */
+      @keyframes grip-updating-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.72; }
+      }
+      #state.updating { background: var(--c-update); animation: grip-updating-pulse 450ms ease-in-out infinite; cursor: progress; }
     </style>
   </head>
   <body>
     <div id="state"></div>
-    <div id="upd" role="button"></div>
     <script>
       const URL = 'ws://localhost:7777';
       const el = document.getElementById('state');
@@ -69,38 +59,81 @@
       let busyCount = 0;
       let errorClearTimer = null;
       let current = 'disconnected';
+      let pluginVersion = '';     // from the plugin's own hello (for the tooltip)
+      let bridgeVersion = '';     // from the bridge's welcome
+
+      // Update state. There is no label and no pill: just the purple colour, a
+      // tooltip, and one click.
+      let updLatest = null;       // version the bridge offered (null = nothing to offer)
+      let updCurrent = '';        // the bridge's own version, from the same frame
+      let updHeadline = '';       // one-line release summary (may be empty)
+      let updPhase = 'idle';      // idle | updating | failed
+      let updClone = false;       // the bridge said: developer (git clone) install, never updated in place
+      let updError = '';          // short reason of the last failure
+      let updFlash = false;       // the red flash on screen is an update failure, not "no bridge"
+      let updTimer = null;
+
+      // Colour + tooltip + cursor are all derived from the state above, in one place.
+      function render() {
+        el.classList.remove('connected', 'warning', 'error', 'update', 'updating', 'clickable', 'actionable', 'pulsing');
+        if (current !== 'disconnected') el.classList.add(current);
+        // Purple only while connected: a disconnected strip stays grey.
+        const offered = current === 'connected' && !!updLatest && !updClone;
+        // Grey means no bridge is listening. The plugin can't start one (the Figma
+        // sandbox cannot launch a local process), so offer the install pointer.
+        const needsSetup = (current === 'disconnected' || current === 'error') && !updFlash && updPhase !== 'updating';
+        if (offered) {
+          el.classList.add(updPhase === 'updating' ? 'updating' : 'update');
+          if (updPhase !== 'updating') el.classList.add('clickable');
+        } else if (needsSetup) {
+          el.classList.add('actionable');
+        } else if (current === 'connected' && busyCount > 0) {
+          el.classList.add('pulsing');
+        }
+        el.title = tooltip(offered, needsSetup);
+      }
+
+      function tooltip(offered, needsSetup) {
+        if (updPhase === 'updating') return current === 'connected' ? 'Updating…' : 'Updating… the bridge is restarting';
+        if (needsSetup) return 'Grip bridge not running — click for setup instructions';
+        if (current !== 'connected') return '';
+        if (updLatest && updClone) {
+          return 'Grip ' + updLatest + ' is available, but this is a developer install (git clone), so it is not updated in place. ' +
+            'Update it from the clone: git pull && node bridge/install.mjs';
+        }
+        if (offered && updPhase === 'failed') return 'Update failed: ' + (updError || 'unknown error') + ' — click to retry';
+        if (offered) {
+          const from = updCurrent || bridgeVersion || '?';
+          return 'Grip update available (' + from + ' → ' + updLatest + ') — click to install' + (updHeadline ? '\n' + updHeadline : '');
+        }
+        return 'Grip' + (pluginVersion ? ' ' + pluginVersion : '') + ' — connected';
+      }
 
       function setState(name) {
-        if (current === name) return;
         current = name;
-        el.classList.remove('connected', 'warning', 'error');
-        if (name !== 'disconnected') el.classList.add(name);
-        // Grey means no bridge is listening. The plugin can't start one — the
-        // Figma sandbox has no way to launch a local process — so offer the
-        // install instructions instead of just sitting there grey.
-        const needsSetup = name === 'disconnected' || name === 'error';
-        el.classList.toggle('actionable', needsSetup);
-        el.title = needsSetup
-          ? 'Grip bridge not running — click for setup instructions'
-          : '';
-        applyPulse();
+        render();
       }
 
-      function applyPulse() {
-        if (current === 'connected' && busyCount > 0) {
-          el.classList.add('pulsing');
-        } else {
-          el.classList.remove('pulsing');
-        }
-      }
-
-      function flashError() {
+      function flashError(fromUpdate) {
+        updFlash = !!fromUpdate;
         setState('error');
         if (errorClearTimer) clearTimeout(errorClearTimer);
         errorClearTimer = setTimeout(() => {
           errorClearTimer = null;
-          if (ws && ws.readyState === 1) setState('connected');
+          updFlash = false;
+          if (ws && ws.readyState === 1) setState('connected'); else render();
         }, 2000);
+      }
+
+      function setUpdTimer(fn, ms) {
+        if (updTimer) clearTimeout(updTimer);
+        updTimer = fn ? setTimeout(() => { updTimer = null; fn(); }, ms) : null;
+      }
+
+      function clearUpdate() {
+        setUpdTimer(null);
+        updLatest = null; updCurrent = ''; updHeadline = '';
+        updPhase = 'idle'; updClone = false; updError = '';
       }
 
       function connect() {
@@ -113,36 +146,39 @@
           return;
         }
         ws.onopen = () => {
-          setState('connected');
           backoff = 500;
-          // Back after an update-triggered restart: the new bridge re-announces
-          // an update itself if one is still pending.
-          if (updPhase === 'updating') { updLatest = null; updPhase = 'idle'; renderUpd(); }
+          // Back after an update-triggered restart: whatever was pending belongs
+          // to the OLD bridge. The new one re-announces an update itself if one
+          // is still pending.
+          if (updPhase === 'updating') clearUpdate();
+          setState('connected');
         };
         ws.onclose = (ev) => {
+          busyCount = 0;
+          // Mid-update the drop is expected (the bridge restarts): keep "Updating…"
+          // until we reconnect. Otherwise nothing is on offer without a bridge.
+          if (updPhase !== 'updating') clearUpdate();
           if (ev.code === 1000 && ev.reason === 'duplicate') {
             setState('warning');
             backoff = 10000;
           } else {
             setState('disconnected');
           }
-          busyCount = 0;
-          applyPulse();
-          // Not connected: nothing to click. (Mid-update the drop is expected —
-          // the bridge restarts — so keep "updating…" until we reconnect.)
-          if (updPhase !== 'updating') { updLatest = null; updPhase = 'idle'; renderUpd(); }
           scheduleReconnect();
         };
-        ws.onerror = () => setState('error');
+        // (While the bridge restarts for an update every failed reconnect fires onerror:
+        // that must stay grey, not flicker red.)
+        ws.onerror = () => { if (updPhase !== 'updating') setState('error'); };
         ws.onmessage = (ev) => {
           let msg;
           try { msg = JSON.parse(ev.data); } catch { return; }
           // Bridge → UI control (welcome) is forwarded to plugin so it can hello back.
           if (msg && msg.kind === 'welcome') {
+            if (typeof msg.bridgeVersion === 'string') bridgeVersion = msg.bridgeVersion;
             parent.postMessage({ pluginMessage: { kind: 'welcome', sessionId: msg.sessionId } }, '*');
             return;
           }
-          // Update notices (additive; older plugins/bridges simply ignore them).
+          // Update frames (additive; older plugins/bridges simply ignore them).
           if (msg && msg.type === 'update') { onUpdateNotice(msg); return; }
           if (msg && msg.type === 'update_result') { onUpdateResult(msg); return; }
           if (msg && msg.id && msg.method) {
@@ -154,83 +190,77 @@
         };
       }
 
-      // ---- update indicator ----
-      const updEl = document.getElementById('upd');
-      let updLatest = null;       // newest version the bridge announced (null = none)
-      let updHeadline = '';       // one-line release summary the bridge sent along (may be empty)
-      let updClone = false;       // the bridge said: developer (clone) install, update with the clone
-      let updPhase = 'idle';      // idle | confirm | updating | failed
-      let updTimer = null;
-
-      function setUpdTimer(fn, ms) {
-        if (updTimer) clearTimeout(updTimer);
-        updTimer = setTimeout(() => { updTimer = null; fn(); }, ms);
-      }
-
-      function renderUpd() {
-        const visible = updPhase !== 'idle' || !!updLatest;
-        updEl.classList.toggle('show', visible);
-        updEl.classList.toggle('confirm', updPhase === 'confirm');
-        if (!visible) return;
-        updEl.textContent =
-          updPhase === 'confirm' ? 'click to confirm' :
-          updPhase === 'updating' ? 'updating\u2026' :
-          updPhase === 'failed' ? (updClone ? 'use the clone' : 'update failed') : '\u2191 update';
-        updEl.title =
-          updPhase === 'confirm' ? 'Click again within 5s to download and install Grip ' + (updLatest || '') :
-          updPhase === 'updating' ? 'Installing, the bridge will restart in a moment' :
-          updPhase === 'failed' ? (updClone
-            ? 'This Grip runs from a git clone (a developer install), so it is not updated in place. In the clone, run: git pull && node bridge/install.mjs'
-            : 'The update did not install; ask your agent for details (grip_update) or run: node ~/.grip/grip-bridge.mjs update') :
-          'Grip ' + (updLatest || 'update') + ' is available' + (updHeadline ? ': ' + updHeadline : '.') + ' Click, then confirm, to install it.';
-      }
-
+      // {type:'update', available, latest, current, headline}: `available` is the
+      // bridge's SIGNAL (an update exists AND every connected plugin is compatible).
       function onUpdateNotice(msg) {
         if (updPhase === 'updating') return;
-        updLatest = msg.available ? (msg.latest || 'new') : null;
+        const was = updLatest;
+        updLatest = msg.available ? (typeof msg.latest === 'string' && msg.latest ? msg.latest : 'new') : null;
+        updCurrent = typeof msg.current === 'string' ? msg.current : '';
         updHeadline = msg.available && typeof msg.headline === 'string' ? msg.headline : '';
-        if (!updLatest) updPhase = 'idle';
-        renderUpd();
+        // A different offer (or none) wipes the verdict about the old one.
+        if (!updLatest || updLatest !== was) { updClone = false; updError = ''; if (updPhase === 'failed') updPhase = 'idle'; }
+        render();
       }
 
+      // {type:'update_result', status, ...}: the outcome of OUR click.
       function onUpdateResult(msg) {
+        setUpdTimer(null);
         if (msg.status === 'updated') {
-          if (msg.restart === 'scheduled') return;   // bridge is about to restart; reconnect clears us
-          updPhase = 'idle'; updLatest = null;       // installed, but no automatic restart
+          // restart 'scheduled': the bridge is about to restart; the reconnect clears us.
+          if (msg.restart === 'scheduled') { render(); return; }
+          // Installed, but no automatic restart: nothing left to click.
+          clearUpdate();
+          render();
         } else if (msg.status === 'already_installing') {
-          return;
+          render();
         } else if (msg.status === 'up_to_date') {
-          updPhase = 'idle'; updLatest = null;
+          clearUpdate();
+          render();
+        } else if (msg.status === 'clone_install') {
+          // Developer install: never updated in place. Stop being purple.
+          updPhase = 'idle'; updClone = true;
+          render();
+        } else if (msg.code === 'version_changed') {
+          // A newer release appeared since the user looked: not a failure. The
+          // fresh `update` frame follows and re-arms the indicator for it.
+          updPhase = 'idle';
+          render();
         } else {
-          updClone = msg.status === 'clone_install';
           updPhase = 'failed';
-          setUpdTimer(() => { updPhase = 'idle'; renderUpd(); }, 5000);
+          updError = shortReason(msg.message);
+          flashError(true);   // brief red flash, then back to purple (render() in the flash timer)
         }
-        renderUpd();
       }
 
-      // The user's trigger. Iframes can't rely on window.confirm, so: first click
-      // flips the label to "click to confirm" for 5s; a second click installs.
-      updEl.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (updPhase === 'idle' && updLatest) {
-          updPhase = 'confirm';
-          setUpdTimer(() => { if (updPhase === 'confirm') { updPhase = 'idle'; renderUpd(); } }, 5000);
-          renderUpd();
-        } else if (updPhase === 'confirm') {
-          updPhase = 'updating';
-          send({ type: 'update_request' });
-          // If no restart/reconnect follows, don't sit on "updating…" forever.
-          setUpdTimer(() => { if (updPhase === 'updating') { updPhase = 'idle'; renderUpd(); } }, 60000);
-          renderUpd();
-        }
-      });
+      function shortReason(m) {
+        const t = String(m || 'unknown error').replace(/\s+/g, ' ').trim();
+        return t.length > 140 ? t.slice(0, 139) + '…' : t;
+      }
+
+      // The user's click on the purple strip: ask the bridge to install the
+      // version that is being shown (it refuses if a newer one has appeared).
+      function startUpdate() {
+        if (!updLatest || updPhase === 'updating') return;
+        updPhase = 'updating';
+        updError = '';
+        send({ type: 'update_request', version: updLatest });
+        // No result and no restart within a minute: don't sit on "Updating…" forever.
+        setUpdTimer(() => {
+          if (updPhase !== 'updating') return;
+          if (ws && ws.readyState === 1) { updPhase = 'failed'; updError = 'no answer from the bridge'; render(); }
+          else { clearUpdate(); render(); }
+        }, 60000);
+        render();
+      }
 
       function scheduleReconnect() {
         if (reconnectTimer !== null) return;
         const MAX_BACKOFF = 2000;
-        const delay = Math.min(backoff, MAX_BACKOFF);
-        backoff = Math.min(backoff * 2, MAX_BACKOFF);
+        // The bridge is restarting for an update: poll fast, it is back within ~2s.
+        const fast = updPhase === 'updating';
+        const delay = fast ? 250 : Math.min(backoff, MAX_BACKOFF);
+        if (!fast) backoff = Math.min(backoff * 2, MAX_BACKOFF);
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null;
           connect();
@@ -254,30 +284,31 @@
         } else if (msg.kind === 'event') {
           send({ event: msg.event, data: msg.data });
         } else if (msg.kind === 'hello') {
-          // Forward every field the plugin set (including `version` and
-          // any future additions). An earlier allow-list dropped fields
+          // Forward every field the plugin set (including `version`, `minBridge`
+          // and any future additions). An earlier allow-list dropped fields
           // silently and led to a long false-positive Figma-cache hunt.
           const { pluginMessage: _drop, ...rest } = msg;
+          if (typeof msg.version === 'string') { pluginVersion = msg.version; render(); }
           send({ ...rest, kind: 'hello' });
         } else if (msg.kind === 'busy') {
           if (msg.busy) busyCount++;
           else busyCount = Math.max(0, busyCount - 1);
-          applyPulse();
+          render();
         } else if (msg.kind === 'error') {
-          flashError();
+          flashError(false);
         }
       };
 
       el.addEventListener('click', () => {
-        if (!el.classList.contains('actionable')) return;
-        parent.postMessage({ pluginMessage: { kind: 'openSetup' } }, '*');
+        if (el.classList.contains('actionable')) {
+          parent.postMessage({ pluginMessage: { kind: 'openSetup' } }, '*');
+        } else if (el.classList.contains('clickable')) {
+          startUpdate();
+        }
       });
 
-      // Initialise title/cursor for the starting (disconnected) state, which
-      // setState() skips because `current` already equals 'disconnected'.
-      el.classList.add('actionable');
-      el.title = 'Grip bridge not running — click for setup instructions';
-
+      // Starting state: disconnected, grey, with the setup tooltip.
+      render();
       connect();
     </script>
   </body>

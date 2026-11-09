@@ -8,9 +8,9 @@ Pairs with **[Gaffer](https://github.com/spendolas/gaffer-ae)**, which does the 
 
 Open your agent (the Claude desktop app, Claude Code, or any MCP agent that can run shell commands) and say:
 
-> Install Grip from https://github.com/spendolas/grip
+> Install Grip from https://github.com/spendolas/grip/releases/latest
 
-Your agent downloads the latest release, verifies it, installs it, and asks you a question or two along the way. Then you import the plugin in Figma (one menu step that only you can do) and restart your agent.
+Your agent opens the latest release, follows the install steps in this README (every release links the README at its own tag, so the steps and the downloadable files always match), downloads and verifies the release, installs it, and asks you a question or two along the way. Then you import the plugin in Figma (one menu step that only you can do) and restart your agent.
 
 ## How it works
 
@@ -220,29 +220,35 @@ The Figma sandbox can't launch a local process, so opening the plugin **before**
 
 ## Updating
 
-Grip never updates itself behind your back: **an update happens only when you say so.** It does check once a day whether a newer release exists (one small request, see below) and tells you in three places. Pick whichever you like:
+Grip never updates itself behind your back: **an update happens only when you say so.** It does check once a day whether a newer release exists (one small request, see below), and it only tells you about a release that works with the Figma plugin(s) you have open (see "Plugin compatibility"). Pick whichever way you like:
 
-1. **Ask your agent: "update Grip".** It calls `grip_update`, tells you what's new (the release notes), and installs only after you say yes.
-2. **Click the plugin strip.** When an update exists, a small **↑ update** label appears on the Grip plugin's status strip (hover it for the one-line summary). Click it, then click again on **click to confirm** (you have 5 seconds).
+1. **Click the plugin strip.** When a compatible update exists, the Grip plugin's status strip in Figma turns **purple and pulses** (grey = no bridge, green = connected, yellow = warning, red = error: purple is only ever an update). Hover it for what is new; **one click installs it.** While it installs the strip pulses faster and says "Updating…", goes grey for a second while the bridge restarts, then turns green again. If an install fails it flashes red once and goes back to purple with the reason in the tooltip ("click to retry").
+2. **Ask your agent: "update Grip".** It calls `grip_update`, tells you what's new (the release notes) and installs only after you say yes. If your agent can ask you directly (MCP elicitation) Grip asks you itself and installs only if you accept; the agent saying "they said yes" is not enough there.
 3. **Manually.** `node ~/.grip/grip-bridge.mjs update` (asks first; `--yes` skips the question, `--check` only reports and shows the notes, `--rollback` puts the previous bridge back).
-4. **Developer installs (a git clone).** `git pull && node bridge/install.mjs`. An install made from a clone is never updated in place: the updater, the agent tool and the plugin all tell you to use `git pull` instead. (`update --force` on the command line overrides that.)
+4. **Developer installs (a git clone).** `git pull && node bridge/install.mjs`. An install made from a clone is never updated in place: the updater, the agent tool and the plugin all tell you to use `git pull` instead (the strip is not purple for a clone install). (`update --force` on the command line overrides that.)
 
 After an update the bridge restarts itself within a second (your agent may need one retry; agents on the HTTP transport may have to reconnect). If you imported the plugin from `~/.grip/figma-plugin` it was refreshed in place; re-run it in Figma (or turn on **Plugins → Development → Hot reload plugin**). If you imported it from a git clone instead, `git pull` there.
 
-**What gets downloaded, from where.** Updates come from this repository's [GitHub Releases](https://github.com/spendolas/grip/releases). The bridge asks `api.github.com` which release is the latest, then downloads four files from that release (`grip-bridge.mjs`, `grip-plugin-code.js`, `grip-plugin-ui.html`, `grip-plugin-manifest.json`) plus its `SHA256SUMS.txt`. Downloads may only come from `github.com`, `api.github.com` and `*.githubusercontent.com` (GitHub redirects release downloads to `release-assets.githubusercontent.com`; anything else is refused). Every file must be listed in `SHA256SUMS.txt` and match its hash, and stay under a size cap, *before* anything is written; writes are atomic and confined to `~/.grip`, and the previous bridge is kept. The request carries only a generic user agent (`grip-bridge/<version>`): no account, email or machine identifier.
+**Plugin compatibility.** The published Figma plugin is updated through Figma, not by this updater, so the plugin you have can be older than the bridge. Every release carries a `compat.json` (`{"version", "minPlugin"}`, checked against `SHA256SUMS.txt`) naming the oldest plugin it works with. Grip signals (purple strip, agent notices) and installs an update only when at least one plugin window is connected and **every** connected plugin is at least that version, because an update replaces the bridge for all your Figma windows. If one is too old, `grip_health` says so ("plugin 0.6.0 in "Fidelity" is older than 0.9.0 requires (>=0.8.0); update the Grip plugin in Figma first") and nothing is offered. A release without a verifiable `compat.json` is never offered or installed (only the command line's `--force` overrides that, with a loud warning). The check runs again at install time against the windows connected then; from the command line it asks a running bridge, and if it cannot (no bridge or plugin open) it says so and needs `--yes`.
+
+**Agent notices are rationed.** For a given new version your agent is told at most once every 3 days, across all its sessions (the purple strip, `grip_update` check and `grip_health` always show the truth).
+
+**What gets downloaded, from where.** Updates come from this repository's [GitHub Releases](https://github.com/spendolas/grip/releases). The bridge asks `api.github.com` which release is the latest, then downloads `compat.json` and `SHA256SUMS.txt` to check compatibility, and, when you install, four more files from that release (`grip-bridge.mjs`, `grip-plugin-code.js`, `grip-plugin-ui.html`, `grip-plugin-manifest.json`). Downloads may only come from `github.com`, `api.github.com` and `*.githubusercontent.com` (GitHub redirects release downloads to `release-assets.githubusercontent.com`; anything else is refused). Every file must be listed in `SHA256SUMS.txt` and match its hash, and stay under a size cap, *before* anything is written. The downloaded bridge is then run once (`--selftest`, ten seconds at most, no ports, nothing written) and is only swapped in if it starts and reports the expected version. Writes are atomic and confined to `~/.grip`, and the previous bridge is kept. The request carries only a generic user agent (`grip-bridge/<version>`): no account, email or machine identifier.
 
 **Firewalls.** If you run an outbound firewall (LuLu, Little Snitch, a corporate proxy), allow `api.github.com`, `github.com` and `release-assets.githubusercontent.com` for `node`. Without them the daily check just fails quietly.
 
-**Turning it off.** `GRIP_NO_UPDATE_CHECK=1` (in the environment of your agent / daemon) stops the daily check and every notice; nothing is contacted until you explicitly update yourself.
+**Turning it off.** `GRIP_NO_UPDATE_CHECK=1` (in the environment of your agent / daemon) stops the daily check, the purple strip and every notice; nothing is contacted until you explicitly update yourself.
 
 **What that does and does not prove.** Releases are built by CI (GitHub Actions) from the tagged commit in this repository, and the checksum list is published with each release. The checksums catch corruption and a half-published release. They do not make the download independent of this repository: `SHA256SUMS.txt` comes from the same release as the files, so you are trusting the repo owner exactly as much as you do when you `git pull`.
 
-**Undo.** `node ~/.grip/grip-bridge.mjs update --rollback` puts the previous bridge back.
+**Undo.** `node ~/.grip/grip-bridge.mjs update --rollback` puts the previous bridge back. Only the bridge goes back: the plugin files in `~/.grip/figma-plugin` stay at the new version.
 
 <details>
 <summary>Claude: read this when the user asks you to update Grip.</summary>
 
-- Call `grip_update` with `action: "check"`. Tell the user the installed and latest versions and what is new (the release notes it returns). **Do not install until they say yes.** On yes, call `grip_update` with `action: "install"`, then tell them the bridge restarts within a second (you may need to retry once or reconnect) and that the plugin needs re-running in Figma.
+- Call `grip_update` with `action: "check"`. Tell the user the installed and latest versions and what is new (the release notes it returns). **Do not install until they say yes.** If it reports `signalled: false` with a `blockedReason` (for example a connected Figma plugin is too old), do not install: tell the user the reason and what to do (update the Grip plugin in Figma first).
+- On a clear yes, call `grip_update` with `action: "install"` and `version` set to the exact `latest` you showed the user (`version` is required; if a newer release has appeared the call fails with `version_changed` and returns its notes: show them and ask again). If your client can show prompts, the bridge asks the user itself and may answer `declined`; respect that. Then tell them the bridge restarts within a second (you may need to retry once or reconnect) and that the plugin needs re-running in Figma.
+- If the tool answers `plugins_unverifiable`, ask the user to open the Grip plugin in Figma and try again. If it answers `incompatible_plugin`, relay the reason.
 - If the tool answers `clone_install`, this is a developer install: tell the user to run `git pull && node bridge/install.mjs` in their clone. Do not work around it.
 - If `grip_update` does not exist, Grip is older than 0.8.0 and cannot update itself: follow the install instructions above (step 2 covers the "already installed" case and asks the user first).
 - If the check fails or reports no network, say so and stop; do not fetch Grip from anywhere except this repository's releases.
@@ -271,9 +277,10 @@ For live work, `npm --prefix src/plugin run dev` watches the plugin (it hot-relo
 Releases are cut by CI. Do not create tags or releases by hand.
 
 1. Bump the version in the four lockstep places: `BRIDGE_VERSION` in `src/bridge/src/types.ts`, `PLUGIN_VERSION` in `src/plugin/code.ts`, and `version` in `src/bridge/package.json` and `src/plugin/package.json` (`npm run package` refuses to build if they differ).
-2. Add a `## <version>` section to the top of [`CHANGELOG.md`](./CHANGELOG.md): the exact version number, a one-line bold headline, then plain bullets a designer can read. The section becomes the release notes, and the release does not publish without it.
-3. `npm run build` and commit the regenerated `bridge/` and `figma-plugin/` files with the rest.
-4. Push to `main`. [`.github/workflows/release.yml`](./.github/workflows/release.yml) rebuilds from source and fails if the committed bundles differ, runs the tests, packages the assets (`node scripts/package-release.mjs`: `grip-bridge.mjs`, `install.mjs`, `grip-plugin-*`, `grip-install.zip`, `SHA256SUMS.txt`), smoke-tests the zip install, and publishes release `v<version>` with the notes. A push that does not bump the version publishes nothing. **Run workflow** (manual) is a dry run by default: it only uploads the assets as a workflow artifact.
+2. **Check `MIN_PLUGIN_VERSION`** in `src/bridge/src/types.ts`: the oldest Figma plugin this bridge release works with. It becomes the release's `compat.json` (generated by `scripts/package-release.mjs`, never hand-edited), and the updater only signals or installs a release to people whose connected plugins are at least that version. Leave it alone unless the release needs plugin features or protocol that older plugins lack. **If you raise it, publish the new plugin in Figma BEFORE cutting the bridge release** (people can only update the plugin through Figma, and until they do the bridge update is withheld from them), and add a line to the CHANGELOG saying the plugin must be updated first.
+3. Add a `## <version>` section to the top of [`CHANGELOG.md`](./CHANGELOG.md): the exact version number, a one-line bold headline, then plain bullets a designer can read. The section becomes the release notes, and the release does not publish without it. CI appends an install footer to every release body (after a `<!-- grip-install -->` marker line: "tell your agent `Install Grip from https://github.com/spendolas/grip/releases/latest`", plus a link to the README at that release's tag); update notices cut everything from that marker, so do not write one yourself.
+4. `npm run build` and commit the regenerated `bridge/` and `figma-plugin/` files with the rest.
+5. Push to `main`. [`.github/workflows/release.yml`](./.github/workflows/release.yml) rebuilds from source and fails if the committed bundles differ, runs the tests, packages the eight assets (`node scripts/package-release.mjs`: `grip-bridge.mjs`, `install.mjs`, `grip-plugin-*` (three files), `grip-install.zip`, `compat.json`, `SHA256SUMS.txt`), smoke-tests the zip install, and publishes release `v<version>` with the notes. A push that does not bump the version publishes nothing. **Run workflow** (manual) is a dry run by default: it only uploads the assets as a workflow artifact.
 
 ## Licence
 

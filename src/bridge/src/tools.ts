@@ -393,8 +393,10 @@ export const TOOLS: ToolDef[] = [
     name: 'grip_update',
     category: 'meta',
     description:
-      "Check for / install a Grip update. 'install' ONLY after the user explicitly says yes.",
-    schema: z.object({ action: z.enum(['check', 'install']).optional() }),
+      "Check for / install a Grip update. 'install' needs version + the user's explicit yes.",
+    detail:
+      "action 'check' (default) reports {current, latest, available, minPlugin, signalled, blockedReason?, headline, notes}: tell the user what is new; signalled:false with blockedReason means the release is NOT offered (e.g. a connected Figma plugin is too old: they must update the plugin in Figma first) and you must not install it. action 'install' REQUIRES version:'<x.y.z>' = the exact `latest` you showed the user, and only after the user explicitly said yes; the bridge installs only if that is still the latest release (else error version_changed with the new version and notes: show them and ask again). Where the MCP client supports elicitation the bridge itself asks the user to confirm (decline/timeout => {status:'declined'}); otherwise YOUR explicit-yes duty is the only consent, so never install on your own. Refusals (nothing installed): incompatible_plugin (a connected plugin is older than the release needs), plugins_unverifiable (no Grip plugin connected: ask the user to open it in Figma first), compat_unverified (release lacks a verified compat.json), selftest_failed. Success => {status:'updated', from, to, restart, consent, next[]}; the bridge restarts ~1s later, retry once on a connection error. clone_install => developer install, run next[] in the clone. Rollback restores the bridge only; the plugin files stay at the new version.",
+    schema: z.object({ action: z.enum(['check', 'install']).optional(), version: z.string().optional() }),
   },
   {
     name: 'get_deep_link',
@@ -2409,7 +2411,11 @@ export function toolInputSchema(name: string): Record<string, unknown> {
           action: {
             type: 'string',
             enum: ['check', 'install'],
-            description: "'check' (default) reports whether a newer Grip exists. 'install' downloads + verifies + installs it and restarts the bridge: call it ONLY after the user has explicitly agreed.",
+            description: "'check' (default) reports whether a newer Grip exists. 'install' downloads + verifies + installs it and restarts the bridge: call it ONLY after the user has explicitly agreed, and pass version.",
+          },
+          version: {
+            type: 'string',
+            description: "install only, REQUIRED: the exact latest version (x.y.z) you showed the user. Refused with version_changed if a newer release exists now.",
           },
         },
         additionalProperties: false,
