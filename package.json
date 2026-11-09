@@ -8,7 +8,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "setup": "npm --prefix src/bridge install && npm --prefix src/plugin install",
+    "setup": "npm --prefix src/bridge ci && npm --prefix src/plugin ci",
     "build": "npm --prefix src/bridge run build && npm --prefix src/plugin run build",
     "build:bridge": "npm --prefix src/bridge run build",
     "build:plugin": "npm --prefix src/plugin run build",

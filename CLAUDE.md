@@ -159,16 +159,19 @@ Highlights worth knowing while editing:
 ## Build / run
 
 ```sh
-# Bridge
-cd bridge && npm install
-npm run build              # tsc → dist/ (+ chmod +x)
-node dist/index.js         # runs as shim; auto-spawns the detached daemon
-node dist/index.js --daemon  # run the daemon in the foreground (debugging)
+# Once, and again after any lockfile change. `npm ci`, NOT `npm install`:
+# the committed bundles only reproduce from the lockfile-pinned dependencies
+# (CI rebuilds and fails on any diff), so an `npm install` that drifts a dep
+# makes bridge/grip-bridge.mjs differ and the release workflow reject the push.
+npm run setup
 
-# Plugin
-cd plugin && npm install
-npm run build              # produces build/code.js (referenced by manifest)
-# Then: Figma Desktop → Plugins → Development → Import from manifest → plugin/manifest.json
+# Build both halves (also regenerates the committed bundles)
+npm run build              # bridge → bridge/*.mjs, plugin → figma-plugin/code.js
+node bridge/grip-bridge.mjs         # runs as shim; auto-spawns the detached daemon
+node bridge/grip-bridge.mjs --daemon  # run the daemon in the foreground (debugging)
+
+# Then: Figma Desktop → Plugins → Development → Import plugin from manifest → figma-plugin/manifest.json
+# (or ~/.grip/figma-plugin/manifest.json after `node bridge/install.mjs`)
 # Plugin hot-reloads on rebuild — no manual reload needed.
 ```
 

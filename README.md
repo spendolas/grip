@@ -239,18 +239,28 @@ After an update the bridge restarts itself within a second (your agent may need 
 
 **Undo.** `node ~/.grip/grip-bridge.mjs update --rollback` puts the previous bridge back.
 
+<details>
+<summary>Claude: read this when the user asks you to update Grip.</summary>
+
+- Call `grip_update` with `action: "check"`. Tell the user the installed and latest versions and what is new (the release notes it returns). **Do not install until they say yes.** On yes, call `grip_update` with `action: "install"`, then tell them the bridge restarts within a second (you may need to retry once or reconnect) and that the plugin needs re-running in Figma.
+- If the tool answers `clone_install`, this is a developer install: tell the user to run `git pull && node bridge/install.mjs` in their clone. Do not work around it.
+- If `grip_update` does not exist, Grip is older than 0.8.0 and cannot update itself: follow the install instructions above (step 2 covers the "already installed" case and asks the user first).
+- If the check fails or reports no network, say so and stop; do not fetch Grip from anywhere except this repository's releases.
+
+</details>
+
 ## For developers
 
 Install from a clone when you want to change Grip:
 
 ```sh
-npm run setup                  # install dependencies for both halves
+npm run setup                  # install dependencies for both halves (npm ci: lockfile-pinned, so your build matches CI's)
 npm run build                  # rebuild the plugin and the bridge bundles
 node bridge/install.mjs        # install your build into ~/.grip (a "developer install"; add --http for the always-on daemon)
 npm test                       # bridge suites + the release gate and packager tests
 ```
 
-`figma-plugin/code.js` and `bridge/*.mjs` are build artifacts that are **deliberately committed**: they are what a release ships, and CI fails if they differ from a clean rebuild. Rebuild with `npm run build` and commit them together with the source change.
+`figma-plugin/code.js` and `bridge/*.mjs` are build artifacts that are **deliberately committed**: they are what a release ships, and CI fails if they differ from a clean rebuild. Rebuild with `npm run build` and commit them together with the source change. Install dependencies with `npm run setup` (`npm ci`), never a bare `npm install`: a drifted dependency changes the bundle and CI will reject it.
 
 A clone install is recorded in `~/.grip/install.json` (`{"source":"clone"}`), which is why the in-place updater leaves it alone: update with `git pull && node bridge/install.mjs`.
 
