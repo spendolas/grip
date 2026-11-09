@@ -6,7 +6,7 @@
 // scripts/release-gate.test.mjs; the CLI at the bottom is what the workflow runs.
 //
 // Modelled on Gaffer's gate (spendolas/gaffer-ae). Differences: Grip's changelog
-// headings are `## 0.8.0` (exact version, no "v"), a release has 8 assets, and the
+// headings are `## 0.8.0` (exact version, no "v"), a release has 9 assets, and the
 // notes written for the release get an install footer (withInstallFooter).
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -14,7 +14,8 @@ import { fileURLToPath } from 'node:url';
 
 // Every file a release must carry. The in-place updater downloads six of them
 // by exact name (see src/bridge/src/update.ts: ASSET_BRIDGE, PLUGIN_ASSETS,
-// ASSET_SUMS, ASSET_COMPAT); grip-install.zip and install.mjs are for fresh installs.
+// ASSET_SUMS, ASSET_COMPAT); grip-install.zip and install.mjs are for fresh installs;
+// THIRD-PARTY-NOTICES.txt is for people (and legal), the updater never fetches it.
 export const REQUIRED_ASSETS = [
   'grip-bridge.mjs',
   'install.mjs',
@@ -23,6 +24,7 @@ export const REQUIRED_ASSETS = [
   'grip-plugin-manifest.json',
   'grip-install.zip',
   'compat.json',
+  'THIRD-PARTY-NOTICES.txt',
   'SHA256SUMS.txt',
 ];
 

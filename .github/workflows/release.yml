@@ -1,28 +1,33 @@
 name: Release
 
-# Publishes a GitHub Release (8 assets, notes from CHANGELOG.md plus an install
-# footer) when a push to
-# main touches the version, the changelog or the committed build artifacts.
+# Publishes a GitHub Release (9 assets, notes from CHANGELOG.md plus an install
+# footer) when a push to main touches source, scripts, the changelog, the
+# plugin's hand-written files or this workflow. Nothing generated is committed:
+# the bridge, installer and plugin bundles are built HERE, from source, and only
+# ever exist as release assets (the same model as Gaffer).
 # scripts/release-gate.mjs decides create / recover / skip, so a push that does
-# not bump the version is a no-op for publishing (the build checks still run).
-# Manual runs default to a dry run that only uploads a workflow artifact named
-# grip-release.
+# not bump the version is a no-op for publishing (the build, hygiene and test
+# steps still run). Manual runs default to a dry run that only uploads a workflow
+# artifact named grip-release.
 #
-# Jobs: build (rebuild + reproducibility check, tests, gate, package, smoke) ->
-# publish (only on create / recover; the only job with contents: write).
+# Jobs: build (npm ci, build + license allowlist + THIRD-PARTY-NOTICES.txt,
+# hygiene, npm audit, tests, gate, package, smoke) -> publish (only on
+# create / recover; the only job with contents: write).
 #
 # To release: bump the version in the four lockstep places, add a
-# "## <version>" section to CHANGELOG.md, run `npm run build`, commit the
-# regenerated bridge/ and figma-plugin/ files, push to main. This workflow does
-# the rest. Never create the tag or the release by hand.
+# "## <version>" section to CHANGELOG.md, push to main. This workflow does the
+# rest. Never create the tag or the release by hand, and never commit a build
+# output (bridge/, figma-plugin/code.js are gitignored).
 on:
   push:
     branches: [main]
     paths:
-      - src/bridge/src/types.ts
-      - CHANGELOG.md
-      - 'bridge/**'
+      - 'src/**'
+      - 'scripts/**'
       - 'figma-plugin/**'
+      - CHANGELOG.md
+      - package.json
+      - .github/workflows/release.yml
   workflow_dispatch:
     inputs:
       dry_run:
@@ -92,21 +97,36 @@ jobs:
         id: gate
         run: node scripts/release-gate.mjs --version "$V" --tags-file tags.txt --release-file release.json --changelog CHANGELOG.md --notes-out notes.md
 
+      # Lockfile-exact, like the owner's machine: both halves use `npm ci`.
       - name: Install dependencies
         run: npm ci --prefix src/bridge && npm ci --prefix src/plugin
 
-      # The committed bundles ARE the release. A clean rebuild from source must
-      # reproduce them byte for byte, otherwise someone changed source without
-      # running `npm run build` (or built with a different toolchain).
-      - name: Rebuild and verify the committed bundles
+      # The ONLY place release bundles come from. `npm run build` = tsc +
+      # esbuild bundle of the bridge and installer, tsc of the plugin, and
+      # scripts/third-party-notices.mjs, which fails the build on any bundled
+      # dependency whose license is outside the allowlist (MIT, ISC, BSD-2/3,
+      # Apache-2.0, 0BSD) or that lacks a license file, and writes
+      # bridge/THIRD-PARTY-NOTICES.txt.
+      - name: Build bundles and third-party notices
+        run: npm run build
+
+      # No developer paths (/Users/, /Volumes/, /home/<name>/, C:\Users\) and no
+      # secret-looking values (GitHub/AWS/Anthropic/OpenAI/npm/Slack tokens, PEM
+      # blocks) may be inside anything that ships.
+      - name: Bundle hygiene
+        run: node scripts/bundle-hygiene.mjs
+
+      # Network- and date-dependent, so it gates a release (or a dry run), not
+      # every push: a new advisory must not turn an unrelated commit red.
+      - name: npm audit (production dependencies)
+        if: steps.gate.outputs.action != 'skip' || env.DRY_RUN == 'true'
         run: |
           set -euo pipefail
-          npm run build
-          if ! git diff --exit-code -- bridge figma-plugin; then
-            echo "::error::The committed bridge/ and figma-plugin/ files differ from a clean rebuild. Run 'npm run build' and commit the result."
-            exit 1
-          fi
+          (cd src/bridge && npm audit --omit=dev --audit-level=high)
+          (cd src/plugin && npm audit --omit=dev --audit-level=high)
 
+      # `npm test` builds first (it must not depend on anything already being
+      # built), then runs the bridge suites and the scripts/ suites.
       - name: Tests
         run: npm test
 
@@ -118,6 +138,8 @@ jobs:
           node scripts/package-release.mjs --out dist
           (cd dist && sha256sum -c SHA256SUMS.txt)
           unzip -tq dist/grip-install.zip
+          unzip -Z1 dist/grip-install.zip > zip-entries.txt
+          grep -qx 'grip/THIRD-PARTY-NOTICES.txt' zip-entries.txt
           echo "built=true" >> "$GITHUB_OUTPUT"
 
       # What a user does: extract the zip, run the installer. Home and GRIP_HOME
@@ -133,6 +155,8 @@ jobs:
           HOME="$S/home" GRIP_HOME="$S/home/.grip" GRIP_STATUS_PATH="$S/status.json" node "$S/extract/grip/bridge/install.mjs"
           test -f "$S/home/.grip/grip-bridge.mjs"
           test -f "$S/home/.grip/figma-plugin/manifest.json"
+          test -f "$S/home/.grip/figma-plugin/code.js"
+          test -f "$S/extract/grip/THIRD-PARTY-NOTICES.txt"
           node -e "const j=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')); if(j.source!=='release'||j.version!==process.argv[2]) { console.error('bad install.json', j); process.exit(1); }" "$S/home/.grip/install.json" "$V"
           cmp "$S/home/.grip/grip-bridge.mjs" dist/grip-bridge.mjs
 
@@ -204,7 +228,7 @@ jobs:
           # (compat.json tells the updater which Figma plugin versions this
           # bridge works with: a release without it is never offered);
           # a release missing any of them would break installs or updates.
-          ASSETS="grip-bridge.mjs install.mjs grip-plugin-code.js grip-plugin-ui.html grip-plugin-manifest.json grip-install.zip compat.json"
+          ASSETS="grip-bridge.mjs install.mjs grip-plugin-code.js grip-plugin-ui.html grip-plugin-manifest.json grip-install.zip compat.json THIRD-PARTY-NOTICES.txt"
           for asset in $ASSETS SHA256SUMS.txt; do
             if [ ! -f "artifact/dist/$asset" ]; then
               echo "Required release asset missing from the build artifact: $asset"
