@@ -4895,7 +4895,11 @@ figma.ui.onmessage = async (msg: ToolRequest | any) => {
   // page is the pointer: each release links the README at its own tag, so the
   // install steps and the downloadable files always match.
   if (msg && msg.kind === 'openSetup') {
-    figma.openExternal('https://github.com/spendolas/grip/releases/latest');
+    // Figma swallows custom-scheme links (claude://...), so the plugin opens a
+    // normal web page that carries the deep-link buttons (Claude desktop Code
+    // session, Claude Code terminal) and a copy-the-prompt button: docs/index.html,
+    // served by GitHub Pages.
+    figma.openExternal('https://spendolas.github.io/grip/');
     return;
   }
   if (!msg || msg.kind !== 'request') return;

@@ -34,9 +34,9 @@ export const REQUIRED_ASSETS = [
 export const INSTALL_MARKER = '<!-- grip-install -->';
 
 export function installFooter(version) {
-  return '**Install:** tell your agent `Install Grip from https://github.com/spendolas/grip/releases/latest` '
-    + '\u2014 the steps are in the '
-    + `[README for this release](https://github.com/spendolas/grip/blob/v${version}/README.md#install-instructions-for-claude), `
+  return '**Install:** [open the install page](https://spendolas.github.io/grip/) to start it in Claude with one click, '
+    + 'or tell your agent `Install Grip from https://github.com/spendolas/grip/releases/latest`. '
+    + `The steps are in the [README for this release](https://github.com/spendolas/grip/blob/v${version}/README.md#install-instructions-for-agents), `
     + 'so the instructions always match the files attached to this release.';
 }
 

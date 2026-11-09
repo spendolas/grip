@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install Grip</title>
+<meta name="description" content="Install or update Grip, the Figma bridge for your AI agent, with one click from Claude.">
+<style>
+  :root {
+    --bg: #f7f7f5; --card: #ffffff; --ink: #1a1a1a; --muted: #6b6b6b;
+    --line: #e5e5e2; --accent: #19c437; --accent-ink: #0a7d22;
+    --code-bg: #f0f0ee; --btn-bg: #1a1a1a; --btn-ink: #ffffff; --hover: #1f6bff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #191919; --card: #232323; --ink: #ededed; --muted: #a0a0a0;
+      --line: #353533; --accent: #19e54c; --accent-ink: #7ff59a;
+      --code-bg: #2c2c2c; --btn-bg: #ededed; --btn-ink: #191919; --hover: #2b7bff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-align: center;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  }
+  .wrap { width: 100%; max-width: 640px; padding: 40px 16px; }
+  h1 { font-size: 30px; line-height: 1.2; margin: 0 0 16px; letter-spacing: -.02em; }
+  .lede { color: var(--muted); font-size: 17px; margin: 0 0 48px; }
+  .card { background: var(--card); border-radius: 44px; padding: 24px; margin: 32px 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 32px 0 16px; }
+  .prompt {
+    position: relative; background: var(--code-bg); border-radius: 20px; text-wrap: balance; word-break: normal; overflow-wrap: normal; padding: 24px 56px; margin: 0;
+    font: 14px/1.55 "SF Mono", ui-monospace, Menlo, Consolas, monospace; word-break: break-word;
+  }
+  .copy {
+    position: absolute; top: 10px; right: 10px; border: 0;
+    background: var(--card); color: var(--ink); border-radius: 10px;
+    width: 34px; height: 34px; padding: 0; cursor: pointer; display: grid; place-items: center;
+  }
+  .copy:hover { background: var(--hover); color: #fff; }
+  .copy:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
+  h2.first { margin-top: 8px; }
+  .switch { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; margin: 0 0 24px; background: var(--code-bg); border-radius: 20px; }
+  .opt { border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 600; padding: 12px 8px; border-radius: 16px; cursor: pointer; }
+  .opt:hover { background: var(--hover); color: #fff; }
+  .opt[aria-checked="true"] { background: var(--btn-bg); color: var(--btn-ink); }
+  .opt:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
+  .cta { display: grid; gap: 8px; }
+  .btn {
+    position: relative; display: block;
+    border: 0; background: var(--code-bg); color: var(--ink);
+    border-radius: 20px; padding: 22px 24px; font: inherit; font-weight: 600; text-align: center;
+    text-decoration: none; cursor: pointer; width: 100%;
+  }
+  .btn small { display: block; font-weight: 400; color: var(--muted); font-size: 13px; }
+  .btn:hover, .btn.primary:hover { background: var(--hover); color: #fff; }
+  .btn:hover small { color: #fff; opacity: .8; }
+  .btn.primary { background: var(--btn-bg); color: var(--btn-ink); }
+  .btn.primary small { color: inherit; opacity: .7; }
+  .btn:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
+  .card.plain { background: transparent; }
+  .thread { list-style: none; margin: 0 auto; padding: 0; max-width: 460px; color: var(--muted); font-size: 15px; }
+  .thread li::before { content: ""; display: block; width: 10px; height: 10px; margin: 8px auto 16px; border-radius: 50%; background: var(--hover); }
+  .thread li:not(:last-child)::after { content: ""; display: block; width: 2px; height: 40px; margin: 20px auto 0; background: var(--hover); opacity: .45; }
+  .notes { display: grid; margin: 32px 0 8px; }
+  .notes > p.note { grid-area: 1 / 1; margin: 0; }
+  .notes > p.note.off { visibility: hidden; }
+  /* Phones and other touch-only devices: none of the agent apps above can be opened from here,
+     so the page is the prompt and its copy button, nothing else. */
+  .phone .lede, .phone .pick, .phone .switch, .phone .cta, .phone .notes, .phone .plain { display: none; }
+  .phone .card.main h2.after { margin-top: 8px; }
+  .or-off { display: none; }
+  .phone .or { display: none; }
+  .phone .or-off { display: inline; }
+  p.note { color: var(--muted); font-size: 14px; line-height: 1.7; margin: 32px 0 8px; }
+  a { color: var(--accent-ink); }
+  code { background: var(--code-bg); padding: 1px 6px; border-radius: 5px; font-size: .9em; }
+</style>
+<script>
+  // Phone / tablet detection: touch-only pointer, or a mobile user agent.
+  (function () {
+    var touchOnly = window.matchMedia && window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+    var mobileUA = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+    if (touchOnly || mobileUA) document.documentElement.className += ' phone';
+  })();
+</script>
+</head>
+<body>
+<div class="wrap">
+  <h1>Install or update Grip</h1>
+  <p class="lede">Your agent does the work. Pick where to send it.</p>
+
+  <div class="card main">
+    <h2 class="first pick">Pick your agent</h2>
+    <div class="switch" role="radiogroup" aria-label="Pick your agent" id="switch"></div>
+
+    <div class="cta" id="cta"></div>
+
+    <div class="notes" id="note"></div>
+
+    <h2 class="after"><span class="or">Or s</span><span class="or-off">S</span>end this to your agent directly</h2>
+    <div class="prompt"><span id="prompt">Install or update Grip from https://github.com/<wbr>spendolas/<wbr>grip/<wbr>releases/<wbr>latest</span><button class="copy" id="copy" type="button" aria-label="Copy prompt" title="Copy prompt"><svg id="ico-copy" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V4A1.5 1.5 0 0 0 9 2.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5"/></svg><svg id="ico-done" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none"><path d="M3 8.5l3.2 3.2L13 4.8"/></svg></button></div>
+  </div>
+
+  <div class="card plain">
+    <h2>What happens next</h2>
+    <ol class="thread">
+      <li>Your agent downloads the latest release, checks it, and installs the bridge into <code>~/.grip</code>.</li>
+      <li>You import the plugin in Figma. If you already have it, there is nothing to do.</li>
+    </ol>
+    <p class="note">Needs Node.js 18 or newer. Figma Desktop runs on macOS and Windows; on Linux use Figma in the browser.</p>
+  </div>
+
+</div>
+
+<script>
+  var PROMPT = document.getElementById('prompt').textContent.trim();
+  var q = encodeURIComponent(PROMPT);
+  // One entry per agent we cater for: its buttons (deep links) and the "nothing happened" hint.
+  var AGENTS = {
+    claude: {
+      label: 'Claude',
+      ctas: [
+        { title: 'Open in Claude desktop app', sub: 'Opens with the prompt filled in', href: 'claude://code/new?q=' + q }
+      ],
+      note: 'Nothing happened when you clicked? The button needs the Claude desktop app installed. Otherwise, paste the prompt into any agent that can run shell commands.'
+    },
+    cursor: {
+      label: 'Cursor',
+      ctas: [
+        { title: 'Open in Cursor', sub: 'Opens with the prompt filled in', href: 'cursor://anysphere.cursor-deeplink/prompt?text=' + q }
+      ],
+      note: 'Nothing happened when you clicked? The button needs Cursor installed. Otherwise, paste the prompt into any agent that can run shell commands.'
+    },
+    codex: {
+      label: 'Codex',
+      ctas: [
+        { title: 'Open in Codex app', sub: 'Opens with the prompt filled in', href: 'codex://new?prompt=' + q }
+      ],
+      note: 'Nothing happened when you clicked? The button needs the Codex app installed. Otherwise, paste the prompt into any agent that can run shell commands.'
+    }
+  };
+  var order = ['claude', 'cursor', 'codex'];
+  var sw = document.getElementById('switch'), cta = document.getElementById('cta'), note = document.getElementById('note');
+  function pick(key) {
+    var a = AGENTS[key]; if (!a) { key = 'claude'; a = AGENTS.claude; }
+    Array.prototype.forEach.call(sw.children, function (el) { el.setAttribute('aria-checked', el.dataset.key === key ? 'true' : 'false'); });
+    cta.innerHTML = '';
+    a.ctas.forEach(function (c, i) {
+      var el = document.createElement('a');
+      el.className = 'btn' + (i === 0 ? ' primary' : '');
+      el.href = c.href;
+      var span = document.createElement('span'); span.textContent = c.title;
+      var small = document.createElement('small'); small.textContent = c.sub;
+      span.appendChild(small); el.appendChild(span); cta.appendChild(el);
+    });
+    Array.prototype.forEach.call(note.children, function (el) { el.classList.toggle('off', el.dataset.key !== key); });
+    try { localStorage.setItem('grip-agent', key); } catch (e) {}
+  }
+  // All three notes sit in the same grid cell, so the card is always as tall as the tallest one
+  // and switching agents never makes the page jump.
+  order.forEach(function (key) {
+    var n = document.createElement('p'); n.className = 'note off'; n.dataset.key = key; n.innerHTML = AGENTS[key].note; note.appendChild(n);
+  });
+  order.forEach(function (key) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'opt'; b.setAttribute('role', 'radio'); b.dataset.key = key; b.textContent = AGENTS[key].label;
+    b.addEventListener('click', function () { pick(key); });
+    sw.appendChild(b);
+  });
+  var saved = 'claude'; try { saved = localStorage.getItem('grip-agent') || 'claude'; } catch (e) {}
+  pick(saved);
+  document.getElementById('copy').addEventListener('click', function () {
+    var copyIco = document.getElementById('ico-copy'), doneIco = document.getElementById('ico-done');
+    function done(ok) {
+      if (!ok) { var r = document.createRange(); r.selectNodeContents(document.getElementById('prompt')); var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r); return; }
+      copyIco.style.display = 'none'; doneIco.style.display = '';
+      setTimeout(function () { copyIco.style.display = ''; doneIco.style.display = 'none'; }, 1600);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(PROMPT).then(function () { done(true); }, function () { done(false); });
+    } else { done(false); }
+  });
+</script>
+</body>
+</html>

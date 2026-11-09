@@ -6,9 +6,11 @@ Pairs with **[Gaffer](https://github.com/spendolas/gaffer-ae)**, which does the 
 
 ## Quick Start
 
-Open your agent (the Claude desktop app, Claude Code, or any MCP agent that can run shell commands) and say:
+Open your agent (the Claude desktop app, Claude Code, Cursor, Codex, or any MCP agent that can run shell commands) and say:
 
 > Install Grip from https://github.com/spendolas/grip/releases/latest
+
+Or open the **[install page](https://spendolas.github.io/grip/)**: it has one-click buttons that start the same prompt in the Claude desktop app (Code), Cursor or Codex, and a button that copies it for any other agent. Nothing is sent until you press Enter.
 
 Your agent opens the latest release, follows the install steps in this README (every release links the README at its own tag, so the steps and the downloadable files always match), downloads and verifies the release, installs it, and asks you a question or two along the way. Then you import the plugin in Figma (one menu step that only you can do) and restart your agent.
 
@@ -26,17 +28,17 @@ One bridge serves many agents and many Figma windows at once.
 
 - **Node.js 18 or newer** (`node --version`). The bridge is one self-contained file, no npm and no dependencies.
 - **Figma**: Figma Desktop (macOS and Windows) or Figma in the browser (Linux; plugin development import works there too).
-- An MCP agent that can run shell commands, such as the Claude desktop app or Claude Code.
+- An MCP agent that can run shell commands, such as the Claude desktop app, Claude Code, Cursor or Codex.
 - Nothing else. No git, no build tools.
 
 ---
 
-## Install Instructions for Claude
+## Install Instructions for Agents
 
 <details>
-<summary>Claude: read this section when asked to install Grip.</summary>
+<summary>Agent: read this section when asked to install Grip.</summary>
 
-### Rules for Claude
+### Rules for the agent
 
 Before you begin, read these rules. They apply to every step below.
 
@@ -170,7 +172,9 @@ Before you begin, read these rules. They apply to every step below.
    node "$dl\extract\grip\bridge\install.mjs" --http
    ```
 
-   The installer prints what it did. It ends with `Done. Grip <version> installed.` If it prints an error, stop and report it. Note that it registers Grip with your agent by running `claude mcp add` when the Claude Code CLI exists, otherwise by writing the server entry into `~/.claude.json`; tell the user it did this. If Claude Code's permission check blocks the installer, show the user the exact command from the block above and ask them to run it in a terminal and reply when it is done.
+   **Which client are you? This is your decision.** Grip is a standard MCP server, so any MCP client can use it. By default the installer registers Grip with Claude: it runs `claude mcp add` when the Claude Code CLI exists, otherwise it writes the server entry into `~/.claude.json`. If you are Claude Code or the Claude desktop app, run the commands above as they are and tell the user that is what it did. If you are any other agent (Codex, Cursor, or another MCP client), add `--no-register` to the installer command: it installs the files and changes no agent config, then prints how to connect (HTTP address, stdio command, and example snippets). Register Grip in your own client from that output (or from `node "$DL/extract/grip/bridge/install.mjs" --print-config`), after showing the user exactly what you will write and where, and asking. The examples are starting points; your client's own docs win if the format differs.
+
+   The installer prints what it did. It ends with `Done. Grip <version> installed.` If it prints an error, stop and report it. If Claude Code's permission check blocks the installer, show the user the exact command from the block above and ask them to run it in a terminal and reply when it is done.
 
 7. **Tell the user to import the plugin in Figma. This step is theirs.** You cannot click in Figma. Say, with the right path for their system:
 
@@ -194,7 +198,7 @@ Before you begin, read these rules. They apply to every step below.
 
    Also delete the folder of any failed attempt.
 
-9. **Restart the agent and verify.** Tell the user to restart their agent (quit and reopen the Claude desktop app, or start a new Claude Code session) so it picks up the new Grip server. In the new session, with the plugin running in a Figma file, run `grip_health` (the bridge is up and shows the connected plugin) and then `get_page_context` (it names the open file and page). If `get_page_context` reports no plugin connected, ask the user to run the Grip plugin in Figma (step 7) and try again. The plugin's small status strip turns green when it is connected. If the install was run in a session that already had Grip registered, say plainly that the verification happens after the restart, and ask the user to come back and say "check Grip".
+9. **Restart the agent and verify.** Tell the user to restart their agent (for example quit and reopen the Claude desktop app, or start a new Claude Code, Cursor or Codex session) so it picks up the new Grip server. In the new session, with the plugin running in a Figma file, run `grip_health` (the bridge is up and shows the connected plugin) and then `get_page_context` (it names the open file and page). If `get_page_context` reports no plugin connected, ask the user to run the Grip plugin in Figma (step 7) and try again. The plugin's small status strip turns green when it is connected. If the install was run in a session that already had Grip registered, say plainly that the verification happens after the restart, and ask the user to come back and say "check Grip".
 
 </details>
 
@@ -244,7 +248,7 @@ After an update the bridge restarts itself within a second (your agent may need 
 **Undo.** `node ~/.grip/grip-bridge.mjs update --rollback` puts the previous bridge back. Only the bridge goes back: the plugin files in `~/.grip/figma-plugin` stay at the new version.
 
 <details>
-<summary>Claude: read this when the user asks you to update Grip.</summary>
+<summary>Agent: read this when the user asks you to update Grip.</summary>
 
 - Call `grip_update` with `action: "check"`. Tell the user the installed and latest versions and what is new (the release notes it returns). **Do not install until they say yes.** If it reports `signalled: false` with a `blockedReason` (for example a connected Figma plugin is too old), do not install: tell the user the reason and what to do (update the Grip plugin in Figma first).
 - On a clear yes, call `grip_update` with `action: "install"` and `version` set to the exact `latest` you showed the user (`version` is required; if a newer release has appeared the call fails with `version_changed` and returns its notes: show them and ask again). If your client can show prompts, the bridge asks the user itself and may answer `declined`; respect that. Then tell them the bridge restarts within a second (you may need to retry once or reconnect) and that the plugin needs re-running in Figma.

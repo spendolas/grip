@@ -74,8 +74,10 @@ test('a release without compat.json is not complete (it would never be offered)'
 
 test('install footer: after the marker, tag-pinned README link, release pointer', () => {
   const f = installFooter('0.9.0');
-  assert.match(f, /^\*\*Install:\*\* tell your agent `Install Grip from https:\/\/github\.com\/spendolas\/grip\/releases\/latest`/);
-  assert.ok(f.includes('(https://github.com/spendolas/grip/blob/v0.9.0/README.md#install-instructions-for-claude)'), 'tag-pinned README link');
+  assert.match(f, /^\*\*Install:\*\* \[open the install page\]\(https:\/\/spendolas\.github\.io\/grip\/\)/);
+  assert.ok(f.includes('`Install Grip from https://github.com/spendolas/grip/releases/latest`'), 'the plain prompt stays');
+  assert.ok(!f.includes('\u2014'), 'no em dash');
+  assert.ok(f.includes('(https://github.com/spendolas/grip/blob/v0.9.0/README.md#install-instructions-for-agents)'), 'tag-pinned README link');
   assert.ok(!f.includes('/main/'), 'never points at main');
   const body = withInstallFooter('**Nine.**\n\n- one\n\n\n', '0.9.0');
   const [notes, footer] = body.split(INSTALL_MARKER + '\n');

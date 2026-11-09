@@ -12,8 +12,10 @@
 // platform's own mechanism (all inlined here — no shell scripts shipped).
 //
 // Usage:
-//   node install.js            # stdio, on-demand (recommended)
-//   node install.js --http     # + always-on daemon
+//   node install.js                # stdio, on-demand (recommended); registers with Claude
+//   node install.js --http         # + always-on daemon
+//   node install.js --no-register  # install the files only; the agent registers Grip in ITS client
+//   node install.js --print-config # print the connection details and ready-to-paste snippets, install nothing
 
 import { execFileSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -25,6 +27,8 @@ import { BRIDGE_VERSION } from './types.js';
 
 const args = new Set(process.argv.slice(2));
 const wantHttp = args.has('--http');
+const noRegister = args.has('--no-register');
+const printConfig = args.has('--print-config');
 const HOME = homedir();
 // Platform seam so the test suite can exercise win32/linux branches anywhere.
 const PLAT = process.env.GRIP_FAKE_PLATFORM ?? platform();
@@ -151,7 +155,32 @@ function registerViaJson() {
   ok(`wrote grip server to ${cfgPath}`);
 }
 
+// What ANY MCP client needs to reach Grip, plus examples for common clients.
+// Examples only: a client's config format can change, so its own docs win.
+function connectionDetails(): string {
+  const stdioArgs = JSON.stringify([ENTRY]);
+  return [
+    'Connect Grip to your MCP client (any client works):',
+    `  HTTP (needs the always-on daemon, install with --http):  ${HTTP_URL}`,
+    `  stdio (on demand, nothing stays running):               ${process.execPath} ${ENTRY}`,
+    '',
+    'Examples (check your client\'s docs if its format differs):',
+    '  Claude Code:  claude mcp add -s user grip ' + process.execPath + ' ' + ENTRY,
+    '  Cursor (~/.cursor/mcp.json):',
+    '    ' + JSON.stringify({ mcpServers: { grip: { command: process.execPath, args: [ENTRY] } } }),
+    '  Codex (~/.codex/config.toml):',
+    '    [mcp_servers.grip]',
+    '    command = ' + JSON.stringify(process.execPath),
+    '    args = ' + stdioArgs,
+  ].join('\n');
+}
+
 function registerMcp() {
+  if (noRegister) {
+    step(2, 'Not registering (--no-register)');
+    log(connectionDetails());
+    return;
+  }
   step(2, `Registering with your agent (${wantHttp ? 'http' : 'stdio'})`);
   if (hasClaudeCli() && registerViaCli()) ok(`registered via 'claude mcp add'`);
   else {
@@ -270,6 +299,11 @@ function daemonLinux() {
 
 // ---------------------------------------------------------------------------
 
+if (printConfig) {
+  log(connectionDetails());
+  process.exit(0);
+}
+
 log();
 log('\x1b[1mGrip — installing the local bridge\x1b[0m');
 log();
@@ -282,7 +316,9 @@ log();
 log(`\x1b[1m\x1b[32mDone.\x1b[0m Grip ${BRIDGE_VERSION} installed.`);
 log();
 log('Next:');
-log('  1. Restart your agent so it picks up the new server.');
+log(noRegister
+  ? '  1. Register Grip in your MCP client (details above), then restart it.'
+  : '  1. Restart your agent so it picks up the new server.');
 if (pluginInstalled) {
   log('  2. In Figma: Plugins → Development → Import plugin from manifest…');
   log(`     and choose \x1b[1m${join(PLUGIN_DIR, 'manifest.json')}\x1b[0m`);
