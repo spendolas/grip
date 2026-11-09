@@ -4822,7 +4822,7 @@ const PLUGIN_VERSION = '0.8.0';
 // it as "update recommended". Bridge-side counterpart: MIN_PLUGIN_VERSION in
 // src/bridge/src/types.ts. Raise only when this plugin needs bridge features
 // older bridges lack.
-const MIN_BRIDGE_VERSION = '0.7.0';
+const MIN_BRIDGE_VERSION = '0.8.0';
 
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie

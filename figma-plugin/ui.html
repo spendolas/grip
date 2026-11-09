@@ -61,6 +61,7 @@
       let current = 'disconnected';
       let pluginVersion = '';     // from the plugin's own hello (for the tooltip)
       let bridgeVersion = '';     // from the bridge's welcome
+      let minBridge = '';         // from the plugin's own hello: the oldest bridge it wants
 
       // Update state. There is no label and no pill: just the purple colour, a
       // tooltip, and one click.
@@ -72,6 +73,19 @@
       let updError = '';          // short reason of the last failure
       let updFlash = false;       // the red flash on screen is an update failure, not "no bridge"
       let updTimer = null;
+
+      // x.y.z compare; anything unparseable counts as 'not older' (never nag on a guess).
+      function olderThan(a, b) {
+        const pa = /^(\d+)\.(\d+)\.(\d+)/.exec(a), pb = /^(\d+)\.(\d+)\.(\d+)/.exec(b);
+        if (!pa || !pb) return false;
+        for (let i = 1; i <= 3; i++) { if (+pa[i] !== +pb[i]) return +pa[i] < +pb[i]; }
+        return false;
+      }
+      // The bridge is older than this plugin wants and has not offered an in-place
+      // update (bridges before 0.8.0 cannot). Purple too; the click opens the install page.
+      function bridgeOutdated() {
+        return current === 'connected' && !updLatest && !updClone && updPhase !== 'updating' && !!bridgeVersion && !!minBridge && olderThan(bridgeVersion, minBridge);
+      }
 
       // Colour + tooltip + cursor are all derived from the state above, in one place.
       function render() {
@@ -85,6 +99,8 @@
         if (offered) {
           el.classList.add(updPhase === 'updating' ? 'updating' : 'update');
           if (updPhase !== 'updating') el.classList.add('clickable');
+        } else if (bridgeOutdated()) {
+          el.classList.add('update', 'actionable');
         } else if (needsSetup) {
           el.classList.add('actionable');
         } else if (current === 'connected' && busyCount > 0) {
@@ -99,6 +115,7 @@
         if (needsSetup) return 'Bridge not running. Click for setup';
         if (current !== 'connected') return '';
         if (updLatest && updClone) return 'Update available (developer install)';
+        if (bridgeOutdated()) return 'Bridge update needed. Click for steps';
         if (offered && updPhase === 'failed') return 'Update failed. Click to retry';
         if (offered) return 'Update available. Click to install';
         return 'Connected';
@@ -170,6 +187,7 @@
           // Bridge → UI control (welcome) is forwarded to plugin so it can hello back.
           if (msg && msg.kind === 'welcome') {
             if (typeof msg.bridgeVersion === 'string') bridgeVersion = msg.bridgeVersion;
+            render();
             parent.postMessage({ pluginMessage: { kind: 'welcome', sessionId: msg.sessionId } }, '*');
             return;
           }
@@ -283,7 +301,9 @@
           // and any future additions). An earlier allow-list dropped fields
           // silently and led to a long false-positive Figma-cache hunt.
           const { pluginMessage: _drop, ...rest } = msg;
-          if (typeof msg.version === 'string') { pluginVersion = msg.version; render(); }
+          if (typeof msg.version === 'string') pluginVersion = msg.version;
+          if (typeof msg.minBridge === 'string') minBridge = msg.minBridge;
+          render();
           send({ ...rest, kind: 'hello' });
         } else if (msg.kind === 'busy') {
           if (msg.busy) busyCount++;

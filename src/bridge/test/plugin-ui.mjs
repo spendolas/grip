@@ -266,4 +266,54 @@ const CONNECTED_TITLE = 'Connected';
   assert.ok(h.has('warning') && !purple(h));
 }
 
+// ------------------------------------------------------------ the PLUGIN wants a newer bridge than the one it talks to
+{
+  const hello = (h, minBridge) => h.fromMain({ kind: 'hello', version: '0.8.0', minBridge, capabilities: [], fileKey: 'k', fileName: 'f', currentPageId: '0:1', currentPageName: 'P' });
+  // old bridge (no self-update): purple, a click opens the install page (the plugin cannot install a bridge itself)
+  {
+    const h = harness();
+    const ws = h.ws();
+    ws.open();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.7.0' });
+    hello(h, '0.8.0');
+    assert.ok(h.has('update') && h.has('actionable') && h.has('connected'), `purple: ${h.classes()}`);
+    assert.strictEqual(h.title(), 'Bridge update needed. Click for steps');
+    h.click();
+    assert.deepStrictEqual(h.posted.at(-1), { pluginMessage: { kind: 'openSetup' } }, 'opens the install page, not an in-place update');
+    assert.ok(!ws.sent.some((m) => m.type === 'update_request'), 'no in-place update request');
+  }
+  // bridge new enough: plain green
+  {
+    const h = harness();
+    const ws = h.ws();
+    ws.open();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.8.0' });
+    hello(h, '0.8.0');
+    assert.ok(h.has('connected') && !purple(h));
+  }
+  // an old bridge that cannot say its version: never nag on a guess
+  {
+    const h = harness();
+    const ws = h.ws();
+    ws.open();
+    ws.deliver({ kind: 'welcome', sessionId: 's1' });
+    hello(h, '0.8.0');
+    assert.ok(h.has('connected') && !purple(h));
+  }
+  // when the bridge itself offers an in-place update, that path wins (one click installs)
+  {
+    const h = harness();
+    const ws = h.ws();
+    ws.open();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.8.0' });
+    hello(h, '0.9.0');
+    assert.ok(purple(h) && h.has('actionable'));
+    ws.deliver({ type: 'update', available: true, latest: '0.9.0', current: '0.8.0' });
+    assert.ok(h.has('clickable') && !h.has('actionable'));
+    assert.strictEqual(h.title(), 'Update available. Click to install');
+    h.click();
+    assert.deepStrictEqual(ws.sent.at(-1), { type: 'update_request', version: '0.9.0' });
+  }
+}
+
 console.log('plugin-ui.mjs OK');

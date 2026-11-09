@@ -12,9 +12,10 @@ export const BRIDGE_VERSION = '0.8.0';
 // scripts/package-release.mjs — this line is the single source of truth.
 // Raise it ONLY when a bridge release needs plugin features/protocol that older
 // plugins lack, and publish the new plugin in Figma BEFORE cutting that release.
-// 0.7.0: the bridge's `hello` contract (version + capabilities + fileKey) and
-// every plugin method the bridge calls exist in 0.7.0; 0.8.0 added no methods.
-export const MIN_PLUGIN_VERSION = '0.7.0';
+// 0.6.0: the first plugin with the `hello` contract (version + capabilities + fileKey).
+// Plugins 0.6.x can lack newer methods: the bridge then returns a clear "older build"
+// tool error for just those tools (mcp-server.ts), so everything else keeps working.
+export const MIN_PLUGIN_VERSION = '0.6.0';
 
 export interface WSRequest {
   id: string;
