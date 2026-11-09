@@ -26,7 +26,7 @@ import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 
 // src/types.ts
-var BRIDGE_VERSION = "0.7.0";
+var BRIDGE_VERSION = "0.8.0";
 
 // src/update.ts
 var MANIFEST_MAX_BYTES = 64 * 1024;

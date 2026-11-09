@@ -1,6 +1,6 @@
 {
   "name": "grip-figma-bridge",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Bridge between the Grip Figma plugin and MCP agents \u2014 install with: npx grip-figma-bridge install",
   "main": "dist/index.js",
   "type": "module",

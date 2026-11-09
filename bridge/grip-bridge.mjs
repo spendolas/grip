@@ -10582,7 +10582,7 @@ var v4_default = v4;
 import { EventEmitter } from "events";
 
 // src/types.ts
-var BRIDGE_VERSION = "0.7.0";
+var BRIDGE_VERSION = "0.8.0";
 
 // src/ws-server.ts
 function originAllowedForUpdate(origin) {
