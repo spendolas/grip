@@ -81,6 +81,10 @@ export async function runUpdateCli(argv: string[]): Promise<number> {
       out(`Not installing: ${v.reason}.`);
       return checkOnly ? 0 : 1;
     }
+    if (v.kind === 'ok' && v.stale) {
+      out(`WARNING: ${v.stale.length} open Figma window(s) have a Grip plugin that is too old for ${s.latest} and will stop working until it is updated in Figma:`);
+      for (const w of v.stale) out(`  - ${w}`);
+    }
     if (v.kind === 'unverifiable') {
       unverifiable = true;
       out(`Could not verify your plugin: ${plugins === null ? 'no running Grip bridge to ask (or one older than 0.8.0)' : v.reason}.`);

@@ -104,7 +104,7 @@ function harness() {
 }
 
 const purple = (h) => h.has('update') || h.has('updating');
-const CONNECTED_TITLE = 'Grip 0.8.0 — connected';
+const CONNECTED_TITLE = 'Connected';
 
 // ------------------------------------------------------------ states
 {
@@ -113,7 +113,7 @@ const CONNECTED_TITLE = 'Grip 0.8.0 — connected';
 
   // disconnected: grey, setup tooltip, clickable
   assert.ok(!h.has('connected') && !purple(h), 'starts grey');
-  assert.strictEqual(h.title(), 'Grip bridge not running — click for setup instructions');
+  assert.strictEqual(h.title(), 'Bridge not running. Click for setup');
   assert.ok(h.has('actionable'));
   h.click();
   assert.deepStrictEqual(h.posted.at(-1), { pluginMessage: { kind: 'openSetup' } }, 'a grey click still opens the setup pointer');
@@ -122,7 +122,7 @@ const CONNECTED_TITLE = 'Grip 0.8.0 — connected';
   const ws = h.ws();
   ws.open();
   assert.ok(h.has('connected') && !purple(h) && !h.has('actionable'));
-  assert.strictEqual(h.title(), 'Grip — connected');
+  assert.strictEqual(h.title(), 'Connected');
   ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.8.0' });
   assert.deepStrictEqual(h.posted.at(-1), { pluginMessage: { kind: 'welcome', sessionId: 's1' } });
   h.fromMain({ kind: 'hello', version: '0.8.0', minBridge: '0.7.0', capabilities: ['x'], fileKey: 'k', fileName: 'f', currentPageId: '0:1', currentPageName: 'P' });
@@ -143,10 +143,9 @@ const CONNECTED_TITLE = 'Grip 0.8.0 — connected';
   ws.deliver({ type: 'update', available: true, latest: '0.9.0', current: '0.8.0', headline: 'Faster, with fewer bugs.' });
   assert.ok(h.has('update') && h.has('clickable'), `purple: ${h.classes()}`);   // (.connected stays on; the later #state.update rule wins, asserted statically above)
   assert.ok(!h.has('updating') && !h.has('pulsing'));
-  assert.strictEqual(h.title(), 'Grip update available (0.8.0 → 0.9.0) — click to install\nFaster, with fewer bugs.');
-  // and without a headline there is no second line
+  assert.strictEqual(h.title(), 'Update available. Click to install', 'very short: no versions, no headline');
   ws.deliver({ type: 'update', available: true, latest: '0.9.0', current: '0.8.0', headline: null });
-  assert.strictEqual(h.title(), 'Grip update available (0.8.0 → 0.9.0) — click to install');
+  assert.strictEqual(h.title(), 'Update available. Click to install');
 
   // ONE click installs the version that is shown
   h.click();
@@ -166,7 +165,7 @@ const CONNECTED_TITLE = 'Grip 0.8.0 — connected';
   // the bridge restarts: grey, then a QUICK reconnect, then green
   ws.drop(1006);
   assert.ok(!purple(h) && !h.has('connected'), `grey while the bridge restarts: ${h.classes()}`);
-  assert.strictEqual(h.title(), 'Updating… the bridge is restarting', 'the grey strip says why');
+  assert.strictEqual(h.title(), 'Restarting…', 'the grey strip says why');
   assert.ok(!h.has('actionable'), 'no setup click while restarting');
   const n = h.instances.length;
   h.ws().onerror?.();
@@ -194,7 +193,7 @@ const CONNECTED_TITLE = 'Grip 0.8.0 — connected';
   assert.ok(h.has('error'));
   h.advance(2);
   assert.ok(h.has('update') && h.has('clickable') && !h.has('error'), `back to purple: ${h.classes()}`);
-  assert.strictEqual(h.title(), 'Update failed: grip-bridge.mjs failed its sha256 check. Nothing was changed. — click to retry');
+  assert.strictEqual(h.title(), 'Update failed. Click to retry');
   // a retry sends the request again
   h.click();
   assert.deepStrictEqual(ws.sent.at(-1), { type: 'update_request', version: '0.9.0' });
@@ -217,13 +216,13 @@ const CONNECTED_TITLE = 'Grip 0.8.0 — connected';
   assert.ok(!h.has('error'), 'no red flash for version_changed');
   assert.ok(h.has('update'), 'still purple');
   ws.deliver({ type: 'update', available: true, latest: '0.9.1', current: '0.8.0', headline: 'Newer.' });
-  assert.strictEqual(h.title(), 'Grip update available (0.8.0 → 0.9.1) — click to install\nNewer.');
+  assert.strictEqual(h.title(), 'Update available. Click to install');
   h.click();
   assert.deepStrictEqual(ws.sent.at(-1), { type: 'update_request', version: '0.9.1' }, 'the next click names the version now shown');
 
   // no answer at all within a minute: do not sit on "Updating..." forever
   h.advance(61000);
-  assert.ok(h.has('update') && /^Update failed: no answer from the bridge/.test(h.title()), h.title());
+  assert.ok(h.has('update') && h.title() === 'Update failed. Click to retry', h.title());
 }
 
 // ------------------------------------------------------------ developer install: never purple, tooltip says why
@@ -237,7 +236,6 @@ const CONNECTED_TITLE = 'Grip 0.8.0 — connected';
   ws.deliver({ type: 'update_result', status: 'clone_install', from: '0.8.0', to: '0.9.0', next: ['git pull', 'npm run build', 'node bridge/install.mjs'] });
   assert.ok(h.has('connected') && !purple(h), 'the indicator stops being purple for a developer install');
   assert.match(h.title(), /developer install/);
-  assert.match(h.title(), /git pull && npm run build && node bridge\/install\.mjs/);
   // a repeated frame for the same version does not bring the purple back
   ws.deliver({ type: 'update', available: true, latest: '0.9.0', current: '0.8.0' });
   assert.ok(!purple(h), 'still not purple');
@@ -256,7 +254,7 @@ const CONNECTED_TITLE = 'Grip 0.8.0 — connected';
   ws.drop(1006);
   assert.ok(!purple(h) && !h.has('connected'), 'a disconnected strip stays grey');
   assert.ok(h.has('actionable'));
-  assert.strictEqual(h.title(), 'Grip bridge not running — click for setup instructions');
+  assert.strictEqual(h.title(), 'Bridge not running. Click for setup');
   h.advance(2000);
   const ws2 = h.ws();
   ws2.open();

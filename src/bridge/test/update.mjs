@@ -255,10 +255,14 @@ assert.strictEqual(U.releaseNotes('short'), 'short');
     assert.strictEqual(r.signal, false, `version ${JSON.stringify(v)} blocks`);
     assert.match(r.blockedReason, /did not report a version/);
   }
-  // one of two plugins incompatible blocks (an update replaces the bridge for ALL windows)
+  // one of two plugins too old: the compatible window is signalled, the old one is reported, not blocking
   const mixed = U.updateSignal(st(), [pl('0.8.0', 'Good'), pl('0.7.0', 'Old')]);
-  assert.strictEqual(mixed.signal, false);
-  assert.match(mixed.blockedReason, /plugin 0\.7\.0 in "Old"/);
+  assert.strictEqual(mixed.signal, true, 'an old window does not block the compatible one');
+  assert.strictEqual(mixed.staleWindows.length, 1);
+  assert.match(mixed.staleWindows[0], /plugin 0\.7\.0 in "Old"/);
+  assert.strictEqual(U.updateSignal(st(), [pl('0.7.0', 'Old'), pl('0.6.0', 'Older')]).signal, false, 'nothing compatible: not signalled');
+  assert.strictEqual(U.pluginIncompatibility('0.8.0', '0.9.0', pl('0.8.0')), null);
+  assert.match(U.pluginIncompatibility('0.8.0', '0.9.0', pl('0.7.0', 'Old')), /plugin 0\.7\.0 in "Old"/);
   // no plugin connected: not signalled, says why
   for (const none of [[], null, undefined]) {
     const r = U.updateSignal(st(), none);
@@ -675,7 +679,6 @@ assert.strictEqual(U.releaseNotes('short'), 'short');
     const pl = (v, file = 'F', o = {}) => ({ pluginVersion: v, fileName: file, wsReady: true, hello: true, ...o });
     for (const [why, plugins, re] of [
       ['plugin too old', [pl('0.6.0', 'Fidelity')], /^plugin 0\.6\.0 in "Fidelity" is older than 99\.1\.0 requires \(>=0\.7\.0\); update the Grip plugin in Figma first$/],
-      ['one of two plugins incompatible', [pl('0.8.0', 'Good'), pl('0.5.0', 'Old')], /plugin 0\.5\.0 in "Old"/],
       ['unknown version', [pl('unknown', 'Mystery')], /did not report a version/],
       ['missing version', [pl(undefined, 'Mystery')], /did not report a version/],
     ]) {
@@ -684,6 +687,14 @@ assert.strictEqual(U.releaseNotes('short'), 'short');
       assert.strictEqual(r.status, 'incompatible_plugin', why);
       assert.match(r.reason, re, why);
       untouched(h, why); noPayload(why);
+    }
+    // one compatible + one too-old window: installs (the old window is reported, it does not block)
+    {
+      const h = fresh();
+      const r = await inst({ plugins: [pl('0.8.0', 'Good'), pl('0.5.0', 'Old')] });
+      assert.strictEqual(r.status, 'updated', 'a compatible window is enough');
+      assert.strictEqual(r.staleWindows?.length, 1);
+      assert.match(r.staleWindows[0], /plugin 0\.5\.0 in "Old"/);
     }
     // nothing to verify against: refused unless the caller says the user accepted that
     for (const none of [[], null, undefined, [pl('0.6.0', 'x', { wsReady: false })]]) {
@@ -1199,30 +1210,32 @@ assert.ok(!originAllowedForUpdate('https://evil.example') && !originAllowedForUp
   await sleep(50);
   assert.strictEqual(updates(plug).length, 1, 'one frame, not one per recompute (deduped)');
 
-  // recompute on plugin connect: a second window with an OLD plugin withholds the signal from everyone
+  // recompute on plugin connect: a second window with an OLD plugin is NOT signalled and does not block the first
   const oldP = await open('null');
   await waitFor(oldP.msgs, (m) => m.kind === 'welcome');
   hello(oldP.ws, { version: '0.6.0', fileName: 'Legacy file' });
-  assert.strictEqual((await waitFor(plug.msgs, (m) => m.type === 'update' && m.available === false))?.available, false, 'the first strip loses its purple when an incompatible plugin connects');
+  await sleep(150);
+  assert.strictEqual(sig().signal, true, 'a compatible window is still signalled');
+  assert.strictEqual(sig().staleWindows.length, 1);
+  assert.match(sig().staleWindows[0], /plugin 0\.6\.0 in "Legacy file" is older than 99\.1\.0 requires \(>=0\.7\.0\)/);
+  assert.strictEqual(plug.msgs.filter((m) => m.type === 'update' && m.available === false).length, 0, 'the compatible strip keeps its purple');
   assert.strictEqual(oldP.msgs.filter((m) => m.type === 'update' && m.available).length, 0, 'the old plugin never sees an available frame');
-  assert.strictEqual(sig().signal, false);
-  assert.match(sig().blockedReason, /plugin 0\.6\.0 in "Legacy file" is older than 99\.1\.0 requires \(>=0\.7\.0\)/);
-  // install-time re-verify through the WS route: refused with incompatible_plugin, nothing installed
-  plug.msgs.length = 0;
-  plug.ws.send(JSON.stringify({ type: 'update_request', version: NEWER }));
-  const incompat = await waitFor(plug.msgs, (m) => m.type === 'update_result');
+  // a click from the OLD window is refused with incompatible_plugin, nothing installed
+  oldP.msgs.length = 0;
+  oldP.ws.send(JSON.stringify({ type: 'update_request', version: NEWER }));
+  const incompat = await waitFor(oldP.msgs, (m) => m.type === 'update_result');
   assert.deepStrictEqual([incompat?.status, incompat?.code], ['error', 'incompatible_plugin']);
   assert.match(incompat?.message, /plugin 0\.6\.0 in "Legacy file"/);
-  assert.ok(!existsSync(join(home, 'grip-bridge.mjs')), 'nothing installed while an incompatible plugin is connected');
-  // ...and it recomputes when that plugin goes away
+  assert.ok(!existsSync(join(home, 'grip-bridge.mjs')), 'nothing installed from an incompatible window');
   oldP.ws.close();
-  assert.strictEqual((await waitFor(plug.msgs, (m) => m.type === 'update' && m.available === true))?.latest, NEWER, 'signal returns when the incompatible plugin leaves');
+  await sleep(100);
   // a plugin with NO version (older builds) blocks too
   const mystery = await open('null');
   await waitFor(mystery.msgs, (m) => m.kind === 'welcome');
   mystery.ws.send(JSON.stringify({ kind: 'hello', fileKey: 'z', fileName: 'Mystery', currentPageId: '0:1', currentPageName: 'P' }));
   await sleep(150);
-  assert.strictEqual(sig().signal, false, 'unknown version blocks');
+  assert.strictEqual(mystery.msgs.filter((m) => m.type === 'update' && m.available).length, 0, 'unknown version is never signalled');
+  assert.strictEqual(sig().signal, true, 'and does not block the compatible window');
   mystery.ws.close();
   await sleep(150);
   assert.strictEqual(sig().signal, true);
@@ -1455,11 +1468,17 @@ assert.ok(!originAllowedForUpdate('https://evil.example') && !originAllowedForUp
 
   // a running daemon with an INCOMPATIBLE plugin: refuses (even with --yes and --force)
   for (const flagsList of [['update', '--yes'], ['update', '--yes', '--force']]) {
-    const inc = await run(flagsList, '', daemonWith([plug('0.8.0', 'Good'), plug('0.6.0', 'Legacy')]));
+    const inc = await run(flagsList, '', daemonWith([plug('0.6.0', 'Legacy')]));
     assert.strictEqual(inc.code, 1, inc.out);
     assert.match(inc.out, /Not installing: plugin 0\.6\.0 in "Legacy" is older than 99\.1\.0 requires \(>=0\.7\.0\); update the Grip plugin in Figma first/);
     assert.strictEqual(readFileSync(join(home, 'grip-bridge.mjs'), 'utf8'), 'OLD BRIDGE', `${flagsList.join(' ')}: untouched`);
   }
+  // compatible + too-old window: installs, and warns about the old window
+  const mixedRun = await run(['update', '--yes'], '', daemonWith([plug('0.8.0', 'Good'), plug('0.6.0', 'Legacy')]));
+  assert.strictEqual(mixedRun.code, 0, mixedRun.out);
+  assert.match(mixedRun.out, /WARNING: 1 open Figma window\(s\) have a Grip plugin that is too old/);
+  assert.match(mixedRun.out, /plugin 0\.6\.0 in "Legacy"/);
+  writeFileSync(join(home, 'grip-bridge.mjs'), 'OLD BRIDGE');
   const incChk = await run(['update', '--check'], '', daemonWith([plug('0.6.0', 'Legacy')]));
   assert.strictEqual(incChk.code, 0);
   assert.match(incChk.out, /Not installing: plugin 0\.6\.0/);

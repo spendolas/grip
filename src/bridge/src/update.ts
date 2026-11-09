@@ -374,6 +374,7 @@ export const CLONE_NEXT_STEPS = ['git pull', 'npm run build', 'node bridge/insta
 
 // What we know about one connected plugin window (a PluginBridge snapshot row).
 export interface PluginInfo {
+  sessionId?: string;
   pluginVersion?: string | null;
   fileName?: string;
   wsReady?: boolean;
@@ -383,7 +384,7 @@ export interface PluginInfo {
 
 export function pluginInfos(bridge: { snapshot(): { plugins: any[] } }): PluginInfo[] {
   return bridge.snapshot().plugins.map((p) => ({
-    pluginVersion: p.pluginVersion, fileName: p.fileName, wsReady: p.wsReady, hello: p.hello, minBridge: p.minBridge,
+    sessionId: p.sessionId, pluginVersion: p.pluginVersion, fileName: p.fileName, wsReady: p.wsReady, hello: p.hello, minBridge: p.minBridge,
   }));
 }
 
@@ -394,31 +395,45 @@ function connectedPlugins(plugins: PluginInfo[] | null | undefined): PluginInfo[
 }
 
 export type PluginVerdict =
-  | { kind: 'ok' }
-  | { kind: 'incompatible'; reason: string }     // a connected plugin is too old for this release
+  | { kind: 'ok'; stale?: string[] }             // >=1 compatible plugin; `stale` = other windows that are too old
+  | { kind: 'incompatible'; reason: string }     // connected plugins exist but none is new enough for this release
   | { kind: 'unverifiable'; reason: string };    // no connected plugin to check against
 
-// The rule: an update replaces the bridge for ALL Figma windows, so every
-// connected plugin must have a KNOWN version >= minPlugin. Unknown = incompatible.
+// Why ONE plugin window cannot work with this release (null = it can). Unknown
+// version = incompatible.
+export function pluginIncompatibility(minPlugin: string, latest: string, p: PluginInfo): string | null {
+  const where = p.fileName ? ` in "${p.fileName}"` : '';
+  const v = p.pluginVersion;
+  if (!isSemver(v)) {
+    return `a Grip plugin${where} did not report a version, so it cannot be verified against ${latest} (needs >=${minPlugin}); update the Grip plugin in Figma first`;
+  }
+  if (compareSemver(v, minPlugin) < 0) {
+    return `plugin ${v}${where} is older than ${latest} requires (>=${minPlugin}); update the Grip plugin in Figma first`;
+  }
+  return null;
+}
+
+// The rule (per plugin window): the update is offered to, and can be installed
+// from, a window whose plugin has a KNOWN version >= minPlugin. A window whose
+// plugin is too old is never signalled and never blocks the others; it is
+// reported in `stale` (after an update such a window needs its plugin updated
+// in Figma before it works again). Nothing compatible connected = no signal.
 export function checkPluginCompat(minPlugin: string, latest: string, plugins: PluginInfo[] | null | undefined): PluginVerdict {
   const live = connectedPlugins(plugins);
   if (live.length === 0) {
     return { kind: 'unverifiable', reason: 'no Grip plugin is connected, so compatibility cannot be verified; open the Grip plugin in Figma first' };
   }
+  const stale: string[] = [];
+  let ok = 0;
   for (const p of live) {
-    const where = p.fileName ? ` in "${p.fileName}"` : '';
-    const v = p.pluginVersion;
-    if (!isSemver(v)) {
-      return { kind: 'incompatible', reason: `a Grip plugin${where} did not report a version, so it cannot be verified against ${latest} (needs >=${minPlugin}); update the Grip plugin in Figma first` };
-    }
-    if (compareSemver(v, minPlugin) < 0) {
-      return { kind: 'incompatible', reason: `plugin ${v}${where} is older than ${latest} requires (>=${minPlugin}); update the Grip plugin in Figma first` };
-    }
+    const why = pluginIncompatibility(minPlugin, latest, p);
+    if (why) stale.push(why); else ok++;
   }
-  return { kind: 'ok' };
+  if (ok === 0) return { kind: 'incompatible', reason: stale[0] };
+  return stale.length ? { kind: 'ok', stale } : { kind: 'ok' };
 }
 
-export interface UpdateSignal { signal: boolean; blockedReason?: string }
+export interface UpdateSignal { signal: boolean; blockedReason?: string; staleWindows?: string[] }
 
 // THE single decision for every signalling surface (the purple strip, the agent
 // notices, grip_health.update): signal only when an update is available AND at
@@ -432,7 +447,7 @@ export function updateSignal(state: UpdateState | null | undefined, plugins: Plu
     return { signal: false, blockedReason: `Grip ${state.latest} has no verified compatibility info (compat.json)${state.compatError ? ': ' + state.compatError : ''}, so it is not offered` };
   }
   const v = checkPluginCompat(state.minPlugin, state.latest, plugins);
-  return v.kind === 'ok' ? { signal: true } : { signal: false, blockedReason: v.reason };
+  return v.kind === 'ok' ? { signal: true, ...(v.stale ? { staleWindows: v.stale } : {}) } : { signal: false, blockedReason: v.reason };
 }
 
 // The reverse direction (informational): a connected plugin that needs a NEWER
@@ -683,6 +698,7 @@ export interface InstallResult {
   restart?: 'scheduled' | 'not_managed' | 'none';
   next?: string[];            // clone_install: the commands to run instead
   reason?: string;            // incompatible_plugin / plugins_unverifiable: why
+  staleWindows?: string[];    // installed anyway: other open windows whose plugin is too old for the new bridge
   headline?: string | null;   // version_changed: what the new release is
   notes?: string | null;
   compatWarning?: string;     // --force installed without a verified compat.json
@@ -808,6 +824,7 @@ export async function installUpdate(o: InstallOptions): Promise<InstallResult> {
     }
 
     let compatWarning: string | undefined;
+    let staleWindows: string[] | undefined;
     if (!minPlugin) {
       if (!o.force) throw new UpdateError(compatError ?? `release ${rel.version} has no verifiable compatibility info`, 'compat_unverified');
       compatWarning = `WARNING: ${compatError}. Installing anyway because of --force: nothing checked that your Figma plugin works with ${rel.version}.`;
@@ -815,6 +832,7 @@ export async function installUpdate(o: InstallOptions): Promise<InstallResult> {
     } else {
       const verdict = checkPluginCompat(minPlugin, rel.version, o.plugins);
       if (verdict.kind === 'incompatible') return { status: 'incompatible_plugin', from: BRIDGE_VERSION, to: rel.version, reason: verdict.reason };
+      if (verdict.kind === 'ok' && verdict.stale) staleWindows = verdict.stale;
       if (verdict.kind === 'unverifiable' && !(o.acceptUnverified || o.force)) {
         return { status: 'plugins_unverifiable', from: BRIDGE_VERSION, to: rel.version, reason: verdict.reason };
       }
@@ -866,7 +884,7 @@ export async function installUpdate(o: InstallOptions): Promise<InstallResult> {
     try { writeInstallRecord('release', rel.version); } catch { /* the record is advisory */ }
 
     logErr(`update: installed ${BRIDGE_VERSION} -> ${rel.version} into ${home}`);
-    return { status: 'updated', from: BRIDGE_VERSION, to: rel.version, home, pluginFilesWritten: written, ...(compatWarning ? { compatWarning } : {}) };
+    return { status: 'updated', from: BRIDGE_VERSION, to: rel.version, home, pluginFilesWritten: written, ...(compatWarning ? { compatWarning } : {}), ...(staleWindows ? { staleWindows } : {}) };
   } finally {
     installing = false;
   }
@@ -1004,7 +1022,13 @@ export function wireUpdateToBridge(bridge: PluginBridge): () => void {
     const blocked = s?.available && !sig.signal ? (sig.blockedReason ?? '') : '';
     if (blocked && blocked !== lastBlocked) logErr(`update: Grip ${s!.latest} is available but not offered: ${blocked}`);
     lastBlocked = blocked;
-    bridge.setUpdateState(s ? { available: sig.signal, latest: s.latest, current: BRIDGE_VERSION, headline: s.headline ?? null } : null);
+    // Per window: only a window whose plugin can work with the release is told (purple).
+    const eligible = (sessionId: string) => {
+      if (!s?.minPlugin || !s.latest) return false;
+      const p = plugins.find((x) => x.sessionId === sessionId);
+      return !!p && connectedPlugins([p]).length === 1 && pluginIncompatibility(s.minPlugin, s.latest, p) === null;
+    };
+    bridge.setUpdateState(s ? { available: sig.signal, latest: s.latest, current: BRIDGE_VERSION, headline: s.headline ?? null, eligible } : null);
   };
   recompute();
   const offState = onUpdateState(recompute);
@@ -1016,7 +1040,17 @@ export function wireUpdateToBridge(bridge: PluginBridge): () => void {
       if (!e.version) {
         msg = { type: 'update_result', status: 'error', code: 'version_required', message: 'this Grip plugin did not say which version you were shown; reload the plugin in Figma and try again' };
       } else {
-        const r = await installAndScheduleRestart({ version: e.version, plugins: pluginInfos(bridge) });
+        const plugins = pluginInfos(bridge);
+        // The click comes from ONE window: that window's plugin must be compatible.
+        const me = plugins.find((x) => x.sessionId === e.sessionId);
+        const s0 = getUpdateState();
+        const why = me && s0?.minPlugin && s0.latest ? pluginIncompatibility(s0.minPlugin, s0.latest, me) : null;
+        if (why) {
+          bridge.sendTo(e.sessionId, { type: 'update_result', status: 'error', code: 'incompatible_plugin', message: why });
+          bridge.pushUpdate(e.sessionId, true);
+          return;
+        }
+        const r = await installAndScheduleRestart({ version: e.version, plugins });
         if (r.status === 'version_changed') {
           msg = { type: 'update_result', status: 'error', code: 'version_changed', latest: r.to, message: `Grip ${r.to} is now the latest release (you were shown ${e.version}); the strip refreshes so you can review it` };
         } else if (r.status === 'incompatible_plugin' || r.status === 'plugins_unverifiable') {

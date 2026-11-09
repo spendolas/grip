@@ -348,7 +348,7 @@ export function createSession(bridge: PluginBridge): LiveSession {
           ...(s.error ? { error: s.error } : {}),
           note: s.available
             ? (sum.signalled
-              ? `Update available. Tell the user what's new (headline/notes) and ask if they want it; only after they say yes, call grip_update {action:'install', version:'${s.latest}'}.`
+              ? `Update available. Tell the user what's new (headline/notes) and ask if they want it; only after they say yes, call grip_update {action:'install', version:'${s.latest}'}.${sum.staleWindows ? ` Warn them: ${sum.staleWindows.length} other open Figma window(s) have a Grip plugin that is too old for ${s.latest} and will stop working until it is updated in Figma (${sum.staleWindows.join('; ')}).` : ''}`
               : `Update ${s.latest} exists but is NOT offered: ${sum.blockedReason}. Do not install it.`)
             : s.error ? 'Could not reach the update server; nothing changed.' : 'Grip is up to date.',
         });
@@ -723,6 +723,7 @@ function updateSummary(s: UpdateState | null = getUpdateState(), plugins: Plugin
     minPlugin: s?.minPlugin ?? null,
     signalled: sig.signal && !updatesDisabled(),
     ...(sig.blockedReason ? { blockedReason: sig.blockedReason } : {}),
+    ...(sig.staleWindows ? { staleWindows: sig.staleWindows } : {}),
     // A connected plugin needs a NEWER bridge than this one: the bridge is the stale side.
     ...(stale ? { bridgeStale: stale, updateRecommended: true } : {}),
   };

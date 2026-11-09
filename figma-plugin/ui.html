@@ -93,20 +93,15 @@
         el.title = tooltip(offered, needsSetup);
       }
 
+      // Tooltips are native `title`s: keep every one very short and plain.
       function tooltip(offered, needsSetup) {
-        if (updPhase === 'updating') return current === 'connected' ? 'Updating…' : 'Updating… the bridge is restarting';
-        if (needsSetup) return 'Grip bridge not running — click for setup instructions';
+        if (updPhase === 'updating') return current === 'connected' ? 'Updating…' : 'Restarting…';
+        if (needsSetup) return 'Bridge not running. Click for setup';
         if (current !== 'connected') return '';
-        if (updLatest && updClone) {
-          return 'Grip ' + updLatest + ' is available, but this is a developer install (git clone), so it is not updated in place. ' +
-            'Update it from the clone: git pull && npm run build && node bridge/install.mjs';
-        }
-        if (offered && updPhase === 'failed') return 'Update failed: ' + (updError || 'unknown error') + ' — click to retry';
-        if (offered) {
-          const from = updCurrent || bridgeVersion || '?';
-          return 'Grip update available (' + from + ' → ' + updLatest + ') — click to install' + (updHeadline ? '\n' + updHeadline : '');
-        }
-        return 'Grip' + (pluginVersion ? ' ' + pluginVersion : '') + ' — connected';
+        if (updLatest && updClone) return 'Update available (developer install)';
+        if (offered && updPhase === 'failed') return 'Update failed. Click to retry';
+        if (offered) return 'Update available. Click to install';
+        return 'Connected';
       }
 
       function setState(name) {

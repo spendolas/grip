@@ -53,7 +53,7 @@ interface Session {
 // Update state pushed to plugin strips (see update.ts / wireUpdateToBridge).
 // `available` is the SIGNAL (update available AND compatible with every
 // connected plugin), not the raw "a newer release exists".
-export interface UpdateBroadcast { available: boolean; latest: string | null; current?: string; headline?: string | null }
+export interface UpdateBroadcast { available: boolean; latest: string | null; current?: string; headline?: string | null; eligible?: (sessionId: string) => boolean }
 
 // A Figma plugin iframe connects with Origin "null" (sandboxed) — or the
 // figma.com origin. A normal web page connecting to ws://localhost:7777 sends
@@ -760,7 +760,7 @@ export class PluginBridge extends EventEmitter {
     const st = this.updateState;
     const frame = {
       type: 'update',
-      available: !!st?.available,
+      available: !!st?.available && (st.eligible ? st.eligible(sessionId) : true),
       latest: st?.latest ?? null,
       current: st?.current ?? BRIDGE_VERSION,
       headline: st?.headline ?? null,
