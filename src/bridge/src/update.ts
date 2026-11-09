@@ -1,14 +1,16 @@
 // Self-update for the Grip bridge. USER-TRIGGERED ONLY.
 //
 // Two halves:
-//   1. CHECK  — read the release manifest (bridge/version.json on the repo's
-//      main branch), compare to BRIDGE_VERSION, remember the answer. The daemon
+//   1. CHECK  — ask GitHub for the latest published Release of this repo
+//      (api.github.com/repos/spendolas/grip/releases/latest), compare its tag to
+//      BRIDGE_VERSION, remember the answer plus the release notes. The daemon
 //      does this ~30s after startup and every 24h. Pure information: it never
 //      downloads or installs anything, and every failure is silent.
 //   2. INSTALL — only when a human said yes (agent tool after the user agrees,
-//      the plugin's "click to confirm", or the CLI). Downloads the bridge and
-//      plugin files, verifies each against the manifest's sha256 and a size
-//      cap, and only THEN writes (tmp file + rename) into ~/.grip.
+//      the plugin's "click to confirm", or the CLI). Downloads the release's
+//      bridge + plugin assets and SHA256SUMS.txt, verifies every file against
+//      SHA256SUMS.txt and a size cap, and only THEN writes (tmp file + rename)
+//      into ~/.grip. A developer (git clone) install is never overwritten.
 //
 // The Figma plugin's networkAccess is localhost-only, so the plugin never
 // touches the internet: this module (in the bridge) is the only code that does.
@@ -26,19 +28,31 @@ import {
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { homedir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRIDGE_VERSION } from './types.js';
 import type { PluginBridge } from './ws-server.js';
 
-export const DEFAULT_UPDATE_BASE = 'https://raw.githubusercontent.com/spendolas/grip/main/';
-// version.json lives next to the bridge in the repo; every path INSIDE it is
-// relative to the base URL (e.g. "bridge/grip-bridge.mjs").
-export const MANIFEST_PATH = 'bridge/version.json';
+export const DEFAULT_RELEASES_API = 'https://api.github.com/repos/spendolas/grip/releases/latest';
 
-const MANIFEST_MAX_BYTES = 64 * 1024;
+// Release asset names. scripts/package-release.mjs produces them and
+// scripts/release-gate.mjs requires them; a test keeps all three in step.
+export const ASSET_BRIDGE = 'grip-bridge.mjs';
+export const ASSET_SUMS = 'SHA256SUMS.txt';
+// release asset name -> file name inside ~/.grip/figma-plugin
+export const PLUGIN_ASSETS: Record<string, string> = {
+  'grip-plugin-code.js': 'code.js',
+  'grip-plugin-ui.html': 'ui.html',
+  'grip-plugin-manifest.json': 'manifest.json',
+};
+export const UPDATE_ASSET_NAMES = [ASSET_BRIDGE, ...Object.keys(PLUGIN_ASSETS), ASSET_SUMS];
+
+const RELEASE_MAX_BYTES = 256 * 1024;
+const SUMS_MAX_BYTES = 64 * 1024;
 const FILE_MAX_BYTES = 5 * 1024 * 1024;
-const MAX_PLUGIN_FILES = 20;
+const MAX_ASSETS = 100;
+const NOTES_MAX_CHARS = 1200;
+const HEADLINE_MAX_CHARS = 160;
 const MANIFEST_TIMEOUT_MS = 5_000;
 const DOWNLOAD_TIMEOUT_MS = 30_000;
 const MAX_REDIRECTS = 3;
@@ -64,29 +78,46 @@ export function updatesDisabled(): boolean {
 }
 
 // Accept https anywhere, plain http only for loopback (tests / a local mirror).
-export function normalizeBase(raw: string): string | null {
+export function normalizeUrl(raw: string): string | null {
   let u: URL;
   try { u = new URL(raw); } catch { return null; }
   const loopback = u.hostname === '127.0.0.1' || u.hostname === 'localhost';
   if (!(u.protocol === 'https:' || (u.protocol === 'http:' && loopback))) return null;
   if (u.username || u.password) return null;
-  u.search = '';
   u.hash = '';
-  if (!u.pathname.endsWith('/')) u.pathname += '/';
   return u.toString();
 }
 
-let warnedBase = false;
-export function updateBase(): string {
-  const raw = process.env.GRIP_UPDATE_BASE?.trim();
-  if (!raw) return DEFAULT_UPDATE_BASE;
-  const norm = normalizeBase(raw);
+let warnedApi = false;
+// GRIP_RELEASES_API replaces the whole "latest release" URL (tests, forks).
+export function releasesApi(): string {
+  const raw = process.env.GRIP_RELEASES_API?.trim();
+  if (!raw) return DEFAULT_RELEASES_API;
+  const norm = normalizeUrl(raw);
   if (norm) return norm;
-  if (!warnedBase) {
-    warnedBase = true;
-    logErr(`update: ignoring GRIP_UPDATE_BASE=${raw} (must be https, or http on 127.0.0.1/localhost); using the default`);
+  if (!warnedApi) {
+    warnedApi = true;
+    logErr(`update: ignoring GRIP_RELEASES_API=${raw} (must be https, or http on 127.0.0.1/localhost); using the default`);
   }
-  return DEFAULT_UPDATE_BASE;
+  return DEFAULT_RELEASES_API;
+}
+function overrideOrigin(): string | null {
+  if (!process.env.GRIP_RELEASES_API?.trim()) return null;
+  try { return new URL(releasesApi()).origin; } catch { return null; }
+}
+
+// Where downloads may come from (the first URL and every redirect hop).
+// github.com release downloads redirect to release-assets.githubusercontent.com
+// / objects.githubusercontent.com. https only; the one extra host is the
+// GRIP_RELEASES_API override (so tests and forks can point elsewhere).
+const ALLOWED_HOSTS = ['github.com', 'api.github.com'];
+export function hostAllowed(u: URL): boolean {
+  const extra = overrideOrigin();
+  if (extra && u.origin === extra) return true;
+  if (u.protocol !== 'https:' || u.username || u.password) return false;
+  if (u.port !== '' && u.port !== '443') return false;
+  const h = u.hostname.toLowerCase();
+  return ALLOWED_HOSTS.includes(h) || h.endsWith('.githubusercontent.com');
 }
 
 // ---------- semver ----------
@@ -118,18 +149,17 @@ export function isSemver(v: unknown): v is string {
 export class UpdateError extends Error {}
 
 // GET a URL into memory. Enforces a hard byte cap (header AND streamed), an
-// overall deadline, and the ORIGIN rule: redirects are followed (max 3) only
-// when they stay on exactly the same protocol+host+port as the start URL.
+// overall deadline, and the HOST rule: the start URL and every redirect hop
+// (max 3) must pass hostAllowed().
 function httpGet(
   url: string,
-  o: { maxBytes: number; timeoutMs: number; origin?: string; redirectsLeft?: number },
+  o: { maxBytes: number; timeoutMs: number; headers?: Record<string, string>; redirectsLeft?: number },
 ): Promise<Buffer> {
   return new Promise((resolveP, rejectP) => {
     let u: URL;
     try { u = new URL(url); } catch { rejectP(new UpdateError(`bad URL: ${url}`)); return; }
-    const origin = o.origin ?? u.origin;
-    if (u.origin !== origin) {
-      rejectP(new UpdateError(`refused redirect off-origin (${u.origin} is not ${origin})`));
+    if (!hostAllowed(u)) {
+      rejectP(new UpdateError(`refused: ${u.host} is not an allowed update host`));
       return;
     }
     let settled = false;
@@ -141,9 +171,10 @@ function httpGet(
       if (err) rejectP(err); else resolveP(buf!);
     };
     const doRequest = u.protocol === 'https:' ? httpsRequest : httpRequest;
+    // A generic user agent and nothing else: no account, email or machine identifier.
     const req = doRequest(u, {
       method: 'GET',
-      headers: { 'user-agent': `grip-bridge/${BRIDGE_VERSION}`, accept: '*/*' },
+      headers: { 'user-agent': `grip-bridge/${BRIDGE_VERSION}`, accept: '*/*', ...(o.headers ?? {}) },
     }, (res) => {
       const status = res.statusCode ?? 0;
       if (status >= 300 && status < 400 && res.headers.location) {
@@ -153,7 +184,7 @@ function httpGet(
         let next: string;
         try { next = new URL(res.headers.location, u).toString(); }
         catch { done(new UpdateError('bad redirect location')); return; }
-        httpGet(next, { ...o, origin, redirectsLeft: left - 1 }).then(
+        httpGet(next, { ...o, redirectsLeft: left - 1 }).then(
           (b) => done(null, b),
           (e) => done(e),
         );
@@ -161,7 +192,8 @@ function httpGet(
       }
       if (status !== 200) {
         res.resume();
-        done(new UpdateError(`HTTP ${status} for ${u.pathname}`));
+        const hint = status === 403 || status === 429 ? ' (GitHub rate limit? try again later)' : '';
+        done(new UpdateError(`HTTP ${status} for ${u.pathname}${hint}`));
         return;
       }
       const declared = Number(res.headers['content-length'] ?? 0);
@@ -194,61 +226,115 @@ function httpGet(
   });
 }
 
-// ---------- manifest ----------
+// ---------- release (GitHub Releases API) ----------
 
-export interface ManifestFile { path: string; sha256: string; bytes?: number }
-export interface Manifest {
-  version: string;
-  bridge: ManifestFile;
-  plugin: { files: Record<string, ManifestFile> };
+export interface ReleaseAsset { name: string; url: string; size?: number }
+export interface Release {
+  version: string;                         // tag_name without the leading "v"
+  notes: string;                           // first ~1200 chars of the release body
+  headline: string;                        // first non-empty body line, markdown stripped
+  assets: Record<string, ReleaseAsset>;    // by asset name
 }
 
-// Remote-supplied paths are untrusted: they become URL paths (under the base)
-// and, for plugin files, local file NAMES. Restrict both hard.
-function safeRelPath(p: unknown): p is string {
-  if (typeof p !== 'string' || p.length === 0 || p.length > 200) return false;
-  if (!/^[A-Za-z0-9._\-/]+$/.test(p) || p.startsWith('/')) return false;
-  return p.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
-}
-function safeFileName(n: string): boolean {
-  return /^[A-Za-z0-9._-]{1,100}$/.test(n) && n !== '.' && n !== '..';
-}
-const isSha = (s: unknown): s is string => typeof s === 'string' && /^[0-9a-f]{64}$/i.test(s);
-
-export function parseManifest(buf: Buffer): Manifest {
-  let j: any;
-  try { j = JSON.parse(buf.toString('utf8')); } catch { throw new UpdateError('version.json is not valid JSON'); }
-  if (!j || typeof j !== 'object') throw new UpdateError('version.json has an unexpected shape');
-  if (!isSemver(j.version)) throw new UpdateError('version.json has no valid "version"');
-  const b = j.bridge;
-  const bPath = b?.file ?? b?.path;
-  if (!b || !safeRelPath(bPath) || !isSha(b.sha256)) throw new UpdateError('version.json "bridge" entry is invalid');
-  const files: Record<string, ManifestFile> = {};
-  const pf = j.plugin?.files ?? {};
-  if (typeof pf !== 'object' || Array.isArray(pf)) throw new UpdateError('version.json "plugin.files" is invalid');
-  const names = Object.keys(pf);
-  if (names.length > MAX_PLUGIN_FILES) throw new UpdateError('version.json lists too many plugin files');
-  for (const name of names) {
-    const f = pf[name];
-    if (!safeFileName(name) || !f || !safeRelPath(f.path) || !isSha(f.sha256)) {
-      throw new UpdateError(`version.json plugin file entry "${name}" is invalid`);
-    }
-    files[name] = { path: f.path, sha256: f.sha256.toLowerCase(), bytes: typeof f.bytes === 'number' ? f.bytes : undefined };
+// "**A smoother install.**" -> "A smoother install." One line, plain text.
+export function releaseHeadline(body: unknown): string {
+  if (typeof body !== 'string') return '';
+  for (const raw of body.split(/\r?\n/)) {
+    const line = raw
+      .replace(/^\s*(?:#{1,6}\s+|>\s*|[-*+]\s+)/, '')
+      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/(\*\*|__|\*|_|`|~~)/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (line) return line.length > HEADLINE_MAX_CHARS ? line.slice(0, HEADLINE_MAX_CHARS - 1).trimEnd() + '…' : line;
   }
-  return {
-    version: j.version,
-    bridge: { path: bPath, sha256: b.sha256.toLowerCase(), bytes: typeof b.bytes === 'number' ? b.bytes : undefined },
-    plugin: { files },
-  };
+  return '';
 }
 
-export async function fetchManifest(base: string = updateBase()): Promise<Manifest> {
-  const buf = await httpGet(new URL(MANIFEST_PATH, base).toString(), {
-    maxBytes: MANIFEST_MAX_BYTES,
-    timeoutMs: MANIFEST_TIMEOUT_MS,
-  });
-  return parseManifest(buf);
+// First ~1200 chars of the release body, cut at a line break when possible.
+export function releaseNotes(body: unknown, max: number = NOTES_MAX_CHARS): string {
+  if (typeof body !== 'string') return '';
+  const t = body.replace(/\r\n/g, '\n').trim();
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max);
+  const nl = cut.lastIndexOf('\n');
+  return (nl > max * 0.6 ? cut.slice(0, nl) : cut).trimEnd() + '\n…';
 }
+
+export function parseRelease(buf: Buffer): Release {
+  let j: any;
+  try { j = JSON.parse(buf.toString('utf8')); } catch { throw new UpdateError('the releases API did not return valid JSON'); }
+  if (!j || typeof j !== 'object') throw new UpdateError('the releases API returned an unexpected shape');
+  if (j.draft === true || j.prerelease === true) throw new UpdateError('the latest release is a draft or prerelease; ignoring it');
+  const tag = typeof j.tag_name === 'string' ? j.tag_name.replace(/^v/, '') : '';
+  if (!isSemver(tag)) throw new UpdateError('the latest release has no valid version tag');
+  const assets: Record<string, ReleaseAsset> = {};
+  const list = Array.isArray(j.assets) ? j.assets : [];
+  if (list.length > MAX_ASSETS) throw new UpdateError('the latest release lists too many assets');
+  for (const a of list) {
+    if (!a || typeof a.name !== 'string' || typeof a.browser_download_url !== 'string') continue;
+    if (!/^[A-Za-z0-9._-]{1,100}$/.test(a.name)) continue;
+    assets[a.name] = { name: a.name, url: a.browser_download_url, size: typeof a.size === 'number' ? a.size : undefined };
+  }
+  return { version: tag, notes: releaseNotes(j.body), headline: releaseHeadline(j.body), assets };
+}
+
+export async function fetchRelease(api: string = releasesApi()): Promise<Release> {
+  const buf = await httpGet(api, {
+    maxBytes: RELEASE_MAX_BYTES,
+    timeoutMs: MANIFEST_TIMEOUT_MS,
+    headers: { accept: 'application/vnd.github+json' },
+  });
+  return parseRelease(buf);
+}
+
+// SHA256SUMS.txt: standard `<64 hex>  <name>` lines (`sha256sum` / `shasum -a 256`
+// output; a `*` before the name marks binary mode). Conflicting duplicates abort.
+export function parseSums(text: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^([0-9a-fA-F]{64}) [ *]?(\S+)$/.exec(line.trim());
+    if (!m) continue;
+    const name = m[2], hash = m[1].toLowerCase();
+    if (out.has(name) && out.get(name) !== hash) throw new UpdateError(`SHA256SUMS.txt lists ${name} twice with different hashes`);
+    out.set(name, hash);
+  }
+  return out;
+}
+
+// ---------- install source (release vs git clone) ----------
+
+export type InstallSource = 'release' | 'clone';
+export interface InstallRecord { source: InstallSource; version: string }
+
+function installRecordPath() { return join(gripHome(), 'install.json'); }
+
+// 'clone' when `dir` sits inside a git work tree (a `.git` dir or file, as in
+// worktrees, anywhere above it). Otherwise 'release' (an extracted grip-install.zip).
+export function detectInstallSource(dir: string): InstallSource {
+  let d = resolve(dir);
+  for (;;) {
+    if (existsSync(join(d, '.git'))) return 'clone';
+    const up = dirname(d);
+    if (up === d) return 'release';
+    d = up;
+  }
+}
+
+export function writeInstallRecord(source: InstallSource, version: string): void {
+  mkdirSync(gripHome(), { recursive: true });
+  atomicWrite(installRecordPath(), Buffer.from(JSON.stringify({ source, version }, null, 2) + '\n'));
+}
+
+// A missing or unreadable record (an install from before 0.8) counts as 'release'.
+export function readInstallRecord(): InstallRecord {
+  try {
+    const j = JSON.parse(readFileSync(installRecordPath(), 'utf8'));
+    return { source: j?.source === 'clone' ? 'clone' : 'release', version: typeof j?.version === 'string' ? j.version : '' };
+  } catch { return { source: 'release', version: '' }; }
+}
+
+export const CLONE_NEXT_STEPS = ['git pull', 'node bridge/install.mjs'];
 
 // ---------- check + state ----------
 
@@ -257,6 +343,8 @@ export interface UpdateState {
   latest: string | null;
   available: boolean;
   checkedAt: string | null;   // ISO timestamp of the last SUCCESSFUL check
+  headline?: string | null;   // one-line summary of the latest release (from its notes)
+  notes?: string | null;      // first ~1200 chars of the latest release's notes
   error?: string;             // set when the latest attempt failed (state is carried over)
 }
 
@@ -287,7 +375,10 @@ function writeCache(s: UpdateState) {
   // from a git clone, without the installer, shouldn't sprout the directory).
   try {
     if (!existsSync(gripHome())) return;
-    writeFileSync(cachePath(), JSON.stringify({ current: s.current, latest: s.latest, available: s.available, checkedAt: s.checkedAt }, null, 2));
+    writeFileSync(cachePath(), JSON.stringify({
+      current: s.current, latest: s.latest, available: s.available, checkedAt: s.checkedAt,
+      headline: s.headline ?? null, notes: s.notes ?? null,
+    }, null, 2));
   } catch { /* cache is best-effort */ }
 }
 
@@ -302,6 +393,8 @@ export function readCache(): UpdateState | null {
       latest: j.latest,
       available: compareSemver(j.latest, BRIDGE_VERSION) > 0,
       checkedAt: typeof j.checkedAt === 'string' ? j.checkedAt : null,
+      headline: typeof j.headline === 'string' ? j.headline : null,
+      notes: typeof j.notes === 'string' ? j.notes : null,
     };
   } catch { return null; }
 }
@@ -309,14 +402,16 @@ export function readCache(): UpdateState | null {
 // One network check. Never throws: on any failure it logs one stderr line and
 // returns the previous state (plus `error`). Does NOT consult
 // GRIP_NO_UPDATE_CHECK — callers decide whether a check is allowed.
-export async function checkForUpdate(base: string = updateBase()): Promise<UpdateState> {
+export async function checkForUpdate(api: string = releasesApi()): Promise<UpdateState> {
   try {
-    const m = await fetchManifest(base);
+    const r = await fetchRelease(api);
     const next: UpdateState = {
       current: BRIDGE_VERSION,
-      latest: m.version,
-      available: compareSemver(m.version, BRIDGE_VERSION) > 0,
+      latest: r.version,
+      available: compareSemver(r.version, BRIDGE_VERSION) > 0,
       checkedAt: new Date().toISOString(),
+      headline: r.headline || null,
+      notes: r.notes || null,
     };
     setState(next);
     writeCache(next);
@@ -330,6 +425,8 @@ export async function checkForUpdate(base: string = updateBase()): Promise<Updat
       latest: state?.latest ?? null,
       available: state?.available ?? false,
       checkedAt: state?.checkedAt ?? null,
+      headline: state?.headline ?? null,
+      notes: state?.notes ?? null,
       error: msg,
     };
   }
@@ -355,24 +452,29 @@ export function startUpdateChecks(o: { delayMs?: number; intervalMs?: number } =
 
 // ---------- notices ----------
 
+// The headline is remote text: quoted, one line, length-capped (see releaseHeadline).
+function headlineClause(s: UpdateState): string {
+  return s.headline ? ` What's new, per the release notes: "${s.headline}".` : '';
+}
 export function updateNoticeText(s: UpdateState): string {
-  return `Grip update available: ${s.current} → ${s.latest}. Tell the user and ask whether they want to update. ` +
+  return `Grip update available: ${s.current} → ${s.latest}.${headlineClause(s)} Tell the user and ask whether they want to update. ` +
     `Do NOT install it on your own: only if the user explicitly says yes, call grip_update {action:'install'}.`;
 }
 export function updateInstructionsParagraph(s: UpdateState): string {
-  return `\n\nA Grip update is available (${s.current} → ${s.latest}). Mention it to the user once, at a natural moment, ` +
+  return `\n\nA Grip update is available (${s.current} → ${s.latest}).${headlineClause(s)} Mention it to the user once, at a natural moment, ` +
     `and ask if they want it. Never install without their explicit yes; if they agree, call grip_update {action:'install'}.`;
 }
 
 // ---------- install ----------
 
 export interface InstallResult {
-  status: 'updated' | 'up_to_date' | 'already_installing';
+  status: 'updated' | 'up_to_date' | 'already_installing' | 'clone_install';
   from?: string;
   to?: string;
   home?: string;
   pluginFilesWritten?: string[];
   restart?: 'scheduled' | 'not_managed' | 'none';
+  next?: string[];            // clone_install: the commands to run instead
 }
 
 let installing = false;
@@ -392,19 +494,28 @@ function sha256(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex');
 }
 
-async function downloadVerified(base: string, label: string, f: ManifestFile): Promise<Buffer> {
-  const cap = FILE_MAX_BYTES;
-  let buf: Buffer;
+async function downloadAsset(rel: Release, name: string, cap: number): Promise<Buffer> {
+  const a = rel.assets[name];
+  if (!a) {
+    throw new UpdateError(`release ${rel.version} has no ${name} asset yet. It may still be uploading; nothing was changed, retry in a few minutes.`);
+  }
   try {
-    buf = await httpGet(new URL(f.path, base).toString(), { maxBytes: cap, timeoutMs: DOWNLOAD_TIMEOUT_MS });
+    return await httpGet(a.url, { maxBytes: cap, timeoutMs: DOWNLOAD_TIMEOUT_MS });
   } catch (err) {
-    throw new UpdateError(`could not download ${label}: ${(err as Error).message}. Nothing was changed; try again in a few minutes.`);
+    throw new UpdateError(`could not download ${name}: ${(err as Error).message}. Nothing was changed; try again in a few minutes.`);
   }
-  if (f.bytes !== undefined && f.bytes !== buf.length) {
-    throw new UpdateError(`${label} size mismatch (manifest ${f.bytes}, got ${buf.length}). The CDN may be serving an older copy; nothing was changed, retry in a few minutes.`);
+}
+
+async function downloadVerified(rel: Release, name: string, sums: Map<string, string>): Promise<Buffer> {
+  const want = sums.get(name);
+  if (!want) throw new UpdateError(`${ASSET_SUMS} does not list ${name}; refusing to install. Nothing was changed.`);
+  const buf = await downloadAsset(rel, name, FILE_MAX_BYTES);
+  const size = rel.assets[name].size;
+  if (size !== undefined && size !== buf.length) {
+    throw new UpdateError(`${name} size mismatch (release says ${size}, got ${buf.length}); nothing was changed, retry in a few minutes.`);
   }
-  if (sha256(buf) !== f.sha256) {
-    throw new UpdateError(`${label} failed its sha256 check against version.json. The CDN may be lagging behind the release; nothing was changed, retry in a few minutes.`);
+  if (sha256(buf) !== want) {
+    throw new UpdateError(`${name} failed its sha256 check against ${ASSET_SUMS}. Nothing was changed; retry in a few minutes, and if it keeps failing do not install and report it.`);
   }
   return buf;
 }
@@ -413,24 +524,34 @@ async function downloadVerified(base: string, label: string, f: ManifestFile): P
 // the CLI. Everything is downloaded AND verified in memory before the first
 // byte is written, so a failure at any point leaves ~/.grip untouched.
 // Does not restart anything — see installAndScheduleRestart().
-export async function installUpdate(o: { base?: string } = {}): Promise<InstallResult> {
+// `force` is for the CLI only: it overwrites a clone install's ~/.grip copy.
+export async function installUpdate(o: { api?: string; force?: boolean } = {}): Promise<InstallResult> {
   if (installing) return { status: 'already_installing' };
   installing = true;
   try {
-    const base = o.base ?? updateBase();
-    const manifest = await fetchManifest(base).catch((err: Error) => {
-      throw new UpdateError(`could not read the release manifest: ${err.message}`);
+    const api = o.api ?? releasesApi();
+    const rel = await fetchRelease(api).catch((err: Error) => {
+      throw new UpdateError(`could not read the latest release: ${err.message}`);
     });
     // Keep the shared state honest even though this wasn't a scheduled check.
-    const available = compareSemver(manifest.version, BRIDGE_VERSION) > 0;
-    setState({ current: BRIDGE_VERSION, latest: manifest.version, available, checkedAt: new Date().toISOString() });
-    if (!available) return { status: 'up_to_date', from: BRIDGE_VERSION, to: manifest.version };
+    const available = compareSemver(rel.version, BRIDGE_VERSION) > 0;
+    setState({
+      current: BRIDGE_VERSION, latest: rel.version, available, checkedAt: new Date().toISOString(),
+      headline: rel.headline || null, notes: rel.notes || null,
+    });
+    if (!available) return { status: 'up_to_date', from: BRIDGE_VERSION, to: rel.version };
+
+    // Never update a developer install over the top of its clone: git pull does that.
+    if (!o.force && readInstallRecord().source === 'clone') {
+      return { status: 'clone_install', from: BRIDGE_VERSION, to: rel.version, next: CLONE_NEXT_STEPS };
+    }
 
     // 1. download + verify everything first
-    const bridgeBuf = await downloadVerified(base, 'the bridge', manifest.bridge);
+    const sums = parseSums((await downloadAsset(rel, ASSET_SUMS, SUMS_MAX_BYTES)).toString('utf8'));
+    const bridgeBuf = await downloadVerified(rel, ASSET_BRIDGE, sums);
     const pluginBufs: Array<[string, Buffer]> = [];
-    for (const [name, f] of Object.entries(manifest.plugin.files)) {
-      pluginBufs.push([name, await downloadVerified(base, `plugin file ${name}`, f)]);
+    for (const [assetName, localName] of Object.entries(PLUGIN_ASSETS)) {
+      pluginBufs.push([localName, await downloadVerified(rel, assetName, sums)]);
     }
 
     // 2. write (atomic per file), only inside ~/.grip
@@ -457,9 +578,10 @@ export async function installUpdate(o: { base?: string } = {}): Promise<InstallR
     // The bridge goes last: replacing it is the commit point of the update.
     atomicWrite(entry, bridgeBuf, 0o755);
     try { chmodSync(entry, 0o755); } catch { /* non-fatal on Windows */ }
+    try { writeInstallRecord('release', rel.version); } catch { /* the record is advisory */ }
 
-    logErr(`update: installed ${BRIDGE_VERSION} -> ${manifest.version} into ${home}`);
-    return { status: 'updated', from: BRIDGE_VERSION, to: manifest.version, home, pluginFilesWritten: written };
+    logErr(`update: installed ${BRIDGE_VERSION} -> ${rel.version} into ${home}`);
+    return { status: 'updated', from: BRIDGE_VERSION, to: rel.version, home, pluginFilesWritten: written };
   } finally {
     installing = false;
   }
@@ -499,8 +621,8 @@ export function isManagedInstall(): boolean {
 
 // install, then (daemon only) schedule the restart ~1s out so the tool/WS
 // response has flushed. The new process comes from ~/.grip/grip-bridge.mjs.
-export async function installAndScheduleRestart(): Promise<InstallResult> {
-  const r = await installUpdate();
+export async function installAndScheduleRestart(o: { force?: boolean } = {}): Promise<InstallResult> {
+  const r = await installUpdate({ force: o.force });
   if (r.status !== 'updated') return r;
   if (!restartHook) return { ...r, restart: 'none' };
   if (!restartManaged) {
@@ -556,19 +678,19 @@ export function stopRunningDaemon(): { stopped: boolean; note: string } {
 // ---------- plugin strip wiring ----------
 
 // Connect update state to the Figma plugin strip: the bridge pushes
-// {type:'update', available, latest} to every plugin (on hello and on change),
+// {type:'update', available, latest, headline?} to every plugin (on hello and on change),
 // and a plugin's {type:'update_request'} (the user's second click on the
 // indicator) runs the same install routine as the grip_update tool. The
 // outcome goes back as {type:'update_result', status, from?, to?, message?}.
 export function wireUpdateToBridge(bridge: PluginBridge): () => void {
-  const push = (s: UpdateState | null) => bridge.setUpdateState(s ? { available: s.available, latest: s.latest } : null);
+  const push = (s: UpdateState | null) => bridge.setUpdateState(s ? { available: s.available, latest: s.latest, headline: s.headline ?? null } : null);
   push(getUpdateState());
   const off = onUpdateState(push);
   const onRequest = async (e: { sessionId: string }) => {
     let msg: Record<string, unknown>;
     try {
       const r = await installAndScheduleRestart();
-      msg = { type: 'update_result', status: r.status, from: r.from, to: r.to, restart: r.restart };
+      msg = { type: 'update_result', status: r.status, from: r.from, to: r.to, restart: r.restart, next: r.next };
     } catch (err) {
       msg = { type: 'update_result', status: 'error', message: (err as Error).message };
     }

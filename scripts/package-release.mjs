@@ -1,0 +1,237 @@
+#!/usr/bin/env node
+// Packages the committed build artifacts into the GitHub Release assets.
+//
+//   node scripts/package-release.mjs [--out dist] [--root <repo>] [--print-version]
+//
+// Inputs (all committed; CI proves they equal a clean rebuild before this runs):
+//   bridge/grip-bridge.mjs  bridge/install.mjs  figma-plugin/{manifest.json,code.js,ui.html}
+// Outputs, into --out (default ./dist):
+//   grip-bridge.mjs  install.mjs                        the bridge + installer, as-is
+//   grip-plugin-code.js  grip-plugin-ui.html  grip-plugin-manifest.json
+//                                                       plain copies of figma-plugin/*, which the
+//                                                       in-place updater downloads one by one
+//                                                       (Node has no built-in unzip)
+//   grip-install.zip                                    grip/bridge/{grip-bridge.mjs,install.mjs}
+//                                                       + grip/figma-plugin/{manifest.json,code.js,ui.html};
+//                                                       what the README install steps and manual users use
+//   SHA256SUMS.txt                                      `<sha256>  <name>` for every asset above
+//
+// No dependencies, no `zip` binary: the zip is written by a ~40-line writer below,
+// byte-for-byte deterministic (fixed timestamps, sorted entries, fixed permissions).
+// Asset names are shared with scripts/release-gate.mjs (REQUIRED_ASSETS) and
+// src/bridge/src/update.ts; scripts/package-release.test.mjs keeps them in step.
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { deflateRawSync } from 'node:zlib';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+export class PackageError extends Error {}
+
+const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
+
+// ---------- versions ----------
+
+function matchOrThrow(text, re, what) {
+  const m = re.exec(text);
+  if (!m) throw new PackageError(`could not find ${what}`);
+  return m[1];
+}
+
+export function readBridgeVersion(root) {
+  return matchOrThrow(
+    readFileSync(join(root, 'src', 'bridge', 'src', 'types.ts'), 'utf8'),
+    /export const BRIDGE_VERSION = '([^']+)'/,
+    'BRIDGE_VERSION in src/bridge/src/types.ts',
+  );
+}
+
+// The four places a release version lives. All must agree, or the release is wrong.
+export function readLockstepVersions(root) {
+  return {
+    'src/bridge/src/types.ts (BRIDGE_VERSION)': readBridgeVersion(root),
+    'src/bridge/package.json': JSON.parse(readFileSync(join(root, 'src', 'bridge', 'package.json'), 'utf8')).version,
+    'src/plugin/package.json': JSON.parse(readFileSync(join(root, 'src', 'plugin', 'package.json'), 'utf8')).version,
+    'src/plugin/code.ts (PLUGIN_VERSION)': matchOrThrow(
+      readFileSync(join(root, 'src', 'plugin', 'code.ts'), 'utf8'),
+      /const PLUGIN_VERSION = '([^']+)'/,
+      'PLUGIN_VERSION in src/plugin/code.ts',
+    ),
+  };
+}
+
+export function checkLockstep(root) {
+  const v = readLockstepVersions(root);
+  const distinct = new Set(Object.values(v));
+  if (distinct.size !== 1) {
+    const lines = Object.entries(v).map(([k, x]) => `  ${k}: ${x}`).join('\n');
+    throw new PackageError(`version mismatch, bump all four places together:\n${lines}`);
+  }
+  return [...distinct][0];
+}
+
+// ---------- zip writer (deterministic, deflate, unix modes) ----------
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+export function crc32(buf) {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+const DOS_TIME = 0;
+const DOS_DATE = (0 << 9) | (1 << 5) | 1;   // 1980-01-01, the zip epoch: no build-time stamp
+
+// entries: [{ name, data: Buffer, mode?: 0o644 | 0o755 }]. Order is sorted by name.
+export function buildZip(entries) {
+  const sorted = [...entries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  for (const e of sorted) {
+    if (!/^[A-Za-z0-9._\-/]+$/.test(e.name) || e.name.startsWith('/') || e.name.includes('..')) {
+      throw new PackageError(`unsafe zip entry name: ${e.name}`);
+    }
+    const name = Buffer.from(e.name, 'utf8');
+    const crc = crc32(e.data);
+    const comp = deflateRawSync(e.data, { level: 9 });
+    const mode = 0o100000 | (e.mode ?? 0o644);
+
+    const lh = Buffer.alloc(30);
+    lh.writeUInt32LE(0x04034b50, 0);
+    lh.writeUInt16LE(20, 4);            // version needed
+    lh.writeUInt16LE(0, 6);             // flags
+    lh.writeUInt16LE(8, 8);             // deflate
+    lh.writeUInt16LE(DOS_TIME, 10);
+    lh.writeUInt16LE(DOS_DATE, 12);
+    lh.writeUInt32LE(crc, 14);
+    lh.writeUInt32LE(comp.length, 18);
+    lh.writeUInt32LE(e.data.length, 22);
+    lh.writeUInt16LE(name.length, 26);
+    lh.writeUInt16LE(0, 28);
+    locals.push(lh, name, comp);
+
+    const ch = Buffer.alloc(46);
+    ch.writeUInt32LE(0x02014b50, 0);
+    ch.writeUInt16LE((3 << 8) | 20, 4);  // made by: unix, spec 2.0
+    ch.writeUInt16LE(20, 6);
+    ch.writeUInt16LE(0, 8);
+    ch.writeUInt16LE(8, 10);
+    ch.writeUInt16LE(DOS_TIME, 12);
+    ch.writeUInt16LE(DOS_DATE, 14);
+    ch.writeUInt32LE(crc, 16);
+    ch.writeUInt32LE(comp.length, 20);
+    ch.writeUInt32LE(e.data.length, 24);
+    ch.writeUInt16LE(name.length, 28);
+    ch.writeUInt16LE(0, 30);             // extra
+    ch.writeUInt16LE(0, 32);             // comment
+    ch.writeUInt16LE(0, 34);             // disk
+    ch.writeUInt16LE(0, 36);             // internal attrs
+    ch.writeUInt32LE((mode << 16) >>> 0, 38);
+    ch.writeUInt32LE(offset, 42);
+    centrals.push(ch, name);
+
+    offset += lh.length + name.length + comp.length;
+  }
+  const cd = Buffer.concat(centrals);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(sorted.length, 8);
+  eocd.writeUInt16LE(sorted.length, 10);
+  eocd.writeUInt32LE(cd.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, cd, eocd]);
+}
+
+// ---------- packaging ----------
+
+export const SOURCES = {
+  bridge: ['bridge', 'grip-bridge.mjs'],
+  installer: ['bridge', 'install.mjs'],
+  pluginManifest: ['figma-plugin', 'manifest.json'],
+  pluginCode: ['figma-plugin', 'code.js'],
+  pluginUi: ['figma-plugin', 'ui.html'],
+};
+
+export function packageRelease({ root, out }) {
+  root = resolve(root);
+  out = resolve(out);
+  if (out === root) throw new PackageError('--out must not be the repo root');
+  const version = checkLockstep(root);
+  const src = {};
+  for (const [k, parts] of Object.entries(SOURCES)) {
+    try { src[k] = readFileSync(join(root, ...parts)); }
+    catch { throw new PackageError(`missing ${parts.join('/')}; run \`npm run build\` first`); }
+  }
+  // The committed bundles must be built from this version (a stale bundle would
+  // ship an old bridge under a new tag).
+  for (const [label, buf] of [['bridge/grip-bridge.mjs', src.bridge], ['bridge/install.mjs', src.installer], ['figma-plugin/code.js', src.pluginCode]]) {
+    const t = buf.toString('utf8');
+    if (!t.includes(`'${version}'`) && !t.includes(`"${version}"`)) {
+      throw new PackageError(`${label} does not contain version ${version}; run \`npm run build\` and commit the result`);
+    }
+  }
+
+  const zip = buildZip([
+    { name: 'grip/bridge/grip-bridge.mjs', data: src.bridge, mode: 0o755 },
+    { name: 'grip/bridge/install.mjs', data: src.installer, mode: 0o755 },
+    { name: 'grip/figma-plugin/manifest.json', data: src.pluginManifest },
+    { name: 'grip/figma-plugin/code.js', data: src.pluginCode },
+    { name: 'grip/figma-plugin/ui.html', data: src.pluginUi },
+  ]);
+
+  const assets = {
+    'grip-bridge.mjs': src.bridge,
+    'install.mjs': src.installer,
+    'grip-plugin-code.js': src.pluginCode,
+    'grip-plugin-ui.html': src.pluginUi,
+    'grip-plugin-manifest.json': src.pluginManifest,
+    'grip-install.zip': zip,
+  };
+  const sums = Object.keys(assets).sort()
+    .map((n) => `${sha256(assets[n])}  ${n}\n`).join('');
+
+  mkdirSync(out, { recursive: true });
+  for (const [name, buf] of Object.entries(assets)) writeFileSync(join(out, name), buf);
+  writeFileSync(join(out, 'SHA256SUMS.txt'), sums);
+  return { version, files: [...Object.keys(assets), 'SHA256SUMS.txt'], out };
+}
+
+function parseArgs(argv) {
+  const o = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--print-version') o.printVersion = true;
+    else if (a === '--out' || a === '--root') {
+      if (argv[i + 1] === undefined) throw new PackageError(`${a} needs a value`);
+      o[a.slice(2)] = argv[++i];
+    } else throw new PackageError(`unknown argument ${a}`);
+  }
+  return o;
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    const o = parseArgs(process.argv.slice(2));
+    const root = o.root ?? join(dirname(fileURLToPath(import.meta.url)), '..');
+    if (o.printVersion) {
+      console.log(checkLockstep(root));
+    } else {
+      const r = packageRelease({ root, out: o.out ?? join(root, 'dist') });
+      console.log(`package-release: v${r.version} -> ${r.out}`);
+      for (const f of r.files) console.log(`  ${f}`);
+    }
+  } catch (e) {
+    console.error('package-release: ' + e.message);
+    process.exit(1);
+  }
+}

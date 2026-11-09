@@ -157,6 +157,8 @@
       // ---- update indicator ----
       const updEl = document.getElementById('upd');
       let updLatest = null;       // newest version the bridge announced (null = none)
+      let updHeadline = '';       // one-line release summary the bridge sent along (may be empty)
+      let updClone = false;       // the bridge said: developer (clone) install, update with the clone
       let updPhase = 'idle';      // idle | confirm | updating | failed
       let updTimer = null;
 
@@ -173,17 +175,20 @@
         updEl.textContent =
           updPhase === 'confirm' ? 'click to confirm' :
           updPhase === 'updating' ? 'updating\u2026' :
-          updPhase === 'failed' ? 'update failed' : '\u2191 update';
+          updPhase === 'failed' ? (updClone ? 'use the clone' : 'update failed') : '\u2191 update';
         updEl.title =
           updPhase === 'confirm' ? 'Click again within 5s to download and install Grip ' + (updLatest || '') :
           updPhase === 'updating' ? 'Installing, the bridge will restart in a moment' :
-          updPhase === 'failed' ? 'The update did not install; ask your agent for details (grip_update) or run: node ~/.grip/grip-bridge.mjs update' :
-          'Grip ' + (updLatest || 'update') + ' is available. Click, then confirm, to install it.';
+          updPhase === 'failed' ? (updClone
+            ? 'This Grip runs from a git clone (a developer install), so it is not updated in place. In the clone, run: git pull && node bridge/install.mjs'
+            : 'The update did not install; ask your agent for details (grip_update) or run: node ~/.grip/grip-bridge.mjs update') :
+          'Grip ' + (updLatest || 'update') + ' is available' + (updHeadline ? ': ' + updHeadline : '.') + ' Click, then confirm, to install it.';
       }
 
       function onUpdateNotice(msg) {
         if (updPhase === 'updating') return;
         updLatest = msg.available ? (msg.latest || 'new') : null;
+        updHeadline = msg.available && typeof msg.headline === 'string' ? msg.headline : '';
         if (!updLatest) updPhase = 'idle';
         renderUpd();
       }
@@ -197,6 +202,7 @@
         } else if (msg.status === 'up_to_date') {
           updPhase = 'idle'; updLatest = null;
         } else {
+          updClone = msg.status === 'clone_install';
           updPhase = 'failed';
           setUpdTimer(() => { updPhase = 'idle'; renderUpd(); }, 5000);
         }

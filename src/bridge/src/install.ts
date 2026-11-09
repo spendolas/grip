@@ -20,7 +20,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSy
 import { homedir, platform, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gripHome, stopRunningDaemon } from './update.js';
+import { detectInstallSource, gripHome, stopRunningDaemon, writeInstallRecord } from './update.js';
 import { BRIDGE_VERSION } from './types.js';
 
 const args = new Set(process.argv.slice(2));
@@ -39,6 +39,11 @@ const SOURCE_BRIDGE = join(HERE, 'grip-bridge.mjs');
 const GRIP_HOME = gripHome();
 const SOURCE_PLUGIN = [join(HERE, '..', 'figma-plugin'), join(HERE, 'figma-plugin')]
   .find((d) => existsSync(join(d, 'manifest.json')));
+// 'clone' when this installer sits inside a work tree of the repo (a developer
+// install: updates are `git pull`, and the updater never overwrites it);
+// 'release' when it runs from an extracted grip-install.zip. Recorded in
+// ~/.grip/install.json.
+const INSTALL_TYPE = detectInstallSource(HERE);
 const PLUGIN_DIR = join(GRIP_HOME, 'figma-plugin');
 const ENTRY = join(GRIP_HOME, 'grip-bridge.mjs');
 const HTTP_URL = 'http://127.0.0.1:7778/mcp';
@@ -65,6 +70,10 @@ function installBridge() {
   try { chmodSync(ENTRY, 0o755); } catch { /* non-fatal on Windows */ }
   const kb = Math.round(readFileSync(ENTRY).length / 1024);
   ok(`single file installed (${kb} KB, no dependencies)`);
+  try {
+    writeInstallRecord(INSTALL_TYPE, BRIDGE_VERSION);
+    ok(`install type: ${INSTALL_TYPE === 'clone' ? 'developer clone (update with git pull)' : 'release'}`);
+  } catch { warn('could not write install.json; updates will treat this as a release install'); }
 }
 
 // Copy the plugin next to the bridge. Import THAT copy in Figma and later
@@ -278,8 +287,13 @@ if (pluginInstalled) {
 log('  3. Run the plugin. Ask your agent to read your selection —');
 log('     the strip turns \x1b[32mgreen\x1b[0m.');
 log();
-log('Updating later: ask your agent to "update Grip", click the ↑ update label in the');
-log(`plugin strip when it appears, or run: node ${ENTRY} update`);
+if (INSTALL_TYPE === 'clone') {
+  log('Updating later: this is a developer install. Run `git pull && node bridge/install.mjs`');
+  log('in your clone (the in-place updater never overwrites a clone install).');
+} else {
+  log('Updating later: ask your agent to "update Grip", click the ↑ update label in the');
+  log(`plugin strip when it appears, or run: node ${ENTRY} update`);
+}
 log();
 if (!wantHttp) log('  (on-demand: nothing stays running; the first call starts it.)');
 log(`Logs: ~/.grip-bridge.log   Status: ~/.grip-bridge.status`);

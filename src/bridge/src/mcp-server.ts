@@ -323,9 +323,12 @@ export function createSession(bridge: PluginBridge): LiveSession {
         const s = await checkForUpdate();
         return okResult({
           ...updateSummary(s),
+          // What's new, from the release notes (first ~1200 chars). Relay it to the user.
+          headline: s.headline ?? null,
+          notes: s.notes ?? null,
           ...(s.error ? { error: s.error } : {}),
           note: s.available
-            ? `Update available. Tell the user and ask if they want it; only if they say yes, call grip_update {action:'install'}.`
+            ? `Update available. Tell the user what's new (headline/notes) and ask if they want it; only if they say yes, call grip_update {action:'install'}.`
             : s.error ? 'Could not reach the update server; nothing changed.' : 'Grip is up to date.',
         });
       }
@@ -333,6 +336,15 @@ export function createSession(bridge: PluginBridge): LiveSession {
         const r = await installAndScheduleRestart();
         if (r.status === 'up_to_date') return okResult({ status: 'up_to_date', current: BRIDGE_VERSION, latest: r.to });
         if (r.status === 'already_installing') return okResult({ status: 'already_installing', note: 'An update is already being installed; wait a few seconds.' });
+        if (r.status === 'clone_install') {
+          return okResult({
+            status: 'clone_install',
+            from: r.from,
+            to: r.to,
+            next: r.next,
+            note: 'This is a developer install (Grip runs from a git clone), so nothing was changed: updating would overwrite it. Tell the user to run the commands in next[] inside their Grip clone.',
+          });
+        }
         return okResult({
           status: 'updated',
           from: r.from,

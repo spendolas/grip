@@ -1,0 +1,246 @@
+name: Release
+
+# Publishes a GitHub Release (7 assets, notes from CHANGELOG.md) when a push to
+# main touches the version, the changelog or the committed build artifacts.
+# scripts/release-gate.mjs decides create / recover / skip, so a push that does
+# not bump the version is a no-op for publishing (the build checks still run).
+# Manual runs default to a dry run that only uploads a workflow artifact named
+# grip-release.
+#
+# Jobs: build (rebuild + reproducibility check, tests, gate, package, smoke) ->
+# publish (only on create / recover; the only job with contents: write).
+#
+# To release: bump the version in the four lockstep places, add a
+# "## <version>" section to CHANGELOG.md, run `npm run build`, commit the
+# regenerated bridge/ and figma-plugin/ files, push to main. This workflow does
+# the rest. Never create the tag or the release by hand.
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/bridge/src/types.ts
+      - CHANGELOG.md
+      - 'bridge/**'
+      - 'figma-plugin/**'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: build and upload the artifact only, never publish'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      action: ${{ steps.gate.outputs.action }}
+      version: ${{ steps.version.outputs.version }}
+      # 'true' when the assets were built (create / recover, or any dry run).
+      built: ${{ steps.package.outputs.built }}
+    env:
+      # 'true' only for a manual run with dry_run checked; 'false' on push.
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0   # tags are needed by the gate
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Also fails here if the four version places disagree.
+      - name: Read version
+        id: version
+        run: |
+          set -euo pipefail
+          V="$(node scripts/package-release.mjs --print-version)"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "V=$V" >> "$GITHUB_ENV"
+
+      # A read-only token cannot see drafts; the publish job re-checks with a
+      # write token before it touches anything.
+      - name: Collect release state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git tag -l 'v*' > tags.txt
+          if gh release view "v$V" --json isDraft,assets > release.json 2> gh-err.txt; then
+            echo "Release v$V exists."
+          elif grep -qi 'release not found' gh-err.txt; then
+            echo 'null' > release.json
+          else
+            cat gh-err.txt
+            exit 1
+          fi
+
+      # Fails (before anything is built) when a release is due but CHANGELOG.md
+      # has no "## <version>" section: a release without notes must not publish.
+      - name: Release gate
+        id: gate
+        run: node scripts/release-gate.mjs --version "$V" --tags-file tags.txt --release-file release.json --changelog CHANGELOG.md --notes-out notes.md
+
+      - name: Install dependencies
+        run: npm run setup
+
+      # The committed bundles ARE the release. A clean rebuild from source must
+      # reproduce them byte for byte, otherwise someone changed source without
+      # running `npm run build` (or built with a different toolchain).
+      - name: Rebuild and verify the committed bundles
+        run: |
+          set -euo pipefail
+          npm run build
+          if ! git diff --exit-code -- bridge figma-plugin; then
+            echo "::error::The committed bridge/ and figma-plugin/ files differ from a clean rebuild. Run 'npm run build' and commit the result."
+            exit 1
+          fi
+
+      - name: Tests
+        run: npm test
+
+      - name: Package
+        id: package
+        if: steps.gate.outputs.action != 'skip' || env.DRY_RUN == 'true'
+        run: |
+          set -euo pipefail
+          node scripts/package-release.mjs --out dist
+          (cd dist && sha256sum -c SHA256SUMS.txt)
+          unzip -tq dist/grip-install.zip
+          echo "built=true" >> "$GITHUB_OUTPUT"
+
+      # What a user does: extract the zip, run the installer. Home and GRIP_HOME
+      # are scratch directories; there is no `claude` CLI on the runner, so the
+      # installer takes its config-file path.
+      - name: Smoke test the packaged install
+        if: steps.package.outputs.built == 'true'
+        run: |
+          set -euo pipefail
+          S="$RUNNER_TEMP/smoke"
+          rm -rf "$S"; mkdir -p "$S/extract" "$S/home"
+          unzip -q dist/grip-install.zip -d "$S/extract"
+          HOME="$S/home" GRIP_HOME="$S/home/.grip" GRIP_STATUS_PATH="$S/status.json" node "$S/extract/grip/bridge/install.mjs"
+          test -f "$S/home/.grip/grip-bridge.mjs"
+          test -f "$S/home/.grip/figma-plugin/manifest.json"
+          node -e "const j=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')); if(j.source!=='release'||j.version!==process.argv[2]) { console.error('bad install.json', j); process.exit(1); }" "$S/home/.grip/install.json" "$V"
+          cmp "$S/home/.grip/grip-bridge.mjs" dist/grip-bridge.mjs
+
+      - name: Upload release artifact
+        if: steps.package.outputs.built == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: grip-release
+          path: |
+            dist/
+            notes.md
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+
+  publish:
+    needs: build
+    if: >-
+      github.ref == 'refs/heads/main'
+      && (github.event_name == 'push' || inputs.dry_run == false)
+      && (needs.build.outputs.action == 'create' || needs.build.outputs.action == 'recover')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      V: ${{ needs.build.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: grip-release
+          path: artifact
+
+      # The write token sees drafts, so a draft left by an earlier failed run is
+      # recovered here instead of duplicated.
+      - name: Re-check release state with the write token
+        run: |
+          set -euo pipefail
+          git tag -l 'v*' > tags.txt
+          if gh release view "v$V" --json isDraft,assets > release.json 2> gh-err.txt; then
+            echo "Release v$V exists."
+          elif grep -qi 'release not found' gh-err.txt; then
+            echo 'null' > release.json
+          else
+            cat gh-err.txt
+            exit 1
+          fi
+
+      - name: Release gate
+        id: gate
+        run: node scripts/release-gate.mjs --version "$V" --tags-file tags.txt --release-file release.json --changelog CHANGELOG.md --notes-out notes.md
+
+      - name: Publish
+        env:
+          ACTION: ${{ steps.gate.outputs.action }}
+        run: |
+          set -euo pipefail
+          ls -l artifact/dist
+          # The installer and the in-place updater download these by exact name;
+          # a release missing any of them would break installs or updates.
+          ASSETS="grip-bridge.mjs install.mjs grip-plugin-code.js grip-plugin-ui.html grip-plugin-manifest.json grip-install.zip"
+          for asset in $ASSETS SHA256SUMS.txt; do
+            if [ ! -f "artifact/dist/$asset" ]; then
+              echo "Required release asset missing from the build artifact: $asset"
+              exit 1
+            fi
+          done
+          PRE=""
+          case "$V" in *-*) PRE="--prerelease" ;; esac
+          if [ "$ACTION" = "create" ]; then
+            # A draft is invisible to releases/latest and creates no tag, so
+            # users never see a release with assets still uploading. The notes
+            # are the CHANGELOG.md section for this version, extracted by the gate.
+            gh release create "v$V" --draft --target "$GITHUB_SHA" --title "v$V" --notes-file notes.md $PRE artifact/dist/*
+            gh release edit "v$V" --draft=false
+          elif [ "$ACTION" = "recover" ]; then
+            if [ "$(jq -r '.isDraft' release.json)" = "true" ]; then
+              # Nothing public yet: replace whatever a failed run left behind.
+              gh release upload "v$V" artifact/dist/* --clobber
+              gh release edit "v$V" --notes-file notes.md
+              gh release edit "v$V" --draft=false
+            else
+              # Published but missing assets. Never overwrite assets users
+              # already download: upload only the missing ones, then recompute
+              # SHA256SUMS.txt over the release's FINAL assets so it describes
+              # exactly what is downloadable.
+              for n in $ASSETS; do
+                if jq -e --arg n "$n" '.assets | map(.name) | index($n)' release.json > /dev/null; then
+                  echo "Keeping existing asset $n"
+                else
+                  gh release upload "v$V" "artifact/dist/$n"
+                fi
+              done
+              FINAL="$RUNNER_TEMP/final-assets"
+              rm -rf "$FINAL"
+              mkdir -p "$FINAL"
+              for n in $ASSETS; do gh release download "v$V" --dir "$FINAL" -p "$n"; done
+              (cd "$FINAL" && for n in $(printf '%s\n' $ASSETS | LC_ALL=C sort); do sha256sum "$n"; done > SHA256SUMS.txt)
+              gh release upload "v$V" "$FINAL/SHA256SUMS.txt" --clobber
+            fi
+          else
+            echo "Nothing to publish (action=$ACTION)."
+          fi

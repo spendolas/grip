@@ -9,11 +9,12 @@
   },
   "scripts": {
     "setup": "npm --prefix src/bridge install && npm --prefix src/plugin install",
-    "build": "npm --prefix src/bridge run build && npm --prefix src/plugin run build && node scripts/write-version.mjs",
+    "build": "npm --prefix src/bridge run build && npm --prefix src/plugin run build",
     "build:bridge": "npm --prefix src/bridge run build",
     "build:plugin": "npm --prefix src/plugin run build",
-    "test": "npm --prefix src/bridge test && npm --prefix src/bridge run test:win",
+    "test": "npm --prefix src/bridge run compile && npm --prefix src/bridge test && npm --prefix src/bridge run test:win && node --test scripts/release-gate.test.mjs scripts/package-release.test.mjs",
     "grip:install": "node bridge/install.mjs",
-    "grip:install:http": "node bridge/install.mjs --http"
+    "grip:install:http": "node bridge/install.mjs --http",
+    "package": "node scripts/package-release.mjs"
   }
 }

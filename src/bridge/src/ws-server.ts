@@ -45,7 +45,7 @@ interface Session {
 }
 
 // Update state pushed to plugin strips (see update.ts / wireUpdateToBridge).
-export interface UpdateBroadcast { available: boolean; latest: string | null }
+export interface UpdateBroadcast { available: boolean; latest: string | null; headline?: string | null }
 
 // A Figma plugin iframe connects with Origin "null" (sandboxed) — or the
 // figma.com origin. A normal web page connecting to ws://localhost:7777 sends
@@ -727,7 +727,7 @@ export class PluginBridge extends EventEmitter {
   setUpdateState(s: UpdateBroadcast | null) {
     this.updateState = s;
     if (!s) return;
-    for (const id of this.sessions.keys()) this.sendTo(id, { type: 'update', available: s.available, latest: s.latest });
+    for (const id of this.sessions.keys()) this.sendTo(id, { type: 'update', available: s.available, latest: s.latest, headline: s.headline ?? null });
   }
 
   // Send one JSON frame to one plugin session (best effort, never throws).
