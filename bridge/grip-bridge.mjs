@@ -2244,7 +2244,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes, createHash } = __require("crypto");
+    var { randomBytes, createHash: createHash2 } = __require("crypto");
     var { Duplex, Readable: Readable2 } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -2904,7 +2904,7 @@ var require_websocket = __commonJS({
           abortHandshake(websocket, socket, "Invalid Upgrade header");
           return;
         }
-        const digest = createHash("sha1").update(key + GUID).digest("base64");
+        const digest = createHash2("sha1").update(key + GUID).digest("base64");
         if (res.headers["sec-websocket-accept"] !== digest) {
           abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
           return;
@@ -3271,7 +3271,7 @@ var require_websocket_server = __commonJS({
     var EventEmitter2 = __require("events");
     var http = __require("http");
     var { Duplex } = __require("stream");
-    var { createHash } = __require("crypto");
+    var { createHash: createHash2 } = __require("crypto");
     var extension2 = require_extension();
     var PerMessageDeflate2 = require_permessage_deflate();
     var subprotocol2 = require_subprotocol();
@@ -3572,7 +3572,7 @@ var require_websocket_server = __commonJS({
           );
         }
         if (this._state > RUNNING) return abortHandshake(socket, 503);
-        const digest = createHash("sha1").update(key + GUID).digest("base64");
+        const digest = createHash2("sha1").update(key + GUID).digest("base64");
         const headers = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
@@ -6608,7 +6608,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve.call(this, root, ref);
+      let _sch = resolve2.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a = root.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -6635,7 +6635,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve(root, ref) {
+    function resolve2(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -7266,7 +7266,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve(baseURI, relativeURI, options) {
+    function resolve2(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const resolved = resolveComponent(parse3(baseURI, schemelessOptions), parse3(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
@@ -7524,7 +7524,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve,
+      resolve: resolve2,
       resolveComponent,
       equal,
       serialize,
@@ -10514,11 +10514,11 @@ var require_dist = __commonJS({
 });
 
 // src/index.ts
-import { tmpdir as tmpdir2, homedir as homedir2 } from "node:os";
-import { join as join2 } from "node:path";
-import { fileURLToPath } from "node:url";
+import { tmpdir as tmpdir2, homedir as homedir3 } from "node:os";
+import { join as join3 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 import { spawn } from "node:child_process";
-import { openSync, writeSync, closeSync, writeFileSync, unlinkSync as unlinkSync2, existsSync as existsSync2 } from "node:fs";
+import { openSync, writeSync, closeSync, writeFileSync as writeFileSync2, unlinkSync as unlinkSync2, existsSync as existsSync3 } from "node:fs";
 import { connect as connect2 } from "node:net";
 
 // node_modules/ws/wrapper.mjs
@@ -10585,6 +10585,15 @@ import { EventEmitter } from "events";
 var BRIDGE_VERSION = "0.7.0";
 
 // src/ws-server.ts
+function originAllowedForUpdate(origin) {
+  if (origin === void 0 || origin === "" || origin === "null") return true;
+  try {
+    const h = new URL(origin).hostname;
+    return h === "figma.com" || h.endsWith(".figma.com");
+  } catch {
+    return false;
+  }
+}
 var REQUEST_TIMEOUT_MS = 1e4;
 var EXPORT_TIMEOUT_MS = Number(process.env.GRIP_EXPORT_TIMEOUT_MS ?? 6e4);
 var SCAN_TIMEOUT_MS = Number(process.env.GRIP_SCAN_TIMEOUT_MS ?? 6e4);
@@ -10629,7 +10638,7 @@ var PluginBridge = class _PluginBridge extends EventEmitter {
   constructor(port) {
     super();
     this.wss = new import_websocket_server.default({ port, maxPayload: 10 * 1024 * 1024 });
-    this.wss.on("connection", (ws) => {
+    this.wss.on("connection", (ws, req) => {
       const id = v4_default();
       const session = {
         id,
@@ -10639,7 +10648,8 @@ var PluginBridge = class _PluginBridge extends EventEmitter {
         currentPageId: "",
         currentPageName: "",
         lastPong: Date.now(),
-        helloAt: 0
+        helloAt: 0,
+        origin: typeof req?.headers?.origin === "string" ? req.headers.origin : void 0
       };
       this.sessions.set(id, session);
       ws.send(JSON.stringify({ kind: "welcome", sessionId: id, bridgeVersion: BRIDGE_VERSION }));
@@ -10743,16 +10753,16 @@ var PluginBridge = class _PluginBridge extends EventEmitter {
   waitForPlugin(mcp, timeoutMs) {
     const immediate = this.activeSession(mcp);
     if (immediate) return Promise.resolve(immediate);
-    return new Promise((resolve) => {
+    return new Promise((resolve2) => {
       const onChange = () => {
         const s = this.activeSession(mcp);
         if (!s) return;
         cleanup();
-        resolve(s);
+        resolve2(s);
       };
       const timer = setTimeout(() => {
         cleanup();
-        resolve(null);
+        resolve2(null);
       }, timeoutMs);
       const cleanup = () => {
         clearTimeout(timer);
@@ -10765,15 +10775,15 @@ var PluginBridge = class _PluginBridge extends EventEmitter {
   // first discovery call doesn't return empty during cold-start.
   waitForAnyPlugin(timeoutMs) {
     if (this.hasReadyPlugin()) return Promise.resolve(true);
-    return new Promise((resolve) => {
+    return new Promise((resolve2) => {
       const onChange = () => {
         if (!this.hasReadyPlugin()) return;
         cleanup();
-        resolve(true);
+        resolve2(true);
       };
       const timer = setTimeout(() => {
         cleanup();
-        resolve(false);
+        resolve2(false);
       }, timeoutMs);
       const cleanup = () => {
         clearTimeout(timer);
@@ -10826,8 +10836,8 @@ var PluginBridge = class _PluginBridge extends EventEmitter {
           `plugin_overloaded: ${q.length} requests already queued for this plugin (max ${MAX_QUEUE_PER_PLUGIN}); shedding '${method}'. The plugin can't keep up \u2014 reduce concurrent calls or space them out.`
         );
       }
-      return new Promise((resolve, reject) => {
-        q.push({ method, params, resolve, reject });
+      return new Promise((resolve2, reject) => {
+        q.push({ method, params, resolve: resolve2, reject });
       });
     }
     return this.dispatch(session, method, params);
@@ -10842,7 +10852,7 @@ var PluginBridge = class _PluginBridge extends EventEmitter {
       timeoutMs = Math.min(Math.max(params.timeoutMs, 1e3), 12e4);
     }
     this.inflight.set(sid, (this.inflight.get(sid) ?? 0) + 1);
-    const p = new Promise((resolve, reject) => {
+    const p = new Promise((resolve2, reject) => {
       const timeout = setTimeout(() => {
         if (this.pending.delete(id)) {
           const fresh = session.fileKey ? this.newestLive((s) => s.fileKey === session.fileKey && s.id !== session.id) : null;
@@ -10858,7 +10868,7 @@ var PluginBridge = class _PluginBridge extends EventEmitter {
           }
         }
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timeout, sessionId: sid, startedAt: Date.now(), method });
+      this.pending.set(id, { resolve: resolve2, reject, timeout, sessionId: sid, startedAt: Date.now(), method });
       session.ws.send(JSON.stringify({ id, method, params }));
     });
     const release = () => {
@@ -11024,6 +11034,19 @@ var PluginBridge = class _PluginBridge extends EventEmitter {
       this.applyHello(sessionId, msg);
       return;
     }
+    if (msg.type === "update_request") {
+      const sess = this.sessions.get(sessionId);
+      if (!originAllowedForUpdate(sess?.origin)) {
+        process.stderr.write(`[grip] update_request from ${sessionId.slice(0, 8)} refused (origin ${sess?.origin})
+`);
+        this.sendTo(sessionId, { type: "update_result", status: "error", message: "update requests are only accepted from the Figma plugin" });
+        return;
+      }
+      process.stderr.write(`[grip] update_request from ${sessionId.slice(0, 8)}
+`);
+      this.emit("update-request", { sessionId });
+      return;
+    }
     if ("event" in msg) {
       const sess = this.sessions.get(sessionId);
       this.emit("event", { ...msg, sessionId, fileKey: sess?.fileKey ?? "" });
@@ -11081,7 +11104,26 @@ var PluginBridge = class _PluginBridge extends EventEmitter {
       `[grip] hello ${sessionId.slice(0, 8)} v${sess.pluginVersion} \u2192 ${hello.fileName} / ${hello.currentPageName}
 `
     );
+    if (this.updateState?.available) this.sendTo(sessionId, { type: "update", ...this.updateState });
     this.emit("session-change");
+  }
+  // ---------- update notices ----------
+  updateState = null;
+  // Set by the daemon when the update state changes; broadcasts to every
+  // connected plugin and is replayed to each plugin on its hello.
+  setUpdateState(s) {
+    this.updateState = s;
+    if (!s) return;
+    for (const id of this.sessions.keys()) this.sendTo(id, { type: "update", available: s.available, latest: s.latest });
+  }
+  // Send one JSON frame to one plugin session (best effort, never throws).
+  sendTo(sessionId, msg) {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.ws.readyState !== import_websocket.default.OPEN) return;
+    try {
+      s.ws.send(JSON.stringify(msg));
+    } catch {
+    }
   }
   dropSession(sessionId) {
     const sess = this.sessions.get(sessionId);
@@ -18913,11 +18955,11 @@ var ZodPipe = /* @__PURE__ */ $constructor("ZodPipe", (inst, def) => {
   inst.in = def.in;
   inst.out = def.out;
 });
-function pipe(in_, out) {
+function pipe(in_, out2) {
   return new ZodPipe({
     type: "pipe",
     in: in_,
-    out
+    out: out2
     // ...util.normalizeParams(params),
   });
 }
@@ -22307,7 +22349,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+        await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -22324,7 +22366,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -22402,7 +22444,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve(parseResult.data);
+            resolve2(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -22663,12 +22705,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve, interval);
+      const timeoutId = setTimeout(resolve2, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -23459,8 +23501,8 @@ var Server = class extends Protocol {
 
 // src/mcp-server.ts
 import { readFile, writeFile, stat, open, mkdir } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir as homedir2, tmpdir } from "node:os";
+import { join as join2 } from "node:path";
 
 // src/tools.ts
 var TOOL_CATEGORIES = {
@@ -23471,7 +23513,8 @@ var TOOL_CATEGORIES = {
     "set_active_file",
     "get_page_context",
     "grip_capabilities",
-    "grip_load_tools"
+    "grip_load_tools",
+    "grip_update"
   ],
   read: [
     "get_document",
@@ -24000,6 +24043,12 @@ var TOOLS = [
     category: "meta",
     description: "Load/unload tool categories (see grip_capabilities); applies next turn.",
     schema: external_exports.object({ categories: external_exports.array(external_exports.string()).optional(), unload: external_exports.array(external_exports.string()).optional() })
+  },
+  {
+    name: "grip_update",
+    category: "meta",
+    description: "Check for / install a Grip update. 'install' ONLY after the user explicitly says yes.",
+    schema: external_exports.object({ action: external_exports.enum(["check", "install"]).optional() })
   },
   {
     name: "get_deep_link",
@@ -25982,6 +26031,18 @@ function toolInputSchema(name) {
         required: ["nodeId", "variableId"],
         additionalProperties: false
       };
+    case "grip_update":
+      return {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            enum: ["check", "install"],
+            description: "'check' (default) reports whether a newer Grip exists. 'install' downloads + verifies + installs it and restarts the bridge: call it ONLY after the user has explicitly agreed."
+          }
+        },
+        additionalProperties: false
+      };
     case "set_text_range_property":
       return {
         type: "object",
@@ -26008,6 +26069,529 @@ function toolInputSchema(name) {
       return { type: "object" };
     }
   }
+}
+
+// src/update.ts
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { homedir } from "node:os";
+import { join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+var DEFAULT_UPDATE_BASE = "https://raw.githubusercontent.com/spendolas/grip/main/";
+var MANIFEST_PATH = "bridge/version.json";
+var MANIFEST_MAX_BYTES = 64 * 1024;
+var FILE_MAX_BYTES = 5 * 1024 * 1024;
+var MAX_PLUGIN_FILES = 20;
+var MANIFEST_TIMEOUT_MS = 5e3;
+var DOWNLOAD_TIMEOUT_MS = 3e4;
+var MAX_REDIRECTS = 3;
+var CHECK_DELAY_MS = 3e4;
+var CHECK_INTERVAL_MS = 24 * 60 * 60 * 1e3;
+function logErr(msg) {
+  process.stderr.write(`[grip] ${msg}
+`);
+}
+function gripHome() {
+  return process.env.GRIP_HOME || join(homedir(), ".grip");
+}
+function statusFilePath() {
+  return process.env.GRIP_STATUS_PATH ?? join(homedir(), ".grip-bridge.status");
+}
+function updatesDisabled() {
+  const v = process.env.GRIP_NO_UPDATE_CHECK;
+  return v === "1" || v === "true";
+}
+function normalizeBase(raw) {
+  let u;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  const loopback = u.hostname === "127.0.0.1" || u.hostname === "localhost";
+  if (!(u.protocol === "https:" || u.protocol === "http:" && loopback)) return null;
+  if (u.username || u.password) return null;
+  u.search = "";
+  u.hash = "";
+  if (!u.pathname.endsWith("/")) u.pathname += "/";
+  return u.toString();
+}
+var warnedBase = false;
+function updateBase() {
+  const raw = process.env.GRIP_UPDATE_BASE?.trim();
+  if (!raw) return DEFAULT_UPDATE_BASE;
+  const norm = normalizeBase(raw);
+  if (norm) return norm;
+  if (!warnedBase) {
+    warnedBase = true;
+    logErr(`update: ignoring GRIP_UPDATE_BASE=${raw} (must be https, or http on 127.0.0.1/localhost); using the default`);
+  }
+  return DEFAULT_UPDATE_BASE;
+}
+var SEMVER_RE = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?:-([0-9A-Za-z.-]{1,32}))?$/;
+function compareSemver(a, b) {
+  const pa = SEMVER_RE.exec(a), pb = SEMVER_RE.exec(b);
+  if (!pa || !pb) return 0;
+  for (let i = 1; i <= 3; i++) {
+    const d = Number(pa[i]) - Number(pb[i]);
+    if (d !== 0) return d < 0 ? -1 : 1;
+  }
+  const ra = pa[4], rb = pb[4];
+  if (ra === rb) return 0;
+  if (!ra) return 1;
+  if (!rb) return -1;
+  return ra < rb ? -1 : 1;
+}
+function isSemver(v) {
+  return typeof v === "string" && SEMVER_RE.test(v);
+}
+var UpdateError = class extends Error {
+};
+function httpGet(url, o) {
+  return new Promise((resolveP, rejectP) => {
+    let u;
+    try {
+      u = new URL(url);
+    } catch {
+      rejectP(new UpdateError(`bad URL: ${url}`));
+      return;
+    }
+    const origin = o.origin ?? u.origin;
+    if (u.origin !== origin) {
+      rejectP(new UpdateError(`refused redirect off-origin (${u.origin} is not ${origin})`));
+      return;
+    }
+    let settled = false;
+    let timer;
+    const done = (err, buf) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (err) rejectP(err);
+      else resolveP(buf);
+    };
+    const doRequest = u.protocol === "https:" ? httpsRequest : httpRequest;
+    const req = doRequest(u, {
+      method: "GET",
+      headers: { "user-agent": `grip-bridge/${BRIDGE_VERSION}`, accept: "*/*" }
+    }, (res) => {
+      const status = res.statusCode ?? 0;
+      if (status >= 300 && status < 400 && res.headers.location) {
+        res.resume();
+        const left = o.redirectsLeft ?? MAX_REDIRECTS;
+        if (left <= 0) {
+          done(new UpdateError("too many redirects"));
+          return;
+        }
+        let next;
+        try {
+          next = new URL(res.headers.location, u).toString();
+        } catch {
+          done(new UpdateError("bad redirect location"));
+          return;
+        }
+        httpGet(next, { ...o, origin, redirectsLeft: left - 1 }).then(
+          (b) => done(null, b),
+          (e) => done(e)
+        );
+        return;
+      }
+      if (status !== 200) {
+        res.resume();
+        done(new UpdateError(`HTTP ${status} for ${u.pathname}`));
+        return;
+      }
+      const declared = Number(res.headers["content-length"] ?? 0);
+      if (declared > o.maxBytes) {
+        req.destroy();
+        done(new UpdateError(`${u.pathname}: too large (${declared} bytes, cap ${o.maxBytes})`));
+        return;
+      }
+      const chunks = [];
+      let total = 0;
+      res.on("data", (c) => {
+        total += c.length;
+        if (total > o.maxBytes) {
+          req.destroy();
+          done(new UpdateError(`${u.pathname}: too large (over ${o.maxBytes} bytes)`));
+          return;
+        }
+        chunks.push(c);
+      });
+      res.on("end", () => done(null, Buffer.concat(chunks)));
+      res.on("error", (e) => done(new UpdateError(`download failed: ${e.message}`)));
+      res.on("aborted", () => done(new UpdateError("download aborted")));
+    });
+    req.on("error", (e) => done(new UpdateError(`network error: ${e.message}`)));
+    req.end();
+    timer = setTimeout(() => {
+      req.destroy();
+      done(new UpdateError(`timed out after ${Math.round(o.timeoutMs / 1e3)}s`));
+    }, o.timeoutMs);
+  });
+}
+function safeRelPath(p) {
+  if (typeof p !== "string" || p.length === 0 || p.length > 200) return false;
+  if (!/^[A-Za-z0-9._\-/]+$/.test(p) || p.startsWith("/")) return false;
+  return p.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
+}
+function safeFileName(n) {
+  return /^[A-Za-z0-9._-]{1,100}$/.test(n) && n !== "." && n !== "..";
+}
+var isSha = (s) => typeof s === "string" && /^[0-9a-f]{64}$/i.test(s);
+function parseManifest(buf) {
+  let j;
+  try {
+    j = JSON.parse(buf.toString("utf8"));
+  } catch {
+    throw new UpdateError("version.json is not valid JSON");
+  }
+  if (!j || typeof j !== "object") throw new UpdateError("version.json has an unexpected shape");
+  if (!isSemver(j.version)) throw new UpdateError('version.json has no valid "version"');
+  const b = j.bridge;
+  const bPath = b?.file ?? b?.path;
+  if (!b || !safeRelPath(bPath) || !isSha(b.sha256)) throw new UpdateError('version.json "bridge" entry is invalid');
+  const files = {};
+  const pf = j.plugin?.files ?? {};
+  if (typeof pf !== "object" || Array.isArray(pf)) throw new UpdateError('version.json "plugin.files" is invalid');
+  const names = Object.keys(pf);
+  if (names.length > MAX_PLUGIN_FILES) throw new UpdateError("version.json lists too many plugin files");
+  for (const name of names) {
+    const f = pf[name];
+    if (!safeFileName(name) || !f || !safeRelPath(f.path) || !isSha(f.sha256)) {
+      throw new UpdateError(`version.json plugin file entry "${name}" is invalid`);
+    }
+    files[name] = { path: f.path, sha256: f.sha256.toLowerCase(), bytes: typeof f.bytes === "number" ? f.bytes : void 0 };
+  }
+  return {
+    version: j.version,
+    bridge: { path: bPath, sha256: b.sha256.toLowerCase(), bytes: typeof b.bytes === "number" ? b.bytes : void 0 },
+    plugin: { files }
+  };
+}
+async function fetchManifest(base = updateBase()) {
+  const buf = await httpGet(new URL(MANIFEST_PATH, base).toString(), {
+    maxBytes: MANIFEST_MAX_BYTES,
+    timeoutMs: MANIFEST_TIMEOUT_MS
+  });
+  return parseManifest(buf);
+}
+var state = null;
+var listeners = /* @__PURE__ */ new Set();
+function getUpdateState() {
+  return state;
+}
+function onUpdateState(fn) {
+  listeners.add(fn);
+  return () => {
+    listeners.delete(fn);
+  };
+}
+function setState(next) {
+  const changed = !state || state.available !== next.available || state.latest !== next.latest;
+  state = next;
+  if (changed) {
+    for (const fn of listeners) {
+      try {
+        fn(next);
+      } catch (err) {
+        logErr(`update: listener failed: ${err.message}`);
+      }
+    }
+  }
+}
+function cachePath() {
+  return join(gripHome(), "update-check.json");
+}
+function writeCache(s) {
+  try {
+    if (!existsSync(gripHome())) return;
+    writeFileSync(cachePath(), JSON.stringify({ current: s.current, latest: s.latest, available: s.available, checkedAt: s.checkedAt }, null, 2));
+  } catch {
+  }
+}
+function readCache() {
+  try {
+    const j = JSON.parse(readFileSync(cachePath(), "utf8"));
+    if (!isSemver(j?.latest)) return null;
+    return {
+      current: BRIDGE_VERSION,
+      latest: j.latest,
+      available: compareSemver(j.latest, BRIDGE_VERSION) > 0,
+      checkedAt: typeof j.checkedAt === "string" ? j.checkedAt : null
+    };
+  } catch {
+    return null;
+  }
+}
+async function checkForUpdate(base = updateBase()) {
+  try {
+    const m = await fetchManifest(base);
+    const next = {
+      current: BRIDGE_VERSION,
+      latest: m.version,
+      available: compareSemver(m.version, BRIDGE_VERSION) > 0,
+      checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    setState(next);
+    writeCache(next);
+    if (next.available) logErr(`update: Grip ${next.latest} is available (running ${BRIDGE_VERSION})`);
+    return next;
+  } catch (err) {
+    const msg = err.message;
+    logErr(`update: check failed (${msg})`);
+    return {
+      current: BRIDGE_VERSION,
+      latest: state?.latest ?? null,
+      available: state?.available ?? false,
+      checkedAt: state?.checkedAt ?? null,
+      error: msg
+    };
+  }
+}
+function startUpdateChecks(o = {}) {
+  if (updatesDisabled()) {
+    logErr("update: automatic checks disabled (GRIP_NO_UPDATE_CHECK)");
+    return () => {
+    };
+  }
+  const cached2 = readCache();
+  if (cached2) setState(cached2);
+  const run = () => {
+    void checkForUpdate();
+  };
+  const t = setTimeout(run, o.delayMs ?? CHECK_DELAY_MS);
+  const i = setInterval(run, o.intervalMs ?? CHECK_INTERVAL_MS);
+  t.unref();
+  i.unref();
+  return () => {
+    clearTimeout(t);
+    clearInterval(i);
+  };
+}
+function updateNoticeText(s) {
+  return `Grip update available: ${s.current} \u2192 ${s.latest}. Tell the user and ask whether they want to update. Do NOT install it on your own: only if the user explicitly says yes, call grip_update {action:'install'}.`;
+}
+function updateInstructionsParagraph(s) {
+  return `
+
+A Grip update is available (${s.current} \u2192 ${s.latest}). Mention it to the user once, at a natural moment, and ask if they want it. Never install without their explicit yes; if they agree, call grip_update {action:'install'}.`;
+}
+var installing = false;
+function atomicWrite(dest, data, mode) {
+  const tmp = `${dest}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    writeFileSync(tmp, data, mode !== void 0 ? { mode } : void 0);
+    renameSync(tmp, dest);
+  } catch (err) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+    }
+    throw err;
+  }
+}
+function sha256(buf) {
+  return createHash("sha256").update(buf).digest("hex");
+}
+async function downloadVerified(base, label, f) {
+  const cap = FILE_MAX_BYTES;
+  let buf;
+  try {
+    buf = await httpGet(new URL(f.path, base).toString(), { maxBytes: cap, timeoutMs: DOWNLOAD_TIMEOUT_MS });
+  } catch (err) {
+    throw new UpdateError(`could not download ${label}: ${err.message}. Nothing was changed; try again in a few minutes.`);
+  }
+  if (f.bytes !== void 0 && f.bytes !== buf.length) {
+    throw new UpdateError(`${label} size mismatch (manifest ${f.bytes}, got ${buf.length}). The CDN may be serving an older copy; nothing was changed, retry in a few minutes.`);
+  }
+  if (sha256(buf) !== f.sha256) {
+    throw new UpdateError(`${label} failed its sha256 check against version.json. The CDN may be lagging behind the release; nothing was changed, retry in a few minutes.`);
+  }
+  return buf;
+}
+async function installUpdate(o = {}) {
+  if (installing) return { status: "already_installing" };
+  installing = true;
+  try {
+    const base = o.base ?? updateBase();
+    const manifest = await fetchManifest(base).catch((err) => {
+      throw new UpdateError(`could not read the release manifest: ${err.message}`);
+    });
+    const available = compareSemver(manifest.version, BRIDGE_VERSION) > 0;
+    setState({ current: BRIDGE_VERSION, latest: manifest.version, available, checkedAt: (/* @__PURE__ */ new Date()).toISOString() });
+    if (!available) return { status: "up_to_date", from: BRIDGE_VERSION, to: manifest.version };
+    const bridgeBuf = await downloadVerified(base, "the bridge", manifest.bridge);
+    const pluginBufs = [];
+    for (const [name, f] of Object.entries(manifest.plugin.files)) {
+      pluginBufs.push([name, await downloadVerified(base, `plugin file ${name}`, f)]);
+    }
+    const home = resolve(gripHome());
+    const within = (p) => resolve(p).startsWith(home + sep);
+    mkdirSync(home, { recursive: true });
+    const pluginDir = join(home, "figma-plugin");
+    mkdirSync(pluginDir, { recursive: true });
+    const written = [];
+    for (const [name, buf] of pluginBufs) {
+      const dest = join(pluginDir, name);
+      if (!within(dest)) throw new UpdateError(`refusing to write outside ${home}`);
+      atomicWrite(dest, buf);
+      written.push(name);
+    }
+    const entry = join(home, "grip-bridge.mjs");
+    const prev = join(home, "grip-bridge.prev.mjs");
+    if (!within(entry) || !within(prev)) throw new UpdateError(`refusing to write outside ${home}`);
+    if (existsSync(entry)) {
+      const tmp = `${prev}.tmp-${process.pid}-${Date.now()}`;
+      try {
+        copyFileSync(entry, tmp);
+        renameSync(tmp, prev);
+      } catch (err) {
+        try {
+          rmSync(tmp, { force: true });
+        } catch {
+        }
+        throw err;
+      }
+    }
+    atomicWrite(entry, bridgeBuf, 493);
+    try {
+      chmodSync(entry, 493);
+    } catch {
+    }
+    logErr(`update: installed ${BRIDGE_VERSION} -> ${manifest.version} into ${home}`);
+    return { status: "updated", from: BRIDGE_VERSION, to: manifest.version, home, pluginFilesWritten: written };
+  } finally {
+    installing = false;
+  }
+}
+function rollbackBridge() {
+  const home = gripHome();
+  const prev = join(home, "grip-bridge.prev.mjs");
+  const entry = join(home, "grip-bridge.mjs");
+  if (!existsSync(prev)) throw new UpdateError(`no previous version to restore (${prev} does not exist)`);
+  atomicWrite(entry, readFileSync(prev), 493);
+  try {
+    chmodSync(entry, 493);
+  } catch {
+  }
+  return { restored: prev };
+}
+var restartHook = null;
+var restartManaged = false;
+function setRestartHook(fn, managed) {
+  restartHook = fn;
+  restartManaged = managed;
+}
+function isManagedInstall() {
+  try {
+    const self = realpathSync(fileURLToPath(import.meta.url));
+    return self === realpathSync(join(gripHome(), "grip-bridge.mjs"));
+  } catch {
+    return false;
+  }
+}
+async function installAndScheduleRestart() {
+  const r = await installUpdate();
+  if (r.status !== "updated") return r;
+  if (!restartHook) return { ...r, restart: "none" };
+  if (!restartManaged) {
+    logErr("update: this bridge is not running from ~/.grip/grip-bridge.mjs, so it is not restarting; start the installed copy to use the new version");
+    return { ...r, restart: "not_managed" };
+  }
+  const delay = Number(process.env.GRIP_UPDATE_RESTART_DELAY_MS ?? 1e3);
+  const hook = restartHook;
+  setTimeout(() => {
+    try {
+      hook();
+    } catch (err) {
+      logErr(`update: restart failed: ${err.message}`);
+    }
+  }, delay);
+  return { ...r, restart: "scheduled" };
+}
+function processCommandLine(pid) {
+  try {
+    if (process.platform === "win32") {
+      return execFileSync(
+        "powershell",
+        [
+          "-NoProfile",
+          "-Command",
+          `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`
+        ],
+        { encoding: "utf8", timeout: 8e3, stdio: ["ignore", "pipe", "ignore"] }
+      ).trim() || null;
+    }
+    return execFileSync(
+      "ps",
+      ["-o", "command=", "-p", String(pid)],
+      { encoding: "utf8", timeout: 5e3, stdio: ["ignore", "pipe", "ignore"] }
+    ).trim() || null;
+  } catch {
+    return null;
+  }
+}
+function stopRunningDaemon() {
+  let pid;
+  try {
+    const j = JSON.parse(readFileSync(statusFilePath(), "utf8"));
+    pid = Number(j?.pid);
+  } catch {
+    return { stopped: false, note: "no running Grip daemon found (no status file)" };
+  }
+  if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) {
+    return { stopped: false, note: "status file has no usable daemon pid; left it alone" };
+  }
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return { stopped: false, note: "status file is stale (that process is gone)" };
+  }
+  const cmd = processCommandLine(pid);
+  if (!cmd) return { stopped: false, note: `could not verify pid ${pid} is a Grip daemon; left it running (restart your agent / Figma plugin to pick up the new bridge)` };
+  if (!/grip-bridge/.test(cmd) || !/--daemon/.test(cmd)) {
+    return { stopped: false, note: `pid ${pid} does not look like a Grip daemon; left it alone` };
+  }
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch (err) {
+    return { stopped: false, note: `could not stop pid ${pid}: ${err.message}` };
+  }
+  return { stopped: true, note: `stopped the running Grip daemon (pid ${pid}); the new version starts on the next agent call` };
+}
+function wireUpdateToBridge(bridge) {
+  const push = (s) => bridge.setUpdateState(s ? { available: s.available, latest: s.latest } : null);
+  push(getUpdateState());
+  const off = onUpdateState(push);
+  const onRequest = async (e) => {
+    let msg;
+    try {
+      const r = await installAndScheduleRestart();
+      msg = { type: "update_result", status: r.status, from: r.from, to: r.to, restart: r.restart };
+    } catch (err) {
+      msg = { type: "update_result", status: "error", message: err.message };
+    }
+    bridge.sendTo(e.sessionId, msg);
+  };
+  bridge.on("update-request", onRequest);
+  return () => {
+    off();
+    bridge.off("update-request", onRequest);
+  };
 }
 
 // src/mcp-server.ts
@@ -26046,7 +26630,7 @@ function rasterDimensions(buf) {
   return void 0;
 }
 async function tailLog(maxBytes = 8192) {
-  const path = process.env.GRIP_LOG_PATH ?? join(homedir(), ".grip-bridge.log");
+  const path = process.env.GRIP_LOG_PATH ?? join2(homedir2(), ".grip-bridge.log");
   try {
     const st = await stat(path);
     const start = Math.max(0, st.size - maxBytes);
@@ -26081,8 +26665,8 @@ function summarizeArgs(args) {
     else s = String(v);
     parts.push(`${k}=${s}`);
   }
-  const out = parts.join(" ");
-  return out.length > 160 ? out.slice(0, 160) + "\u2026" : out;
+  const out2 = parts.join(" ");
+  return out2.length > 160 ? out2.slice(0, 160) + "\u2026" : out2;
 }
 var uploads = /* @__PURE__ */ new Map();
 var UPLOAD_TTL_MS = 5 * 6e4;
@@ -26142,13 +26726,17 @@ function createSession(bridge) {
     bind: null,
     subscriptions: { selection: false, document: false, currentPage: false },
     rateBucket: { tokens: RATE_LIMIT_BURST, lastRefillMs: Date.now() },
-    toolScopeSpec: null
+    toolScopeSpec: null,
+    updateNoticeSent: false
   };
   const server = new Server(
     { name: "grip", version: BRIDGE_VERSION },
     {
       capabilities: { tools: { listChanged: true }, logging: {} },
-      instructions: "Grip is a live connection to Figma. Use these tools for anything involving Figma \u2014 reading or editing a document, page, frame, component, style, variable or the current selection.\n\nGrip drives the Figma app itself through a plugin, so it sees the file the user has open right now, including unsaved and unpublished changes, and can write back to it. Other Figma integrations read published data over the REST API and cannot edit the canvas \u2014 for the document the user is looking at, use Grip.\n\nStart with get_page_context (cheap: which file and page, how many nodes selected). If it reports no plugin connected, the user needs to run the Grip plugin in Figma \u2014 say so rather than reporting that you have no Figma access."
+      instructions: "Grip is a live connection to Figma. Use these tools for anything involving Figma \u2014 reading or editing a document, page, frame, component, style, variable or the current selection.\n\nGrip drives the Figma app itself through a plugin, so it sees the file the user has open right now, including unsaved and unpublished changes, and can write back to it. Other Figma integrations read published data over the REST API and cannot edit the canvas \u2014 for the document the user is looking at, use Grip.\n\nStart with get_page_context (cheap: which file and page, how many nodes selected). If it reports no plugin connected, the user needs to run the Grip plugin in Figma \u2014 say so rather than reporting that you have no Figma access." + (() => {
+        const u = getUpdateState();
+        return u?.available && !updatesDisabled() ? updateInstructionsParagraph(u) : "";
+      })()
     }
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -26175,6 +26763,17 @@ ${args.code}
 `);
     }
     const res = await handleCall(name, args);
+    if (!res?.isError && !session.updateNoticeSent) {
+      if (name === "grip_update") {
+        session.updateNoticeSent = true;
+      } else if (!updatesDisabled()) {
+        const u = getUpdateState();
+        if (u?.available) {
+          session.updateNoticeSent = true;
+          res.content.push({ type: "text", text: updateNoticeText(u) });
+        }
+      }
+    }
     const ms = Date.now() - t0;
     const isErr = res?.isError;
     const text = res?.content?.[0]?.text ?? "";
@@ -26211,8 +26810,38 @@ ${args.code}
           id: session.id,
           activeFileId: session.activeFileId,
           subscriptions: session.subscriptions
-        }
+        },
+        update: updateSummary()
       });
+    }
+    if (name === "grip_update") {
+      const action = parsed.data.action ?? "check";
+      if (action === "check") {
+        if (updatesDisabled()) {
+          return okResult({ ...updateSummary(), disabled: true, note: "Automatic update checks are off (GRIP_NO_UPDATE_CHECK). Nothing was contacted. If the user wants to update, call grip_update {action:'install'} after they agree." });
+        }
+        const s = await checkForUpdate();
+        return okResult({
+          ...updateSummary(s),
+          ...s.error ? { error: s.error } : {},
+          note: s.available ? `Update available. Tell the user and ask if they want it; only if they say yes, call grip_update {action:'install'}.` : s.error ? "Could not reach the update server; nothing changed." : "Grip is up to date."
+        });
+      }
+      try {
+        const r = await installAndScheduleRestart();
+        if (r.status === "up_to_date") return okResult({ status: "up_to_date", current: BRIDGE_VERSION, latest: r.to });
+        if (r.status === "already_installing") return okResult({ status: "already_installing", note: "An update is already being installed; wait a few seconds." });
+        return okResult({
+          status: "updated",
+          from: r.from,
+          to: r.to,
+          restart: r.restart,
+          pluginFilesWritten: r.pluginFilesWritten,
+          next: installNextSteps(r.restart)
+        });
+      } catch (err) {
+        return errorResult(`update failed: ${err.message}`);
+      }
     }
     if (name === "grip_diagnose") {
       const snap = bridge.snapshot();
@@ -26366,14 +26995,14 @@ ${args.code}
         const { path: _p, inline: _i, ...exportArgs } = d;
         let outPath = explicitPath;
         if (!outPath) {
-          const dir = join(tmpdir(), "grip-exports");
+          const dir = join2(tmpdir(), "grip-exports");
           try {
             await mkdir(dir, { recursive: true });
           } catch (err) {
             return errorResult(`export_node: could not create temp dir ${dir}: ${err.message}`);
           }
           const nodeTag = String(d.nodeId ?? "node").replace(/[^\w.-]/g, "_");
-          outPath = join(dir, `${nodeTag}-${Date.now()}.${EXPORT_EXT[fmt] ?? fmt.toLowerCase()}`);
+          outPath = join2(dir, `${nodeTag}-${Date.now()}.${EXPORT_EXT[fmt] ?? fmt.toLowerCase()}`);
         }
         try {
           const result = await bridge.request("export_node", exportArgs, session);
@@ -26439,6 +27068,27 @@ function destroySession(live) {
 function activeSessionCount() {
   return liveSessions.length;
 }
+function updateSummary(s = getUpdateState()) {
+  return {
+    current: BRIDGE_VERSION,
+    latest: s?.latest ?? null,
+    available: s?.available ?? false,
+    checkedAt: s?.checkedAt ?? null
+  };
+}
+function installNextSteps(restart) {
+  const steps = [];
+  if (restart === "scheduled") {
+    steps.push("The Grip bridge restarts in about a second to load the new version; your next Grip call may fail once with a connection error, simply retry it. stdio agents reconnect on their own; agents on the HTTP transport (http://127.0.0.1:7778/mcp) may need to reconnect their MCP server.");
+  } else if (restart === "not_managed") {
+    steps.push("The files were installed to ~/.grip, but this bridge is not running from ~/.grip/grip-bridge.mjs, so it did NOT restart. Restart it from the installed copy to use the new version.");
+  } else {
+    steps.push("Restart your agent / the Grip bridge to load the new version.");
+  }
+  steps.push("Figma plugin: if the user imported it from ~/.grip/figma-plugin it was updated in place; they should re-run the plugin (or have Plugins > Development > Hot reload plugin on). If they imported it from a git clone instead, they need to `git pull` there or re-import ~/.grip/figma-plugin/manifest.json.");
+  steps.push("Undo: `node ~/.grip/grip-bridge.mjs update --rollback` restores the previous bridge.");
+  return steps;
+}
 function pluginResult(tool, method, result) {
   if (result === void 0) {
     return errorResult(
@@ -26466,7 +27116,7 @@ function errorResult(message) {
 
 // src/ipc-server.ts
 import { createServer } from "node:net";
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync as existsSync2, unlinkSync } from "node:fs";
 
 // src/socket-transport.ts
 var MAX_FRAME_BYTES = 10 * 1024 * 1024;
@@ -26536,10 +27186,10 @@ var SocketTransport = class {
     });
   }
   async send(message) {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       this.socket.write(JSON.stringify(message) + "\n", (err) => {
         if (err) reject(err);
-        else resolve();
+        else resolve2();
       });
     });
   }
@@ -26619,10 +27269,10 @@ var IpcServer = class {
   bridge;
   server;
   async listen() {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       const start = (retried = false) => {
         const onErr = (err) => {
-          if (err.code === "EADDRINUSE" && !retried && existsSync(this.path)) {
+          if (err.code === "EADDRINUSE" && !retried && existsSync2(this.path)) {
             try {
               unlinkSync(this.path);
             } catch {
@@ -26638,7 +27288,7 @@ var IpcServer = class {
           this.server.removeListener("error", onErr);
           process.stderr.write(`[grip] ipc server listening on ${this.path}
 `);
-          resolve();
+          resolve2();
         });
       };
       start();
@@ -26646,7 +27296,7 @@ var IpcServer = class {
   }
   close() {
     this.server.close();
-    if (existsSync(this.path)) {
+    if (existsSync2(this.path)) {
       try {
         unlinkSync(this.path);
       } catch {
@@ -27151,7 +27801,7 @@ var responseViaResponseObject = async (res, outgoing, options = {}) => {
         });
         if (!chunk) {
           if (i === 1) {
-            await new Promise((resolve) => setTimeout(resolve));
+            await new Promise((resolve2) => setTimeout(resolve2));
             maxReadCount = 3;
             continue;
           }
@@ -27651,9 +28301,9 @@ data:
       const initRequest = messages.find((m) => isInitializeRequest(m));
       const clientProtocolVersion = initRequest ? initRequest.params.protocolVersion : req.headers.get("mcp-protocol-version") ?? DEFAULT_NEGOTIATED_PROTOCOL_VERSION;
       if (this._enableJsonResponse) {
-        return new Promise((resolve) => {
+        return new Promise((resolve2) => {
           this._streamMapping.set(streamId, {
-            resolveJson: resolve,
+            resolveJson: resolve2,
             cleanup: () => {
               this._streamMapping.delete(streamId);
             }
@@ -28109,13 +28759,13 @@ var HttpServer = class {
   // running WS+IPC without HTTP rather than dying — WS :7777 is the real
   // single-instance lock). Rejects only on unexpected errors.
   listen() {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       const onErr = (err) => {
         this.server.removeListener("error", onErr);
         if (err.code === "EADDRINUSE") {
           process.stderr.write(`[grip] http port ${this.port} in use; skipping HTTP transport
 `);
-          resolve(false);
+          resolve2(false);
         } else {
           reject(err);
         }
@@ -28135,7 +28785,7 @@ var HttpServer = class {
           }
         }, SWEEP_MS);
         this.sweepTimer.unref();
-        resolve(true);
+        resolve2(true);
       });
     });
   }
@@ -28157,7 +28807,7 @@ async function tryConnect(path) {
   for (const delay of [0, ...RETRY_DELAYS_MS]) {
     if (delay) await sleep(delay);
     try {
-      return await new Promise((resolve, reject) => {
+      return await new Promise((resolve2, reject) => {
         const sock = connect(path);
         const onError = (err) => {
           sock.destroy();
@@ -28166,7 +28816,7 @@ async function tryConnect(path) {
         sock.once("error", onError);
         sock.once("connect", () => {
           sock.removeListener("error", onError);
-          resolve(sock);
+          resolve2(sock);
         });
       });
     } catch {
@@ -28246,7 +28896,7 @@ async function runProxy(ipcPath) {
       process.stdout.write(line + "\n");
     }
   });
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     let resolved = false;
     const settle = (retry, reason, code) => {
       if (resolved) return;
@@ -28274,7 +28924,7 @@ async function runProxy(ipcPath) {
         sock.destroy();
       } catch {
       }
-      resolve(retry);
+      resolve2(retry);
     };
     sock.on("close", () => settle(true, "leader socket closed, re-detecting role", "leader_dropped"));
     sock.on("error", (err) => settle(true, `socket error: ${err.message}`, "socket_error"));
@@ -28288,20 +28938,106 @@ async function runProxy(ipcPath) {
   });
 }
 
+// src/update-cli.ts
+import { createInterface } from "node:readline";
+function isUpdateCli(argv) {
+  if (argv.includes("--daemon")) return false;
+  const a = argv.slice(2);
+  return a[0] === "update" || a[0] === "--update";
+}
+function out(msg = "") {
+  process.stdout.write(msg + "\n");
+}
+function confirm(question) {
+  return new Promise((res) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(question, (ans) => {
+      rl.close();
+      res(/^y(es)?$/i.test(ans.trim()));
+    });
+    rl.on("close", () => res(false));
+  });
+}
+async function runUpdateCli(argv) {
+  const flags = new Set(argv.slice(3));
+  const yes = flags.has("--yes") || flags.has("-y");
+  const entry = `${gripHome()}/grip-bridge.mjs`;
+  if (flags.has("--rollback")) {
+    try {
+      const r = rollbackBridge();
+      out(`Restored the previous bridge from ${r.restored}.`);
+      out("(Plugin files in ~/.grip/figma-plugin are left as they are.)");
+      out(stopRunningDaemon().note);
+      return 0;
+    } catch (err) {
+      process.stderr.write(`rollback failed: ${err.message}
+`);
+      return 1;
+    }
+  }
+  out(`Grip ${BRIDGE_VERSION} installed. Checking ${updateBase()} ...`);
+  const s = await checkForUpdate();
+  if (s.error) {
+    out(`Could not check for updates: ${s.error}`);
+    return flags.has("--check") ? 0 : 1;
+  }
+  if (!s.available) {
+    out(`You are up to date (latest is ${s.latest}).`);
+    return 0;
+  }
+  out(`Update available: ${s.current} -> ${s.latest}`);
+  if (flags.has("--check")) {
+    out(`Install it with: node ${entry} update`);
+    return 0;
+  }
+  if (!yes) {
+    if (!process.stdin.isTTY) {
+      out("Not installing: no terminal to confirm on. Re-run with --yes to install.");
+      return 1;
+    }
+    if (!await confirm(`Download and install ${s.latest} into ${gripHome()}? [y/N] `)) {
+      out("Cancelled. Nothing was changed.");
+      return 0;
+    }
+  }
+  try {
+    const r = await installUpdate();
+    if (r.status === "up_to_date") {
+      out("Already up to date.");
+      return 0;
+    }
+    if (r.status === "already_installing") {
+      out("Another update is already running.");
+      return 1;
+    }
+    out(`Updated ${r.from} -> ${r.to}.`);
+    out(`  bridge  -> ${entry}  (previous kept as grip-bridge.prev.mjs; undo with: node ${entry} update --rollback)`);
+    if (r.pluginFilesWritten?.length) out(`  plugin  -> ${gripHome()}/figma-plugin (${r.pluginFilesWritten.join(", ")})`);
+    out(stopRunningDaemon().note);
+    out("If you imported the plugin from a git clone instead of ~/.grip/figma-plugin, run `git pull` there (or import ~/.grip/figma-plugin/manifest.json in Figma).");
+    return 0;
+  } catch (err) {
+    process.stderr.write(`Update failed: ${err.message}
+`);
+    return 1;
+  }
+}
+
 // src/index.ts
 Error.stackTraceLimit = 3;
 var WS_PORT = Number(process.env.GRIP_WS_PORT ?? 7777);
 var HTTP_PORT = Number(process.env.GRIP_HTTP_PORT ?? 7778);
 var IS_WIN = process.platform === "win32";
-var IPC_PATH = process.env.GRIP_IPC_PATH ?? (IS_WIN ? "\\\\.\\pipe\\grip-bridge" : join2(tmpdir2(), "grip-bridge.sock"));
-var STATUS_PATH = process.env.GRIP_STATUS_PATH ?? join2(homedir2(), ".grip-bridge.status");
+var IPC_PATH = process.env.GRIP_IPC_PATH ?? (IS_WIN ? "\\\\.\\pipe\\grip-bridge" : join3(tmpdir2(), "grip-bridge.sock"));
+var STATUS_PATH = process.env.GRIP_STATUS_PATH ?? join3(homedir3(), ".grip-bridge.status");
 var IS_DAEMON = process.argv.includes("--daemon");
+var IS_UPDATE_CLI = !IS_DAEMON && isUpdateCli(process.argv);
 var PERSISTENT = process.env.GRIP_PERSISTENT === "1" || process.argv.includes("--persistent");
 var IDLE_GRACE_MS = 6e4;
 var MAX_LIFETIME_MS = 6 * 60 * 60 * 1e3;
-(() => {
+if (!IS_UPDATE_CLI) (() => {
   try {
-    const path = process.env.GRIP_LOG_PATH ?? join2(homedir2(), ".grip-bridge.log");
+    const path = process.env.GRIP_LOG_PATH ?? join3(homedir3(), ".grip-bridge.log");
     const fd = openSync(path, "a");
     writeSync(fd, `
 === started pid=${process.pid} role=${IS_DAEMON ? "daemon" : "shim"} at ${(/* @__PURE__ */ new Date()).toISOString()} ===
@@ -28327,15 +29063,15 @@ process.on("SIGHUP", () => {
   process.stderr.write("[grip] SIGHUP ignored (parent exited; staying alive for proxies)\n");
 });
 function tryBindWs() {
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     const bridge = new PluginBridge(WS_PORT);
-    bridge.once("listening", () => resolve(bridge));
-    bridge.once("bind-error", () => resolve(null));
+    bridge.once("listening", () => resolve2(bridge));
+    bridge.once("bind-error", () => resolve2(null));
   });
 }
 function dumpForensics(reason, extra, bridge) {
   try {
-    const path = join2(homedir2(), `.grip-bridge.dump-${Date.now()}.json`);
+    const path = join3(homedir3(), `.grip-bridge.dump-${Date.now()}.json`);
     const snap = bridge?.snapshot?.() ?? null;
     const cpu = process.cpuUsage();
     const mem = process.memoryUsage();
@@ -28355,7 +29091,7 @@ function dumpForensics(reason, extra, bridge) {
       extra,
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
     };
-    writeFileSync(path, JSON.stringify(body, null, 2));
+    writeFileSync2(path, JSON.stringify(body, null, 2));
     process.stderr.write(`[grip] forensic dump written to ${path}
 `);
   } catch (err) {
@@ -28414,11 +29150,14 @@ async function runDaemon(bridge) {
   await ipc.listen();
   const http = new HttpServer(HTTP_PORT, bridge);
   await http.listen();
+  wireUpdateToBridge(bridge);
+  startUpdateChecks();
+  setRestartHook(() => restartDaemon(ipc, http, bridge), isManagedInstall());
   const startedAt = Date.now();
   const writeStatus = () => {
     try {
       const snap = bridge.snapshot();
-      writeFileSync(STATUS_PATH, JSON.stringify({
+      writeFileSync2(STATUS_PATH, JSON.stringify({
         pid: process.pid,
         version: BRIDGE_VERSION,
         wsPort: WS_PORT,
@@ -28445,7 +29184,7 @@ async function runDaemon(bridge) {
     }
   });
   if (!IS_WIN) setInterval(() => {
-    if (!existsSync2(IPC_PATH)) {
+    if (!existsSync3(IPC_PATH)) {
       process.stderr.write("[grip] daemon: IPC socket vanished, exiting for clean respawn\n");
       bridge.close();
       process.exit(2);
@@ -28497,15 +29236,44 @@ async function runDaemon(bridge) {
     void shutdown("SIGTERM");
   });
 }
+function restartDaemon(ipc, http, bridge) {
+  process.stderr.write("[grip] update installed; restarting daemon\n");
+  try {
+    ipc.close();
+  } catch {
+  }
+  try {
+    http.close();
+  } catch {
+  }
+  try {
+    bridge.close();
+  } catch {
+  }
+  try {
+    unlinkSync2(STATUS_PATH);
+  } catch {
+  }
+  if (process.env.GRIP_SUPERVISED === "1") process.exit(0);
+  const self = fileURLToPath2(import.meta.url);
+  const child = spawn(process.execPath, [self, ...process.argv.slice(2)], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    env: { ...process.env, GRIP_RESTART_WAIT: "1" }
+  });
+  child.unref();
+  process.exit(0);
+}
 function probeDaemon() {
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     const sock = connect2(IPC_PATH);
     const done = (ok) => {
       try {
         sock.destroy();
       } catch {
       }
-      resolve(ok);
+      resolve2(ok);
     };
     sock.once("connect", () => done(true));
     sock.once("error", () => done(false));
@@ -28513,7 +29281,7 @@ function probeDaemon() {
   });
 }
 function spawnDaemonDetached() {
-  const self = fileURLToPath(import.meta.url);
+  const self = fileURLToPath2(import.meta.url);
   process.stderr.write("[grip] shim: no daemon, spawning detached daemon\n");
   const child = spawn(process.execPath, [self, "--daemon"], {
     detached: true,
@@ -28553,8 +29321,18 @@ async function runShim() {
   }
 }
 async function main() {
+  if (IS_UPDATE_CLI) {
+    process.exit(await runUpdateCli(process.argv));
+  }
   if (IS_DAEMON) {
-    const bridge = await tryBindWs();
+    let bridge = await tryBindWs();
+    if (!bridge && process.env.GRIP_RESTART_WAIT === "1") {
+      for (let i = 0; i < 30 && !bridge; i++) {
+        await new Promise((r) => setTimeout(r, 200));
+        bridge = await tryBindWs();
+      }
+    }
+    delete process.env.GRIP_RESTART_WAIT;
     if (!bridge) {
       process.stderr.write("[grip] daemon: port already bound, exiting\n");
       process.exit(0);

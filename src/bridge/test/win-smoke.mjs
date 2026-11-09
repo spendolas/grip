@@ -72,6 +72,8 @@ console.log('\n2. Windows install (GRIP_FAKE_PLATFORM=win32 --http)');
   const { home, appdata } = runInstaller({ fakePlatform: 'win32', http: true });
   const entry = join(home, '.grip', 'grip-bridge.mjs');
   check('bridge copied to ~/.grip/bridge', existsSync(entry));
+  check('plugin copied to ~/.grip/figma-plugin (updatable in place)',
+    ['manifest.json', 'code.js', 'ui.html'].every((f) => existsSync(join(home, '.grip', 'figma-plugin', f))));
 
   const cfg = JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8'));
   check('MCP registered as http', cfg.mcpServers?.grip?.type === 'http',
@@ -107,6 +109,7 @@ console.log('\n4. Linux install (GRIP_FAKE_PLATFORM=linux --http)');
     check('unit ExecStart runs entry --daemon --persistent',
       u.includes('--daemon --persistent') && u.includes(join(home, '.grip', 'grip-bridge.mjs')));
     check('unit installs to default.target', u.includes('WantedBy=default.target'));
+    check('unit restarts after a clean exit (self-update)', u.includes('Restart=always') && u.includes('GRIP_SUPERVISED=1'));
   }
 }
 

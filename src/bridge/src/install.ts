@@ -16,10 +16,12 @@
 //   node install.js --http     # + always-on daemon
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, platform, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gripHome, stopRunningDaemon } from './update.js';
+import { BRIDGE_VERSION } from './types.js';
 
 const args = new Set(process.argv.slice(2));
 const wantHttp = args.has('--http');
@@ -33,7 +35,11 @@ const SOURCE_BRIDGE = join(HERE, 'grip-bridge.mjs');
 
 // Stable home, so the path registered with the agent survives repo moves,
 // rebuilds, and the repo being deleted entirely.
-const GRIP_HOME = join(HOME, '.grip');
+// (GRIP_HOME in the environment overrides ~/.grip — used by tests.)
+const GRIP_HOME = gripHome();
+const SOURCE_PLUGIN = [join(HERE, '..', 'figma-plugin'), join(HERE, 'figma-plugin')]
+  .find((d) => existsSync(join(d, 'manifest.json')));
+const PLUGIN_DIR = join(GRIP_HOME, 'figma-plugin');
 const ENTRY = join(GRIP_HOME, 'grip-bridge.mjs');
 const HTTP_URL = 'http://127.0.0.1:7778/mcp';
 
@@ -59,6 +65,40 @@ function installBridge() {
   try { chmodSync(ENTRY, 0o755); } catch { /* non-fatal on Windows */ }
   const kb = Math.round(readFileSync(ENTRY).length / 1024);
   ok(`single file installed (${kb} KB, no dependencies)`);
+}
+
+// Copy the plugin next to the bridge. Import THAT copy in Figma and later
+// updates (`grip_update`, the plugin's "update" button, `update` CLI) can refresh
+// it in place. Optional: when the installer runs from a bare copy with no
+// figma-plugin/ beside it, just warn.
+function installPlugin(): boolean {
+  if (!SOURCE_PLUGIN) {
+    warn(`figma-plugin/ not found next to the installer (looked beside ${HERE}); skipped.`);
+    warn('Import the plugin from your Grip checkout instead, and update it with git pull.');
+    return false;
+  }
+  mkdirSync(PLUGIN_DIR, { recursive: true });
+  let n = 0;
+  for (const name of readdirSync(SOURCE_PLUGIN)) {
+    const src = join(SOURCE_PLUGIN, name);
+    if (name.startsWith('.') || !statSync(src).isFile()) continue;
+    // tmp + rename so a running Figma never reads a half-written plugin file
+    const dest = join(PLUGIN_DIR, name);
+    const tmp = `${dest}.tmp-${process.pid}`;
+    copyFileSync(src, tmp);
+    renameSync(tmp, dest);
+    n++;
+  }
+  ok(`plugin copied (${n} files) → ${PLUGIN_DIR}`);
+  return true;
+}
+
+// A daemon from a previous install keeps running the OLD bridge in memory
+// (and re-running this installer used to leave it there). Stop it so the new
+// file takes over. Conservative: only a verified grip daemon, see update.ts.
+function replaceRunningDaemon() {
+  const r = stopRunningDaemon();
+  if (r.stopped) ok(r.note); else log(`  · ${r.note}`);
 }
 
 function hasClaudeCli(): boolean {
@@ -143,7 +183,7 @@ function daemonMac() {
     '#!/bin/bash',
     'trap \'kill "$CHILD" 2>/dev/null; exit 0\' TERM INT',
     'while true; do',
-    `  "${process.execPath}" "${ENTRY}" --daemon --persistent &`,
+    `  GRIP_SUPERVISED=1 "${process.execPath}" "${ENTRY}" --daemon --persistent &`,
     '  CHILD=$!',
     '  wait "$CHILD"',
     '  sleep 5',
@@ -198,7 +238,8 @@ function daemonLinux() {
     '[Unit]\nDescription=Grip bridge daemon (Figma <-> MCP)\n\n' +
     '[Service]\n' +
     `ExecStart=${process.execPath} ${ENTRY} --daemon --persistent\n` +
-    'Restart=on-failure\n\n' +
+    // Always (not on-failure): a self-update restarts the daemon with a clean exit.
+    'Environment=GRIP_SUPERVISED=1\nRestart=always\nRestartSec=2\n\n' +
     '[Install]\nWantedBy=default.target\n');
   ok(`systemd unit written → ${unitPath}`);
   try {
@@ -217,17 +258,28 @@ log();
 log('\x1b[1mGrip — installing the local bridge\x1b[0m');
 log();
 installBridge();
+const pluginInstalled = installPlugin();
 registerMcp();
+replaceRunningDaemon();
 if (wantHttp) installPersistentDaemon();
 log();
-log('\x1b[1m\x1b[32mDone.\x1b[0m');
+log(`\x1b[1m\x1b[32mDone.\x1b[0m Grip ${BRIDGE_VERSION} installed.`);
 log();
 log('Next:');
 log('  1. Restart your agent so it picks up the new server.');
-log('  2. In Figma: Plugins → Development → Import plugin from manifest…');
-log('     and choose the \x1b[1mfigma-plugin\x1b[0m folder.');
+if (pluginInstalled) {
+  log('  2. In Figma: Plugins → Development → Import plugin from manifest…');
+  log(`     and choose \x1b[1m${join(PLUGIN_DIR, 'manifest.json')}\x1b[0m`);
+  log('     (import THIS copy, not the repo folder, so updates can refresh it in place).');
+} else {
+  log('  2. In Figma: Plugins → Development → Import plugin from manifest…');
+  log('     and choose the \x1b[1mfigma-plugin\x1b[0m folder of your Grip checkout.');
+}
 log('  3. Run the plugin. Ask your agent to read your selection —');
 log('     the strip turns \x1b[32mgreen\x1b[0m.');
+log();
+log('Updating later: ask your agent to "update Grip", click the ↑ update label in the');
+log(`plugin strip when it appears, or run: node ${ENTRY} update`);
 log();
 if (!wantHttp) log('  (on-demand: nothing stays running; the first call starts it.)');
 log(`Logs: ~/.grip-bridge.log   Status: ~/.grip-bridge.status`);

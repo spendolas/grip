@@ -39,6 +39,23 @@ interface Session {
   // several live sessions share a fileKey (reconnect overlap): newest wins,
   // so routing never lands on a dying zombie iframe.
   helloAt: number;
+  // HTTP Origin header of the WS upgrade (undefined for non-browser clients).
+  // Used only to refuse update requests coming from a web page.
+  origin?: string;
+}
+
+// Update state pushed to plugin strips (see update.ts / wireUpdateToBridge).
+export interface UpdateBroadcast { available: boolean; latest: string | null }
+
+// A Figma plugin iframe connects with Origin "null" (sandboxed) — or the
+// figma.com origin. A normal web page connecting to ws://localhost:7777 sends
+// its own https://... origin, and must not be able to trigger an update.
+export function originAllowedForUpdate(origin: string | undefined): boolean {
+  if (origin === undefined || origin === '' || origin === 'null') return true;
+  try {
+    const h = new URL(origin).hostname;
+    return h === 'figma.com' || h.endsWith('.figma.com');
+  } catch { return false; }
 }
 
 // Distinct open files, keyed by fileKey → newest live session for that file.
@@ -141,7 +158,7 @@ export class PluginBridge extends EventEmitter {
     // from a misbehaving peer / runaway run_script result.
     this.wss = new WebSocketServer({ port, maxPayload: 10 * 1024 * 1024 });
 
-    this.wss.on('connection', (ws) => {
+    this.wss.on('connection', (ws, req) => {
       const id = uuid();
       const session: Session = {
         id,
@@ -152,6 +169,7 @@ export class PluginBridge extends EventEmitter {
         currentPageName: '',
         lastPong: Date.now(),
         helloAt: 0,
+        origin: typeof req?.headers?.origin === 'string' ? req.headers.origin : undefined,
       };
       this.sessions.set(id, session);
       // Hand the plugin its session id; plugin replies with a hello
@@ -611,6 +629,20 @@ export class PluginBridge extends EventEmitter {
       return;
     }
 
+    // User clicked "update" twice in the plugin strip. Older bridges drop this
+    // frame (no id/event/kind), older plugins never send it: compatible both ways.
+    if ((msg as { type?: unknown }).type === 'update_request') {
+      const sess = this.sessions.get(sessionId);
+      if (!originAllowedForUpdate(sess?.origin)) {
+        process.stderr.write(`[grip] update_request from ${sessionId.slice(0, 8)} refused (origin ${sess?.origin})\n`);
+        this.sendTo(sessionId, { type: 'update_result', status: 'error', message: 'update requests are only accepted from the Figma plugin' });
+        return;
+      }
+      process.stderr.write(`[grip] update_request from ${sessionId.slice(0, 8)}\n`);
+      this.emit('update-request', { sessionId });
+      return;
+    }
+
     if ('event' in msg) {
       const sess = this.sessions.get(sessionId);
       this.emit('event', { ...msg, sessionId, fileKey: sess?.fileKey ?? '' } as WSEvent & { sessionId: string; fileKey: string });
@@ -681,7 +713,28 @@ export class PluginBridge extends EventEmitter {
     process.stderr.write(
       `[grip] hello ${sessionId.slice(0, 8)} v${sess.pluginVersion} → ${hello.fileName} / ${hello.currentPageName}\n`,
     );
+    // Tell this strip about a pending update straight away (no-op for old plugins).
+    if (this.updateState?.available) this.sendTo(sessionId, { type: 'update', ...this.updateState });
     this.emit('session-change');
+  }
+
+  // ---------- update notices ----------
+
+  private updateState: UpdateBroadcast | null = null;
+
+  // Set by the daemon when the update state changes; broadcasts to every
+  // connected plugin and is replayed to each plugin on its hello.
+  setUpdateState(s: UpdateBroadcast | null) {
+    this.updateState = s;
+    if (!s) return;
+    for (const id of this.sessions.keys()) this.sendTo(id, { type: 'update', available: s.available, latest: s.latest });
+  }
+
+  // Send one JSON frame to one plugin session (best effort, never throws).
+  sendTo(sessionId: string, msg: Record<string, unknown>) {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.ws.readyState !== WebSocket.OPEN) return;
+    try { s.ws.send(JSON.stringify(msg)); } catch { /* peer going away */ }
   }
 
   private dropSession(sessionId: string) {

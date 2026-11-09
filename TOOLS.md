@@ -1,6 +1,6 @@
 # Grip MCP Tools
 
-153 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
+154 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
 
 **Figma Plugin API coverage:** through plugin update 141 (Oct 15, 2026) and `@figma/plugin-typings` 1.142.0. <!-- figma-api-coverage: update=141 typings=1.142.0 --> The weekly API-updates check reads the marker in this line as its baseline — bump both numbers in the same commit whenever support for newly shipped Plugin API features lands.
 
@@ -25,6 +25,13 @@ List all Figma plugins currently connected to this Grip bridge.
 Pin this MCP session to a specific connected plugin.
 - Params: `target` (req) — sessionId or fileKey.
 - Returns: the matched session info.
+
+### `grip_update`
+Check for, or install, a newer Grip. **User-triggered only: call `install` only after the user explicitly says yes** — never on your own.
+- Params: `action` — `'check'` (default) | `'install'`.
+- `check` → `{ current, latest, available, checkedAt, note }` (a fresh check of `bridge/version.json` on the repo's main branch; with `GRIP_NO_UPDATE_CHECK=1` it answers from state and contacts nothing, adding `disabled:true`).
+- `install` → `{ status: 'updated', from, to, restart, pluginFilesWritten, next[] }`, or `{ status: 'up_to_date' }`, or `{ status: 'already_installing' }`; failures are tool errors (sha256/size mismatch, network; a CDN lagging behind a release says to retry in a few minutes, and nothing is written on any failure). On success the bridge restarts itself ~1s after replying (`restart: 'scheduled'`; `'not_managed'` when this bridge isn't the `~/.grip/grip-bridge.mjs` copy). `next[]` is the guidance to relay: possible one-off connection error on the next call, HTTP-transport agents may need to reconnect, the plugin refreshes in place only if imported from `~/.grip/figma-plugin` (else `git pull` / re-import), and `node ~/.grip/grip-bridge.mjs update --rollback` to undo.
+- When an update exists the bridge also: appends a paragraph to the session `instructions`, adds one extra text block ("Grip update available: x → y. Tell the user and ask… Do NOT install on your own…") to the first successful tool result of each MCP session, and reports `update: { current, latest, available, checkedAt }` in `grip_health`. See README → Updating.
 
 ---
 
@@ -811,7 +818,7 @@ Applied via `set_node_property` fills/strokes/effects (fully-shaped objects pass
 
 ## Tool scoping (`GRIP_TOOLS`)
 
-By default an agent only sees the `core` scope (~35 always-useful tools), not the full 153 — this keeps per-turn schema weight small. Widen the scope per agent — at launch (below) or mid-session with `grip_load_tools {categories:['motion', …]}` (or `'all'`), and drop them again with `grip_load_tools {unload:['motion']}` (`'all'` resets to core; `core`/`meta` can't be unloaded, and tools that are also in core stay). Each change refreshes the tool list via `tools/list_changed` (applies next turn; clients that ignore the notification can still use `run_script`). Not available to restricted scopes without `run_script` (e.g. `GRIP_TOOLS=read`):
+By default an agent only sees the `core` scope (~35 always-useful tools), not the full 154 — this keeps per-turn schema weight small. Widen the scope per agent — at launch (below) or mid-session with `grip_load_tools {categories:['motion', …]}` (or `'all'`), and drop them again with `grip_load_tools {unload:['motion']}` (`'all'` resets to core; `core`/`meta` can't be unloaded, and tools that are also in core stay). Each change refreshes the tool list via `tools/list_changed` (applies next turn; clients that ignore the notification can still use `run_script`). Not available to restricted scopes without `run_script` (e.g. `GRIP_TOOLS=read`):
 
 - **stdio:** set env `GRIP_TOOLS=core,motion` on the agent process (delivered to the daemon as an IPC control frame, alongside `GRIP_FILE`).
 - **HTTP:** pass `?tools=core,motion` on the `/mcp` URL.
@@ -820,7 +827,7 @@ Tokens are comma-separated. `core` (the default when `GRIP_TOOLS` is unset) and 
 
 `meta`, `read`, `write`, `pages`, `styles`, `variables`, `components`, `text`, `export`, `vector`, `motion`, `figjam`, `slides`, `devmode`, `library`, `assets`, `storage`, `subscribe`, `misc`.
 
-`meta` tools (`grip_health`, `grip_diagnose`, `list_files`, `set_active_file`, `get_page_context`, `grip_capabilities`, `grip_load_tools`) are always present regardless of scope. Regardless of scope, `run_script` (in `core` and in `write`) can reach any Plugin API surface, including tools your scope doesn't expose typed schemas for.
+`meta` tools (`grip_health`, `grip_diagnose`, `list_files`, `set_active_file`, `get_page_context`, `grip_capabilities`, `grip_load_tools`, `grip_update`) are always present regardless of scope. Regardless of scope, `run_script` (in `core` and in `write`) can reach any Plugin API surface, including tools your scope doesn't expose typed schemas for.
 
 Call `grip_capabilities` to see every category, its tool count, a sample of its tools, and whether it's currently `loaded` for your session — the way to discover what a narrower scope is hiding, and to know what to add to `GRIP_TOOLS`/`?tools=` to get it back as typed tools instead of reaching it via `run_script`.
 

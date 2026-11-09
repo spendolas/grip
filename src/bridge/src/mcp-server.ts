@@ -15,6 +15,10 @@ import {
 import type { PluginBridge } from './ws-server.js';
 import type { McpSession, WSEvent } from './types.js';
 import { BRIDGE_VERSION } from './types.js';
+import {
+  getUpdateState, updatesDisabled, checkForUpdate, installAndScheduleRestart, updateNoticeText,
+  updateInstructionsParagraph, type UpdateState,
+} from './update.js';
 
 // File extension per export format, for auto temp-file naming.
 const EXPORT_EXT: Record<string, string> = {
@@ -192,6 +196,7 @@ export function createSession(bridge: PluginBridge): LiveSession {
     subscriptions: { selection: false, document: false, currentPage: false },
     rateBucket: { tokens: RATE_LIMIT_BURST, lastRefillMs: Date.now() },
     toolScopeSpec: null,
+    updateNoticeSent: false,
   };
   // `instructions` is returned with initialize and injected into the agent's
   // context once — unlike tool descriptions, it costs nothing per tool and is
@@ -218,7 +223,8 @@ export function createSession(bridge: PluginBridge): LiveSession {
         'for the document the user is looking at, use Grip.\n\n' +
         'Start with get_page_context (cheap: which file and page, how many nodes selected). ' +
         'If it reports no plugin connected, the user needs to run the Grip plugin in Figma — ' +
-        'say so rather than reporting that you have no Figma access.',
+        'say so rather than reporting that you have no Figma access.' +
+        (() => { const u = getUpdateState(); return u?.available && !updatesDisabled() ? updateInstructionsParagraph(u) : ''; })(),
     },
   );
 
@@ -249,6 +255,21 @@ export function createSession(bridge: PluginBridge): LiveSession {
       process.stderr.write(`[grip] run_script[${sid}] code:\n${(args as any).code}\n[grip] run_script[${sid}] /code\n`);
     }
     const res = await handleCall(name, args);
+    // Update notice: ONE extra text block on the first SUCCESSFUL result of
+    // this session (never on errors, never on grip_update itself), only while
+    // an update is actually available. content[0] is untouched, so callers
+    // that parse the first block as JSON keep working.
+    if (!(res as any)?.isError && !session.updateNoticeSent) {
+      if (name === 'grip_update') {
+        session.updateNoticeSent = true;
+      } else if (!updatesDisabled()) {
+        const u = getUpdateState();
+        if (u?.available) {
+          session.updateNoticeSent = true;
+          (res as any).content.push({ type: 'text' as const, text: updateNoticeText(u) });
+        }
+      }
+    }
     const ms = Date.now() - t0;
     const isErr = (res as any)?.isError;
     const text = (res as any)?.content?.[0]?.text ?? '';
@@ -290,7 +311,39 @@ export function createSession(bridge: PluginBridge): LiveSession {
           activeFileId: session.activeFileId,
           subscriptions: session.subscriptions,
         },
+        update: updateSummary(),
       });
+    }
+    if (name === 'grip_update') {
+      const action = (parsed.data as { action?: 'check' | 'install' }).action ?? 'check';
+      if (action === 'check') {
+        if (updatesDisabled()) {
+          return okResult({ ...updateSummary(), disabled: true, note: 'Automatic update checks are off (GRIP_NO_UPDATE_CHECK). Nothing was contacted. If the user wants to update, call grip_update {action:\'install\'} after they agree.' });
+        }
+        const s = await checkForUpdate();
+        return okResult({
+          ...updateSummary(s),
+          ...(s.error ? { error: s.error } : {}),
+          note: s.available
+            ? `Update available. Tell the user and ask if they want it; only if they say yes, call grip_update {action:'install'}.`
+            : s.error ? 'Could not reach the update server; nothing changed.' : 'Grip is up to date.',
+        });
+      }
+      try {
+        const r = await installAndScheduleRestart();
+        if (r.status === 'up_to_date') return okResult({ status: 'up_to_date', current: BRIDGE_VERSION, latest: r.to });
+        if (r.status === 'already_installing') return okResult({ status: 'already_installing', note: 'An update is already being installed; wait a few seconds.' });
+        return okResult({
+          status: 'updated',
+          from: r.from,
+          to: r.to,
+          restart: r.restart,
+          pluginFilesWritten: r.pluginFilesWritten,
+          next: installNextSteps(r.restart),
+        });
+      } catch (err) {
+        return errorResult(`update failed: ${(err as Error).message}`);
+      }
     }
     if (name === 'grip_diagnose') {
       // Full forensic dump. Safe to call any time — no plugin
@@ -597,6 +650,30 @@ export async function connectStdio(bridge: PluginBridge): Promise<LiveSession> {
   await live.server.connect(transport);
   process.stderr.write(`[grip] mcp session ${live.session.id.slice(0, 8)} on stdio\n`);
   return live;
+}
+
+function updateSummary(s: UpdateState | null = getUpdateState()) {
+  return {
+    current: BRIDGE_VERSION,
+    latest: s?.latest ?? null,
+    available: s?.available ?? false,
+    checkedAt: s?.checkedAt ?? null,
+  };
+}
+
+// What the agent should tell the user after a successful install.
+function installNextSteps(restart: string | undefined): string[] {
+  const steps: string[] = [];
+  if (restart === 'scheduled') {
+    steps.push('The Grip bridge restarts in about a second to load the new version; your next Grip call may fail once with a connection error, simply retry it. stdio agents reconnect on their own; agents on the HTTP transport (http://127.0.0.1:7778/mcp) may need to reconnect their MCP server.');
+  } else if (restart === 'not_managed') {
+    steps.push('The files were installed to ~/.grip, but this bridge is not running from ~/.grip/grip-bridge.mjs, so it did NOT restart. Restart it from the installed copy to use the new version.');
+  } else {
+    steps.push('Restart your agent / the Grip bridge to load the new version.');
+  }
+  steps.push('Figma plugin: if the user imported it from ~/.grip/figma-plugin it was updated in place; they should re-run the plugin (or have Plugins > Development > Hot reload plugin on). If they imported it from a git clone instead, they need to `git pull` there or re-import ~/.grip/figma-plugin/manifest.json.');
+  steps.push('Undo: `node ~/.grip/grip-bridge.mjs update --rollback` restores the previous bridge.');
+  return steps;
 }
 
 // A plugin that predates a method answers with no result at all, which MCP rejects as a

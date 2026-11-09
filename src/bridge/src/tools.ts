@@ -36,7 +36,7 @@ export type ToolCategory =
 
 export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
   meta: ['grip_health', 'grip_diagnose', 'list_files', 'set_active_file', 'get_page_context', 'grip_capabilities',
-    'grip_load_tools'],
+    'grip_load_tools', 'grip_update'],
   read: ['get_document', 'get_page', 'get_node', 'get_nodes', 'get_selection', 'get_styles', 'get_variables',
     'get_components', 'search_nodes', 'find_with_criteria', 'get_plugin_data', 'get_overrides', 'get_instances',
     'get_selection_colors', 'get_top_level_frame', 'get_style_consumers', 'get_publish_status', 'get_relaunch_data',
@@ -388,6 +388,13 @@ export const TOOLS: ToolDef[] = [
     description:
       "Load/unload tool categories (see grip_capabilities); applies next turn.",
     schema: z.object({ categories: z.array(z.string()).optional(), unload: z.array(z.string()).optional() }),
+  },
+  {
+    name: 'grip_update',
+    category: 'meta',
+    description:
+      "Check for / install a Grip update. 'install' ONLY after the user explicitly says yes.",
+    schema: z.object({ action: z.enum(['check', 'install']).optional() }),
   },
   {
     name: 'get_deep_link',
@@ -2393,6 +2400,18 @@ export function toolInputSchema(name: string): Record<string, unknown> {
           field: { type: 'string', description: 'Bindable paint field; default "color"' },
         },
         required: ['nodeId', 'variableId'],
+        additionalProperties: false,
+      };
+    case 'grip_update':
+      return {
+        type: 'object',
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['check', 'install'],
+            description: "'check' (default) reports whether a newer Grip exists. 'install' downloads + verifies + installs it and restarts the bridge: call it ONLY after the user has explicitly agreed.",
+          },
+        },
         additionalProperties: false,
       };
     case 'set_text_range_property':

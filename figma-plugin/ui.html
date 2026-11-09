@@ -10,6 +10,7 @@
         --c-error: #e53519;
       }
       html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+      body { position: relative; }
       #state {
         width: 100%;
         height: 100%;
@@ -29,10 +30,36 @@
         50% { opacity: 0.55; }
       }
       #state.pulsing { animation: grip-pulse 900ms ease-in-out infinite; }
+      /* Update indicator: additive, a sibling OVER the strip (so the strip's
+         colour/pulse are untouched). Hidden unless the bridge announced a newer
+         Grip. Two clicks: the first asks to confirm, the second installs. */
+      #upd {
+        display: none;
+        position: absolute;
+        right: 4px;
+        top: 50%;
+        transform: translateY(-50%);
+        max-width: 112px;
+        box-sizing: border-box;
+        padding: 3px 7px;
+        border-radius: 9px;
+        background: rgba(255, 255, 255, 0.62);
+        color: rgba(0, 0, 0, 0.78);
+        font: 600 10px/1 system-ui, -apple-system, 'Segoe UI', sans-serif;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        cursor: pointer;
+        user-select: none;
+      }
+      #upd.show { display: block; }
+      #upd:hover { background: rgba(255, 255, 255, 0.85); }
+      #upd.confirm { background: #fff; }
     </style>
   </head>
   <body>
     <div id="state"></div>
+    <div id="upd" role="button"></div>
     <script>
       const URL = 'ws://localhost:7777';
       const el = document.getElementById('state');
@@ -88,6 +115,9 @@
         ws.onopen = () => {
           setState('connected');
           backoff = 500;
+          // Back after an update-triggered restart: the new bridge re-announces
+          // an update itself if one is still pending.
+          if (updPhase === 'updating') { updLatest = null; updPhase = 'idle'; renderUpd(); }
         };
         ws.onclose = (ev) => {
           if (ev.code === 1000 && ev.reason === 'duplicate') {
@@ -98,6 +128,9 @@
           }
           busyCount = 0;
           applyPulse();
+          // Not connected: nothing to click. (Mid-update the drop is expected —
+          // the bridge restarts — so keep "updating…" until we reconnect.)
+          if (updPhase !== 'updating') { updLatest = null; updPhase = 'idle'; renderUpd(); }
           scheduleReconnect();
         };
         ws.onerror = () => setState('error');
@@ -109,6 +142,9 @@
             parent.postMessage({ pluginMessage: { kind: 'welcome', sessionId: msg.sessionId } }, '*');
             return;
           }
+          // Update notices (additive; older plugins/bridges simply ignore them).
+          if (msg && msg.type === 'update') { onUpdateNotice(msg); return; }
+          if (msg && msg.type === 'update_result') { onUpdateResult(msg); return; }
           if (msg && msg.id && msg.method) {
             parent.postMessage(
               { pluginMessage: { kind: 'request', id: msg.id, method: msg.method, params: msg.params || {} } },
@@ -117,6 +153,72 @@
           }
         };
       }
+
+      // ---- update indicator ----
+      const updEl = document.getElementById('upd');
+      let updLatest = null;       // newest version the bridge announced (null = none)
+      let updPhase = 'idle';      // idle | confirm | updating | failed
+      let updTimer = null;
+
+      function setUpdTimer(fn, ms) {
+        if (updTimer) clearTimeout(updTimer);
+        updTimer = setTimeout(() => { updTimer = null; fn(); }, ms);
+      }
+
+      function renderUpd() {
+        const visible = updPhase !== 'idle' || !!updLatest;
+        updEl.classList.toggle('show', visible);
+        updEl.classList.toggle('confirm', updPhase === 'confirm');
+        if (!visible) return;
+        updEl.textContent =
+          updPhase === 'confirm' ? 'click to confirm' :
+          updPhase === 'updating' ? 'updating\u2026' :
+          updPhase === 'failed' ? 'update failed' : '\u2191 update';
+        updEl.title =
+          updPhase === 'confirm' ? 'Click again within 5s to download and install Grip ' + (updLatest || '') :
+          updPhase === 'updating' ? 'Installing, the bridge will restart in a moment' :
+          updPhase === 'failed' ? 'The update did not install; ask your agent for details (grip_update) or run: node ~/.grip/grip-bridge.mjs update' :
+          'Grip ' + (updLatest || 'update') + ' is available. Click, then confirm, to install it.';
+      }
+
+      function onUpdateNotice(msg) {
+        if (updPhase === 'updating') return;
+        updLatest = msg.available ? (msg.latest || 'new') : null;
+        if (!updLatest) updPhase = 'idle';
+        renderUpd();
+      }
+
+      function onUpdateResult(msg) {
+        if (msg.status === 'updated') {
+          if (msg.restart === 'scheduled') return;   // bridge is about to restart; reconnect clears us
+          updPhase = 'idle'; updLatest = null;       // installed, but no automatic restart
+        } else if (msg.status === 'already_installing') {
+          return;
+        } else if (msg.status === 'up_to_date') {
+          updPhase = 'idle'; updLatest = null;
+        } else {
+          updPhase = 'failed';
+          setUpdTimer(() => { updPhase = 'idle'; renderUpd(); }, 5000);
+        }
+        renderUpd();
+      }
+
+      // The user's trigger. Iframes can't rely on window.confirm, so: first click
+      // flips the label to "click to confirm" for 5s; a second click installs.
+      updEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (updPhase === 'idle' && updLatest) {
+          updPhase = 'confirm';
+          setUpdTimer(() => { if (updPhase === 'confirm') { updPhase = 'idle'; renderUpd(); } }, 5000);
+          renderUpd();
+        } else if (updPhase === 'confirm') {
+          updPhase = 'updating';
+          send({ type: 'update_request' });
+          // If no restart/reconnect follows, don't sit on "updating…" forever.
+          setUpdTimer(() => { if (updPhase === 'updating') { updPhase = 'idle'; renderUpd(); } }, 60000);
+          renderUpd();
+        }
+      });
 
       function scheduleReconnect() {
         if (reconnectTimer !== null) return;

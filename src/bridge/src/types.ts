@@ -67,6 +67,9 @@ export interface McpSession {
   // 'core' default. Set by later tasks (launch-time env / runtime tool);
   // this task only carries the field and defaults it on session creation.
   toolScopeSpec: string | null;
+  // True once this session has been shown the "update available" notice on a
+  // tool result (it is appended to the FIRST successful result only, once).
+  updateNoticeSent: boolean;
 }
 
 export interface SerializedPaint {

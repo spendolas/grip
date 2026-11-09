@@ -17,6 +17,8 @@ import { activeSessionCount } from './mcp-server.js';
 import { IpcServer } from './ipc-server.js';
 import { HttpServer } from './http-server.js';
 import { runProxy } from './proxy.js';
+import { isUpdateCli, runUpdateCli } from './update-cli.js';
+import { startUpdateChecks, setRestartHook, isManagedInstall, wireUpdateToBridge } from './update.js';
 
 const WS_PORT = Number(process.env.GRIP_WS_PORT ?? 7777);
 const HTTP_PORT = Number(process.env.GRIP_HTTP_PORT ?? 7778);
@@ -29,6 +31,9 @@ const IPC_PATH = process.env.GRIP_IPC_PATH ??
   (IS_WIN ? '\\\\.\\pipe\\grip-bridge' : join(tmpdir(), 'grip-bridge.sock'));
 const STATUS_PATH = process.env.GRIP_STATUS_PATH ?? join(homedir(), '.grip-bridge.status');
 const IS_DAEMON = process.argv.includes('--daemon');
+// `update` / `--update` runs the self-update CLI instead of the shim/daemon:
+// no log mirroring, no daemon spawn, no MCP on stdout (see update-cli.ts).
+const IS_UPDATE_CLI = !IS_DAEMON && isUpdateCli(process.argv);
 // Set by the launchd LaunchAgent. Disables idle-exit + lifetime ceiling so
 // launchd owns the lifecycle (its KeepAlive would just fight self-exit).
 const PERSISTENT = process.env.GRIP_PERSISTENT === '1' || process.argv.includes('--persistent');
@@ -38,7 +43,7 @@ const MAX_LIFETIME_MS = 6 * 60 * 60 * 1000;
 // Mirror stderr to ~/.grip-bridge.log (or GRIP_LOG_PATH) so forensics
 // survive across crashes. Done in-process — no bash wrap, no PATH issue.
 // Goes to both real stderr (so MCP clients can read it) AND the file.
-(() => {
+if (!IS_UPDATE_CLI) (() => {
   try {
     const path = process.env.GRIP_LOG_PATH ?? join(homedir(), '.grip-bridge.log');
     const fd = openSync(path, 'a');
@@ -172,6 +177,15 @@ async function runDaemon(bridge: PluginBridge) {
   const http = new HttpServer(HTTP_PORT, bridge);
   await http.listen();
 
+  // Self-update (user-triggered only; see update.ts). The daemon checks for a
+  // newer release ~30s after start and every 24h; the result reaches agents
+  // (instructions + first tool result + grip_health) and the plugin strip.
+  // Installing happens only on an explicit grip_update {install} / plugin
+  // click / CLI; afterwards the daemon restarts itself from the new file.
+  wireUpdateToBridge(bridge);
+  startUpdateChecks();
+  setRestartHook(() => restartDaemon(ipc, http, bridge), isManagedInstall());
+
   // Status file — cheap external probe target. Future tooling can read
   // this instead of paying the MCP-handshake cost to check liveness.
   const startedAt = Date.now();
@@ -277,6 +291,33 @@ async function runDaemon(bridge: PluginBridge) {
   process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
 }
 
+// Restart after a successful self-update, so the NEW ~/.grip/grip-bridge.mjs
+// takes over. Called ~1s after the install response was sent.
+//  - supervised (GRIP_SUPERVISED=1: the macOS Login Item loop / systemd unit
+//    written by install.ts): exit(0) and the supervisor starts the new file.
+//  - otherwise (stdio on-demand daemon, hand-started daemon): release the
+//    ports, spawn a detached replacement from the same path, then exit. The
+//    replacement waits briefly for :7777 (GRIP_RESTART_WAIT) because the WS
+//    bind is the single-instance lock. Shims also reconnect on their own
+//    (proxy.ts -> ensureDaemon) and would spawn from this same path.
+function restartDaemon(ipc: IpcServer, http: HttpServer, bridge: PluginBridge) {
+  process.stderr.write('[grip] update installed; restarting daemon\n');
+  try { ipc.close(); } catch {}
+  try { http.close(); } catch {}
+  try { bridge.close(); } catch {}
+  try { unlinkSync(STATUS_PATH); } catch {}
+  if (process.env.GRIP_SUPERVISED === '1') process.exit(0);
+  const self = fileURLToPath(import.meta.url);
+  const child = spawn(process.execPath, [self, ...process.argv.slice(2)], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+    env: { ...process.env, GRIP_RESTART_WAIT: '1' },
+  });
+  child.unref();
+  process.exit(0);
+}
+
 // ---------- shim role ----------
 
 // Probe the daemon's IPC socket. Resolves a connected socket or null.
@@ -338,8 +379,20 @@ async function runShim() {
 }
 
 async function main() {
+  if (IS_UPDATE_CLI) {
+    process.exit(await runUpdateCli(process.argv));
+  }
   if (IS_DAEMON) {
-    const bridge = await tryBindWs();
+    let bridge = await tryBindWs();
+    // A replacement daemon spawned by restartDaemon() races the old one
+    // releasing :7777, so retry for a few seconds before conceding the lock.
+    if (!bridge && process.env.GRIP_RESTART_WAIT === '1') {
+      for (let i = 0; i < 30 && !bridge; i++) {
+        await new Promise((r) => setTimeout(r, 200));
+        bridge = await tryBindWs();
+      }
+    }
+    delete process.env.GRIP_RESTART_WAIT;
     if (!bridge) {
       // Another daemon already owns the port. Single-instance lock held
       // elsewhere — exit cleanly; the shim that spawned us will connect
