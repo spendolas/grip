@@ -122,8 +122,7 @@ jobs:
         if: steps.gate.outputs.action != 'skip' || env.DRY_RUN == 'true'
         run: |
           set -euo pipefail
-          (cd src/bridge && npm audit --omit=dev --audit-level=high)
-          (cd src/plugin && npm audit --omit=dev --audit-level=high)
+          node scripts/audit-gate.mjs src/bridge src/plugin
 
       # `npm test` builds first (it must not depend on anything already being
       # built), then runs the bridge suites and the scripts/ suites.

@@ -101,7 +101,7 @@ test('CLI on the real tree: passes the allowlist and writes the notices (needs n
   const r = spawnSync(process.execPath, [SCRIPT, '--lock', lock, '--out', out], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const text = readFileSync(out, 'utf8');
-  for (const must of ['@modelcontextprotocol/sdk', 'ws ', 'zod ', 'uuid ']) assert.ok(text.includes(must), must);
+  for (const must of ['@modelcontextprotocol/sdk', 'ws ', 'zod ']) assert.ok(text.includes(must), must);
   assert.ok(productionPackages(JSON.parse(readFileSync(lock, 'utf8'))).length > 20);
   // every production package appears with its license text
   const n = (text.match(/^={78}$/gm) || []).length;

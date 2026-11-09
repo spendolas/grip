@@ -1,5 +1,5 @@
 import { WebSocketServer, WebSocket } from 'ws';
-import { v4 as uuid } from 'uuid';
+import { randomUUID as uuid } from 'node:crypto';
 import { EventEmitter } from 'events';
 import type { McpSession, PluginSessionInfo, WSEvent, WSHello, WSResponse } from './types.js';
 import { BRIDGE_VERSION } from './types.js';

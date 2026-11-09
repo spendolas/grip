@@ -1,0 +1,11 @@
+{
+  "_comment": "Accepted npm advisories for PRODUCTION dependencies (scripts/audit-gate.mjs). Every entry needs a reason and a reviewBy date; the gate fails once a date has passed, so nothing is accepted forever by accident. Anything high or critical that is not listed here fails the release.",
+  "accepted": [
+    {
+      "id": "GHSA-mrhx-c7xc-m3w5",
+      "package": "zod",
+      "reason": "Memory exhaustion when validating oversized constrained collections. The fix is only in zod 4, and Grip's tool schemas depend on zod 3 plus zod-to-json-schema. The only input is a tool call from the user's own agent over loopback, so exposure is limited to the user's machine. Revisit with the zod 4 migration.",
+      "reviewBy": "2027-03-01"
+    }
+  ]
+}

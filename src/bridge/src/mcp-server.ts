@@ -5,7 +5,7 @@ import {
   ListToolsRequestSchema,
   ElicitResultSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { v4 as uuid } from 'uuid';
+import { randomUUID as uuid } from 'node:crypto';
 import { readFile, writeFile, stat, open, mkdir } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';

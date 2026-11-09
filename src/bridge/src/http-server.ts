@@ -1,5 +1,5 @@
 import { createServer, type Server as HttpNetServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { v4 as uuid } from 'uuid';
+import { randomUUID as uuid } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createSession, destroySession, type LiveSession } from './mcp-server.js';
 import type { PluginBridge } from './ws-server.js';
