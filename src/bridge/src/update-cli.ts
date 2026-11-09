@@ -136,7 +136,7 @@ export async function runUpdateCli(argv: string[]): Promise<number> {
     if (r.pluginFilesWritten?.length) out(`  plugin  -> ${gripHome()}/figma-plugin (${r.pluginFilesWritten.join(', ')})`);
     out('Rolling back restores the bridge only; the plugin files stay at the new version.');
     out(stopRunningDaemon().note);
-    out('If you imported the plugin from a git clone instead of ~/.grip/figma-plugin, run `git pull` there (or import ~/.grip/figma-plugin/manifest.json in Figma).');
+    out('If you imported the plugin from a git clone instead of ~/.grip/figma-plugin, run `git pull && npm run build` there (or import ~/.grip/figma-plugin/manifest.json in Figma).');
     return 0;
   } catch (err) {
     process.stderr.write(`Update failed: ${(err as Error).message}\n`);

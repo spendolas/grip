@@ -234,10 +234,10 @@ const CONNECTED_TITLE = 'Grip 0.8.0 — connected';
   h.fromMain({ kind: 'hello', version: '0.8.0' });
   ws.deliver({ type: 'update', available: true, latest: '0.9.0', current: '0.8.0' });
   h.click();
-  ws.deliver({ type: 'update_result', status: 'clone_install', from: '0.8.0', to: '0.9.0', next: ['git pull', 'node bridge/install.mjs'] });
+  ws.deliver({ type: 'update_result', status: 'clone_install', from: '0.8.0', to: '0.9.0', next: ['git pull', 'npm run build', 'node bridge/install.mjs'] });
   assert.ok(h.has('connected') && !purple(h), 'the indicator stops being purple for a developer install');
   assert.match(h.title(), /developer install/);
-  assert.match(h.title(), /git pull && node bridge\/install\.mjs/);
+  assert.match(h.title(), /git pull && npm run build && node bridge\/install\.mjs/);
   // a repeated frame for the same version does not bring the purple back
   ws.deliver({ type: 'update', available: true, latest: '0.9.0', current: '0.8.0' });
   assert.ok(!purple(h), 'still not purple');

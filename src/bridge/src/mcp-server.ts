@@ -765,7 +765,7 @@ function installNextSteps(restart: string | undefined): string[] {
   } else {
     steps.push('Restart your agent / the Grip bridge to load the new version.');
   }
-  steps.push('Figma plugin: if the user imported it from ~/.grip/figma-plugin it was updated in place; they should re-run the plugin (or have Plugins > Development > Hot reload plugin on). If they imported it from a git clone instead, they need to `git pull` there or re-import ~/.grip/figma-plugin/manifest.json.');
+  steps.push('Figma plugin: if the user imported it from ~/.grip/figma-plugin it was updated in place; they should re-run the plugin (or have Plugins > Development > Hot reload plugin on). If they imported it from a git clone instead, they need to `git pull && npm run build` there or re-import ~/.grip/figma-plugin/manifest.json.');
   steps.push('Undo: `node ~/.grip/grip-bridge.mjs update --rollback` restores the previous bridge (the plugin files stay at the new version).');
   return steps;
 }

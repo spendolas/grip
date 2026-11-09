@@ -13,7 +13,7 @@ Newest first. Each `## <version>` heading is the exact version number; the GitHu
 - Updates come from this repository's GitHub Releases. Every file is checked against the SHA-256 list published with the release, and the new bridge must start and report its version before it replaces the old one. The previous bridge is kept so you can undo.
 - Grip looks once a day whether a newer version exists. Set `GRIP_NO_UPDATE_CHECK=1` to turn that off completely.
 - Installing is now one download: tell your agent "Install Grip from https://github.com/spendolas/grip/releases/latest" and the steps in the README fetch a single zip from that release, verify it, and run the installer.
-- If you installed from a git clone, Grip never overwrites that install. Update it with `git pull` and `node bridge/install.mjs`.
+- If you installed from a git clone, Grip never overwrites that install. Update it with `git pull`, `npm run build` and `node bridge/install.mjs`.
 
 ## 0.7.0
 

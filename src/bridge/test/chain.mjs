@@ -2,8 +2,14 @@
 // Usage:  node test-chain.mjs '[["tool",{...}], ...]'
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 
 const calls = JSON.parse(process.argv[2]);
+
+if (!existsSync(new URL('../dist/index.js', import.meta.url))) {
+  console.error('src/bridge/dist/index.js not found: run `npm run build` (or `npm run compile` in src/bridge) first');
+  process.exit(1);
+}
 
 const bridge = spawn('node', [resolve(new URL('../dist/index.js', import.meta.url).pathname)], {
   stdio: ['pipe', 'pipe', 'inherit'],

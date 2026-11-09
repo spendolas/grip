@@ -26,6 +26,11 @@ const INSTALL_JS = join(REPO, 'bridge', 'install.mjs');
 const INDEX_JS = join(REPO, 'bridge', 'grip-bridge.mjs');
 const NODE = process.execPath;
 
+// Nothing generated is committed: this test needs the local build (`npm run build`; `npm test` runs it).
+for (const f of [INSTALL_JS, INDEX_JS]) {
+  if (!existsSync(f)) { console.error(`${f} not found: run \`npm run build\` first`); process.exit(1); }
+}
+
 let failures = 0;
 function check(name, cond, extra = '') {
   if (cond) { console.log(`  \x1b[32m✓\x1b[0m ${name}`); }

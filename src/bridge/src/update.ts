@@ -367,7 +367,8 @@ export function readInstallRecord(): InstallRecord {
   } catch { return { source: 'release', version: '' }; }
 }
 
-export const CLONE_NEXT_STEPS = ['git pull', 'node bridge/install.mjs'];
+// Bundles are not committed: after the pull the clone must rebuild before installing.
+export const CLONE_NEXT_STEPS = ['git pull', 'npm run build', 'node bridge/install.mjs'];
 
 // ---------- compatibility (bridge <-> plugin) ----------
 

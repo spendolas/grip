@@ -203,9 +203,9 @@ Before you begin, read these rules. They apply to every step below.
 ## What's in here
 
 ```
-figma-plugin/     the plugin — 3 files, nothing to build (the installer copies it to ~/.grip/figma-plugin)
-bridge/           the bridge + installer — single self-contained files
-scripts/          release packaging and the release gate (used by CI)
+figma-plugin/     the plugin: manifest.json and ui.html are hand-written; code.js is build output (not in git). The installer copies it to ~/.grip/figma-plugin
+bridge/           local build output only (not in git): the bridge + installer, single self-contained files. Release downloads contain them
+scripts/          release packaging, the release gate, bundle hygiene and license notices (used by CI)
 src/              source for both halves (ignore unless you're changing Grip)
 assets/           artwork for the Community listing — not used at runtime
 CHANGELOG.md      what changed in each release (also the release notes)
@@ -225,9 +225,9 @@ Grip never updates itself behind your back: **an update happens only when you sa
 1. **Click the plugin strip.** When a compatible update exists, the Grip plugin's status strip in Figma turns **purple and pulses** (grey = no bridge, green = connected, yellow = warning, red = error: purple is only ever an update). Hover it for what is new; **one click installs it.** While it installs the strip pulses faster and says "Updating…", goes grey for a second while the bridge restarts, then turns green again. If an install fails it flashes red once and goes back to purple with the reason in the tooltip ("click to retry").
 2. **Ask your agent: "update Grip".** It calls `grip_update`, tells you what's new (the release notes) and installs only after you say yes. If your agent can ask you directly (MCP elicitation) Grip asks you itself and installs only if you accept; the agent saying "they said yes" is not enough there.
 3. **Manually.** `node ~/.grip/grip-bridge.mjs update` (asks first; `--yes` skips the question, `--check` only reports and shows the notes, `--rollback` puts the previous bridge back).
-4. **Developer installs (a git clone).** `git pull && node bridge/install.mjs`. An install made from a clone is never updated in place: the updater, the agent tool and the plugin all tell you to use `git pull` instead (the strip is not purple for a clone install). (`update --force` on the command line overrides that.)
+4. **Developer installs (a git clone).** `git pull && npm run build && node bridge/install.mjs` (the bundles are not in git, so rebuild after pulling). An install made from a clone is never updated in place: the updater, the agent tool and the plugin all tell you to update the clone instead (the strip is not purple for a clone install). (`update --force` on the command line overrides that.)
 
-After an update the bridge restarts itself within a second (your agent may need one retry; agents on the HTTP transport may have to reconnect). If you imported the plugin from `~/.grip/figma-plugin` it was refreshed in place; re-run it in Figma (or turn on **Plugins → Development → Hot reload plugin**). If you imported it from a git clone instead, `git pull` there.
+After an update the bridge restarts itself within a second (your agent may need one retry; agents on the HTTP transport may have to reconnect). If you imported the plugin from `~/.grip/figma-plugin` it was refreshed in place; re-run it in Figma (or turn on **Plugins → Development → Hot reload plugin**). If you imported it from a git clone instead, `git pull && npm run build` there.
 
 **Plugin compatibility.** The published Figma plugin is updated through Figma, not by this updater, so the plugin you have can be older than the bridge. Every release carries a `compat.json` (`{"version", "minPlugin"}`, checked against `SHA256SUMS.txt`) naming the oldest plugin it works with. Grip signals (purple strip, agent notices) and installs an update only when at least one plugin window is connected and **every** connected plugin is at least that version, because an update replaces the bridge for all your Figma windows. If one is too old, `grip_health` says so ("plugin 0.6.0 in "Fidelity" is older than 0.9.0 requires (>=0.8.0); update the Grip plugin in Figma first") and nothing is offered. A release without a verifiable `compat.json` is never offered or installed (only the command line's `--force` overrides that, with a loud warning). The check runs again at install time against the windows connected then; from the command line it asks a running bridge, and if it cannot (no bridge or plugin open) it says so and needs `--yes`.
 
@@ -249,7 +249,7 @@ After an update the bridge restarts itself within a second (your agent may need 
 - Call `grip_update` with `action: "check"`. Tell the user the installed and latest versions and what is new (the release notes it returns). **Do not install until they say yes.** If it reports `signalled: false` with a `blockedReason` (for example a connected Figma plugin is too old), do not install: tell the user the reason and what to do (update the Grip plugin in Figma first).
 - On a clear yes, call `grip_update` with `action: "install"` and `version` set to the exact `latest` you showed the user (`version` is required; if a newer release has appeared the call fails with `version_changed` and returns its notes: show them and ask again). If your client can show prompts, the bridge asks the user itself and may answer `declined`; respect that. Then tell them the bridge restarts within a second (you may need to retry once or reconnect) and that the plugin needs re-running in Figma.
 - If the tool answers `plugins_unverifiable`, ask the user to open the Grip plugin in Figma and try again. If it answers `incompatible_plugin`, relay the reason.
-- If the tool answers `clone_install`, this is a developer install: tell the user to run `git pull && node bridge/install.mjs` in their clone. Do not work around it.
+- If the tool answers `clone_install`, this is a developer install: tell the user to run `git pull && npm run build && node bridge/install.mjs` in their clone. Do not work around it.
 - If `grip_update` does not exist, Grip is older than 0.8.0 and cannot update itself: follow the install instructions above (step 2 covers the "already installed" case and asks the user first).
 - If the check fails or reports no network, say so and stop; do not fetch Grip from anywhere except this repository's releases.
 
@@ -261,14 +261,16 @@ Install from a clone when you want to change Grip:
 
 ```sh
 npm run setup                  # install dependencies for both halves (npm ci: lockfile-pinned, so your build matches CI's)
-npm run build                  # rebuild the plugin and the bridge bundles
-node bridge/install.mjs        # install your build into ~/.grip (a "developer install"; add --http for the always-on daemon)
-npm test                       # bridge suites + the release gate and packager tests
+npm run build                  # a LOCAL build: bridge/grip-bridge.mjs, bridge/install.mjs, bridge/THIRD-PARTY-NOTICES.txt and figma-plugin/code.js (all gitignored)
+node bridge/install.mjs        # try that build: install it into ~/.grip (a "developer install"; add --http for the always-on daemon)
+npm test                       # builds first, then the bridge suites and the release gate, packager, hygiene and notices tests
 ```
 
-`figma-plugin/code.js` and `bridge/*.mjs` are build artifacts that are **deliberately committed**: they are what a release ships, and CI fails if they differ from a clean rebuild. Rebuild with `npm run build` and commit them together with the source change. Install dependencies with `npm run setup` (`npm ci`), never a bare `npm install`: a drifted dependency changes the bundle and CI will reject it.
+**Nothing generated is committed.** The release bundles are built only by CI, from source, and published as release assets; `bridge/` and `figma-plugin/code.js` are gitignored build output that `npm run build` writes locally. Only the hand-written `figma-plugin/manifest.json` and `figma-plugin/ui.html` are in git. A clone must be built before you import the plugin from `figma-plugin/` or run `node bridge/install.mjs` (the installer warns, and does not copy the plugin, if `code.js` is missing). Use `npm run setup` (`npm ci`), never a bare `npm install`, so your dependencies are exactly the lockfile's, as in CI.
 
-A clone install is recorded in `~/.grip/install.json` (`{"source":"clone"}`), which is why the in-place updater leaves it alone: update with `git pull && node bridge/install.mjs`.
+A clone install is recorded in `~/.grip/install.json` (`{"source":"clone"}`), which is why the in-place updater leaves it alone: update with `git pull && npm run build && node bridge/install.mjs`.
+
+Tip: if macOS shows Gatekeeper warnings about `esbuild` (or any `node_modules` binary) in a cloud-synced folder such as Dropbox or iCloud, keep your clone outside the synced folder and run npm there.
 
 For live work, `npm --prefix src/plugin run dev` watches the plugin (it hot-reloads in Figma); the bridge picks up changes when its parent agent restarts.
 
@@ -279,8 +281,7 @@ Releases are cut by CI. Do not create tags or releases by hand.
 1. Bump the version in the four lockstep places: `BRIDGE_VERSION` in `src/bridge/src/types.ts`, `PLUGIN_VERSION` in `src/plugin/code.ts`, and `version` in `src/bridge/package.json` and `src/plugin/package.json` (`npm run package` refuses to build if they differ).
 2. **Check `MIN_PLUGIN_VERSION`** in `src/bridge/src/types.ts`: the oldest Figma plugin this bridge release works with. It becomes the release's `compat.json` (generated by `scripts/package-release.mjs`, never hand-edited), and the updater only signals or installs a release to people whose connected plugins are at least that version. Leave it alone unless the release needs plugin features or protocol that older plugins lack. **If you raise it, publish the new plugin in Figma BEFORE cutting the bridge release** (people can only update the plugin through Figma, and until they do the bridge update is withheld from them), and add a line to the CHANGELOG saying the plugin must be updated first.
 3. Add a `## <version>` section to the top of [`CHANGELOG.md`](./CHANGELOG.md): the exact version number, a one-line bold headline, then plain bullets a designer can read. The section becomes the release notes, and the release does not publish without it. CI appends an install footer to every release body (after a `<!-- grip-install -->` marker line: "tell your agent `Install Grip from https://github.com/spendolas/grip/releases/latest`", plus a link to the README at that release's tag); update notices cut everything from that marker, so do not write one yourself.
-4. `npm run build` and commit the regenerated `bridge/` and `figma-plugin/` files with the rest.
-5. Push to `main`. [`.github/workflows/release.yml`](./.github/workflows/release.yml) rebuilds from source and fails if the committed bundles differ, runs the tests, packages the eight assets (`node scripts/package-release.mjs`: `grip-bridge.mjs`, `install.mjs`, `grip-plugin-*` (three files), `grip-install.zip`, `compat.json`, `SHA256SUMS.txt`), smoke-tests the zip install, and publishes release `v<version>` with the notes. A push that does not bump the version publishes nothing. **Run workflow** (manual) is a dry run by default: it only uploads the assets as a workflow artifact.
+4. Push to `main`. There is nothing to build or commit first: bundles are not in git. [`.github/workflows/release.yml`](./.github/workflows/release.yml) runs `npm ci`, builds the bundles from source (`npm run build`, which also enforces the license allowlist and writes the third-party notices), runs the hygiene check (no developer paths or secret-looking values in anything that ships), `npm audit --omit=dev --audit-level=high` (release runs only), `npm test`, packages the nine assets (`node scripts/package-release.mjs`: `grip-bridge.mjs`, `install.mjs`, `grip-plugin-*` (three files), `grip-install.zip`, `compat.json`, `THIRD-PARTY-NOTICES.txt`, `SHA256SUMS.txt`), smoke-tests the zip install, and publishes release `v<version>` with the notes. A push that does not bump the version publishes nothing. **Run workflow** (manual) is a dry run by default: it only uploads the assets as a workflow artifact.
 
 ## Licence
 

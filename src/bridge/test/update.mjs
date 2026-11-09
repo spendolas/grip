@@ -588,7 +588,7 @@ assert.strictEqual(U.releaseNotes('short'), 'short');
   const before = snapshotDir(home);
   const r = await inst();
   assert.strictEqual(r.status, 'clone_install');
-  assert.deepStrictEqual(r.next, ['git pull', 'node bridge/install.mjs']);
+  assert.deepStrictEqual(r.next, ['git pull', 'npm run build', 'node bridge/install.mjs']);
   assert.deepStrictEqual([r.from, r.to], [BRIDGE_VERSION, NEWER]);
   assert.strictEqual(readFileSync(join(home, 'grip-bridge.mjs'), 'utf8'), 'CLONE BRIDGE', 'clone install not overwritten');
   assert.strictEqual(snapshotDir(home), before, 'nothing written');
@@ -1118,7 +1118,7 @@ const OLD_PLUGIN = [{ pluginVersion: '0.5.0', fileName: 'Old file', wsReady: tru
   assert.ok(!inst4.isError, texts(inst4)[0]);
   const i4 = JSON.parse(texts(inst4)[0]);
   assert.strictEqual(i4.status, 'clone_install');
-  assert.deepStrictEqual(i4.next, ['git pull', 'node bridge/install.mjs']);
+  assert.deepStrictEqual(i4.next, ['git pull', 'npm run build', 'node bridge/install.mjs']);
   assert.strictEqual(i4.to, '99.4.0');
   assert.strictEqual(snapshotDir(home5), before);
   assert.strictEqual(readFileSync(join(home5, 'grip-bridge.mjs'), 'utf8'), bridgeBefore);
@@ -1313,7 +1313,7 @@ assert.ok(!originAllowedForUpdate('https://evil.example') && !originAllowedForUp
   plug.ws.send(JSON.stringify({ type: 'update_request', version: '99.5.0' }));
   const cl = await waitFor(plug.msgs, (m) => m.type === 'update_result');
   assert.deepStrictEqual([cl?.status, cl?.to], ['clone_install', '99.5.0']);
-  assert.deepStrictEqual(cl?.next, ['git pull', 'node bridge/install.mjs']);
+  assert.deepStrictEqual(cl?.next, ['git pull', 'npm run build', 'node bridge/install.mjs']);
   assert.strictEqual(readFileSync(join(home, 'grip-bridge.mjs'), 'utf8'), bridgeBefore, 'strip click did not overwrite a clone install');
 
   plug.ws.close();
@@ -1505,11 +1505,11 @@ assert.ok(!originAllowedForUpdate('https://evil.example') && !originAllowedForUp
   const cl = await run(['update', '--yes']);
   assert.strictEqual(cl.code, 0, cl.err);
   assert.match(cl.out, /developer install/);
-  assert.match(cl.out, /git pull && node bridge\/install\.mjs/);
+  assert.match(cl.out, /git pull && npm run build && node bridge\/install\.mjs/);
   assert.strictEqual(readFileSync(join(home, 'grip-bridge.mjs'), 'utf8'), 'CLONE BRIDGE', 'clone install untouched by update --yes');
   const clchk = await run(['update', '--check']);
   assert.match(clchk.out, /Update available/, 'check still reports availability');
-  assert.match(clchk.out, /git pull && node bridge\/install\.mjs/);
+  assert.match(clchk.out, /git pull && npm run build && node bridge\/install\.mjs/);
   const forced = await run(['update', '--yes', '--force']);
   assert.strictEqual(forced.code, 0, forced.err);
   assert.match(forced.out, /Updated/);
@@ -1594,6 +1594,19 @@ assert.ok(!originAllowedForUpdate('https://evil.example') && !originAllowedForUp
       assert.ok(existsSync(join(homeB, 'figma-plugin', 'manifest.json')), 'plugin copied from the zip layout');
       assert.match(b.out, /update Grip/, 'release installs are told how to update in place');
     }
+
+    // a clone that was never built has manifest.json but no code.js: warn clearly, copy no half plugin
+    const unbuilt = tmp('grip-unbuilt-');
+    mkdirSync(join(unbuilt, 'bridge'), { recursive: true });
+    mkdirSync(join(unbuilt, 'figma-plugin'), { recursive: true });
+    for (const f of ['install.mjs', 'grip-bridge.mjs']) writeFileSync(join(unbuilt, 'bridge', f), readFileSync(join(REPO, 'bridge', f)));
+    for (const f of ['manifest.json', 'ui.html']) writeFileSync(join(unbuilt, 'figma-plugin', f), readFileSync(join(REPO, 'figma-plugin', f)));
+    const homeC = tmp('grip-inst-unbuilt-');
+    const c = await runInstaller(join(unbuilt, 'bridge'), homeC);
+    assert.strictEqual(c.code, 0, c.err + c.out);
+    assert.match(c.out, /code\.js is missing/, 'says what is missing');
+    assert.match(c.out, /npm run build/, 'says how to fix it');
+    assert.ok(!existsSync(join(homeC, 'figma-plugin')), 'no half-built plugin was copied');
   }
 }
 

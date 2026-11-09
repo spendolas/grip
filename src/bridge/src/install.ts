@@ -81,9 +81,16 @@ function installBridge() {
 // it in place. Optional: when the installer runs from a bare copy with no
 // figma-plugin/ beside it, just warn.
 function installPlugin(): boolean {
+  // The bundles are build output, not committed: a clone that has not been built
+  // has the bridge (we are running it) but no code.js beside manifest.json.
+  if (SOURCE_PLUGIN && !existsSync(join(SOURCE_PLUGIN, 'code.js'))) {
+    warn(`code.js is missing in ${SOURCE_PLUGIN}: the plugin has not been built. Run \`npm run build\` in your Grip clone, then run this installer again.`);
+    warn('Skipped copying the plugin; an existing ~/.grip/figma-plugin was left as it was.');
+    return false;
+  }
   if (!SOURCE_PLUGIN) {
     warn(`figma-plugin/ not found next to the installer (looked beside ${HERE}); skipped.`);
-    warn('Import the plugin from your Grip checkout instead, and update it with git pull.');
+    warn('Import the plugin from your Grip checkout instead (after `npm run build` there), and update it with git pull && npm run build.');
     return false;
   }
   mkdirSync(PLUGIN_DIR, { recursive: true });
@@ -282,13 +289,13 @@ if (pluginInstalled) {
   log('     (import THIS copy, not the repo folder, so updates can refresh it in place).');
 } else {
   log('  2. In Figma: Plugins → Development → Import plugin from manifest…');
-  log('     and choose the \x1b[1mfigma-plugin\x1b[0m folder of your Grip checkout.');
+  log('     and choose the \x1b[1mfigma-plugin\x1b[0m folder of your Grip checkout (after `npm run build` there).');
 }
 log('  3. Run the plugin. Ask your agent to read your selection —');
 log('     the strip turns \x1b[32mgreen\x1b[0m.');
 log();
 if (INSTALL_TYPE === 'clone') {
-  log('Updating later: this is a developer install. Run `git pull && node bridge/install.mjs`');
+  log('Updating later: this is a developer install. Run `git pull && npm run build && node bridge/install.mjs`');
   log('in your clone (the in-place updater never overwrites a clone install).');
 } else {
   log('Updating later: ask your agent to "update Grip", click the plugin strip when it');

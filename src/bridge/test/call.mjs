@@ -3,9 +3,15 @@
 // Usage: node test-call.mjs <tool> [json-args]
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 
 const tool = process.argv[2] ?? 'get_document';
 const args = process.argv[3] ? JSON.parse(process.argv[3]) : {};
+
+if (!existsSync(new URL('../dist/index.js', import.meta.url))) {
+  console.error('src/bridge/dist/index.js not found: run `npm run build` (or `npm run compile` in src/bridge) first');
+  process.exit(1);
+}
 
 const bridge = spawn('node', [resolve(new URL('../dist/index.js', import.meta.url).pathname)], {
   stdio: ['pipe', 'pipe', 'inherit'],

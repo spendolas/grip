@@ -99,7 +99,7 @@
         if (current !== 'connected') return '';
         if (updLatest && updClone) {
           return 'Grip ' + updLatest + ' is available, but this is a developer install (git clone), so it is not updated in place. ' +
-            'Update it from the clone: git pull && node bridge/install.mjs';
+            'Update it from the clone: git pull && npm run build && node bridge/install.mjs';
         }
         if (offered && updPhase === 'failed') return 'Update failed: ' + (updError || 'unknown error') + ' — click to retry';
         if (offered) {
