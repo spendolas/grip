@@ -1,4 +1,4 @@
-// `node ~/.grip/grip-bridge.mjs update [--check] [--yes] [--rollback]`
+// `node ~/.grip/grip-bridge.mjs update [--check] [--yes] [--rollback] [--force]`
 //
 // The manual route for people who'd rather type than click. Runs INSTEAD of
 // the shim/daemon (index.ts parses argv before anything starts), so it never
@@ -8,7 +8,7 @@
 import { createInterface } from 'node:readline';
 import { BRIDGE_VERSION } from './types.js';
 import {
-  checkForUpdate, gripHome, installUpdate, rollbackBridge, stopRunningDaemon, updateBase,
+  CLONE_NEXT_STEPS, checkForUpdate, gripHome, installUpdate, readInstallRecord, releasesApi, rollbackBridge, stopRunningDaemon,
 } from './update.js';
 
 // `update` or `--update` as the first real argument selects the CLI.
@@ -46,7 +46,7 @@ export async function runUpdateCli(argv: string[]): Promise<number> {
     }
   }
 
-  out(`Grip ${BRIDGE_VERSION} installed. Checking ${updateBase()} ...`);
+  out(`Grip ${BRIDGE_VERSION} installed. Checking ${releasesApi()} ...`);
   const s = await checkForUpdate();
   if (s.error) {
     out(`Could not check for updates: ${s.error}`);
@@ -58,8 +58,19 @@ export async function runUpdateCli(argv: string[]): Promise<number> {
     return 0;
   }
   out(`Update available: ${s.current} -> ${s.latest}`);
+  if (s.notes) { out(); out(s.notes); out(); }
+  else if (s.headline) out(s.headline);
+  const force = flags.has('--force');
+  const clone = readInstallRecord().source === 'clone';
+  if (clone && !force && !flags.has('--check')) {
+    out('This is a developer install (Grip was installed from a git clone), so it is not overwritten.');
+    out(`Update it from your clone instead: ${CLONE_NEXT_STEPS.join(' && ')}`);
+    out('(To replace it with the released build anyway, re-run with --force.)');
+    return 0;
+  }
   if (flags.has('--check')) {
-    out(`Install it with: node ${entry} update`);
+    if (clone) out(`This is a developer install: update it from your clone with ${CLONE_NEXT_STEPS.join(' && ')}`);
+    else out(`Install it with: node ${entry} update`);
     return 0;
   }
   if (!yes) {
@@ -73,9 +84,10 @@ export async function runUpdateCli(argv: string[]): Promise<number> {
     }
   }
   try {
-    const r = await installUpdate();
+    const r = await installUpdate({ force });
     if (r.status === 'up_to_date') { out('Already up to date.'); return 0; }
     if (r.status === 'already_installing') { out('Another update is already running.'); return 1; }
+    if (r.status === 'clone_install') { out(`Developer install: run ${CLONE_NEXT_STEPS.join(' && ')} in your clone.`); return 0; }
     out(`Updated ${r.from} -> ${r.to}.`);
     out(`  bridge  -> ${entry}  (previous kept as grip-bridge.prev.mjs; undo with: node ${entry} update --rollback)`);
     if (r.pluginFilesWritten?.length) out(`  plugin  -> ${gripHome()}/figma-plugin (${r.pluginFilesWritten.join(', ')})`);

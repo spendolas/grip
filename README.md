@@ -4,6 +4,16 @@ Full Figma canvas read/write for MCP agents.
 
 Pairs with **[Gaffer](https://github.com/spendolas/gaffer-ae)**, which does the same job for After Effects. Enable both and one agent can read a design out of Figma and build it in After Effects in a single conversation.
 
+## Quick Start
+
+Open your agent (the Claude desktop app, Claude Code, or any MCP agent that can run shell commands) and say:
+
+> Install Grip from https://github.com/spendolas/grip
+
+Your agent downloads the latest release, verifies it, installs it, and asks you a question or two along the way. Then you import the plugin in Figma (one menu step that only you can do) and restart your agent.
+
+## How it works
+
 Grip has two halves. The **plugin** runs inside Figma. The **bridge** runs on your machine and is what your agent actually talks to. The plugin is inert on its own — it opens a WebSocket to `127.0.0.1:7777` and waits for the bridge to answer.
 
 ```
@@ -12,48 +22,193 @@ your agent  ⇄  bridge (local)  ⇄  Figma plugin  ⇄  the canvas
 
 One bridge serves many agents and many Figma windows at once.
 
-## Install
+## Prerequisites
 
-Nothing to compile. Both halves ship prebuilt.
+- **Node.js 18 or newer** (`node --version`). The bridge is one self-contained file, no npm and no dependencies.
+- **Figma**: Figma Desktop (macOS and Windows) or Figma in the browser (Linux; plugin development import works there too).
+- An MCP agent that can run shell commands, such as the Claude desktop app or Claude Code.
+- Nothing else. No git, no build tools.
 
-**1. The bridge** — one file, no dependencies, no npm:
+---
 
-```sh
-node bridge/install.mjs
-```
+## Install Instructions for Claude
 
-This copies the bridge **and the plugin** to `~/.grip` and registers the bridge with your agent. (Running it again also stops an old running bridge so the new one takes over.) Add `--http` if you'd rather have an always-on background daemon (Login Item on macOS, Startup entry on Windows, systemd user service on Linux). Without it, nothing stays running and the first agent call starts the bridge on demand.
+<details>
+<summary>Claude: read this section when asked to install Grip.</summary>
 
-**2. The plugin** — in Figma, go to **Plugins → Development → Import plugin from manifest…** and choose **`~/.grip/figma-plugin/manifest.json`** (the copy the installer made — importing that one, rather than the repo folder, lets updates refresh the plugin in place).
+### Rules for Claude
 
-**3. Check it.** Restart your agent, run the plugin in any Figma file, then ask your agent to read your selection. The small status strip turns green.
+Before you begin, read these rules. They apply to every step below.
 
-Requirements: **Node 18+** and **Figma**. Figma Desktop exists on macOS and Windows; on Linux use Figma in the browser — plugin development import works there too.
+- Follow the steps in order. Do not skip, reorder, or combine steps.
+- Do not improvise. If a step seems wrong for this system, stop and ask the user rather than deviating.
+- Do not install prerequisites the user is missing (Node.js, Figma). If one is missing, stop and tell the user what to install, with a link. Resume only after they confirm it is installed.
+- Do not change proxy, certificate or network settings, do not turn off certificate checks, and do not ask the user to approve that either. If a download fails, stop and tell the user.
+- Do not add shell aliases, modify the user's PATH, or change any config outside the paths explicitly named in these steps.
+- Shell variables do not carry over between your separate command runs, so every block below sets the paths it needs.
+- If any step fails, stop. Report the exact error. Do not retry with modifications unless the user asks you to.
+- Each code block is its own command: run it on its own, and do not merge blocks or add commands to them. Blocks that delete a folder are kept separate on purpose, because Claude Code's own command check can block a delete that shares a command with other path-like text.
+- Run each Windows block in PowerShell. If your shell is bash, run it as `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ...`, or save it to a .ps1 file and run that with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File <file>`. Bash expands `$` inside double quotes, so the .ps1 file is the safer choice.
+- Never decide for the user whether Grip runs as an always-on background service. That is step 6: ask, and wait for the answer.
+- You cannot click in Figma. Step 7 is the user's. Say so, and wait for them to confirm.
+- After the install completes, run the verification step. Do not skip it.
 
-## Updating
+### What to do
 
-Grip never updates itself behind your back: **an update happens only when you say so.** It does check once a day whether a newer version exists (one small request, see below) and tells you in three places. Pick whichever you like:
+1. **Check prerequisites.** Run this and report the result to the user before proceeding:
 
-1. **Ask your agent: "update Grip".** It calls `grip_update`, tells you what's new, and installs only after you say yes.
-2. **Click the plugin strip.** When an update exists, a small **↑ update** label appears on the Grip plugin's status strip. Click it, then click again on **click to confirm** (you have 5 seconds).
-3. **Manually.** `node ~/.grip/grip-bridge.mjs update` (asks first; `--yes` skips the question, `--check` only reports). Or from a clone: `git pull && node bridge/install.mjs`.
+   ```bash
+   node --version
+   ```
 
-After an update the bridge restarts itself within a second (your agent may need one retry; agents on the HTTP transport may have to reconnect). If you imported the plugin from `~/.grip/figma-plugin` it was refreshed in place; re-run it in Figma (or turn on **Plugins → Development → Hot reload plugin**). If you imported it from a git clone instead, `git pull` there or import `~/.grip/figma-plugin/manifest.json` once.
+   It must print `v18` or higher. If `node` is missing or older than 18, STOP. Tell the user to install the current LTS from https://nodejs.org and come back. Also ask them to confirm they have Figma (Desktop, or Figma in a browser). Do not proceed until both are in place.
 
-**What gets downloaded, from where.** Only `bridge/version.json`, `bridge/grip-bridge.mjs` and the three `figma-plugin/` files from `https://raw.githubusercontent.com/spendolas/grip/main/` (this repo; nothing else is contacted, and redirects off that host are refused). Every file is checked against the SHA-256 and size in `version.json` *before* anything is written, and writes are atomic and confined to `~/.grip`. Be clear about what that proves: it catches corruption and a CDN serving a half-published release, but `version.json` comes from the same repo as the files, so you are trusting the repo owner exactly as much as you do when you `git pull`.
+2. **Check for an existing install.** Look for `~/.grip/grip-bridge.mjs` (Windows: `$env:USERPROFILE\.grip\grip-bridge.mjs`):
 
-**Turning it off.** `GRIP_NO_UPDATE_CHECK=1` (in the environment of your agent / daemon) stops the daily check and every notice; nothing is contacted until you explicitly update yourself. `GRIP_UPDATE_BASE` points updates at a mirror (https, or `http://127.0.0.1`/`localhost`).
+   ```bash
+   # macOS / Linux
+   ls -l "$HOME/.grip/grip-bridge.mjs" "$HOME/.grip/install.json" 2>&1
+   ```
 
-**Undo.** The previous bridge is kept: `node ~/.grip/grip-bridge.mjs update --rollback` puts it back.
+   ```powershell
+   # Windows (PowerShell)
+   Get-Item "$env:USERPROFILE\.grip\grip-bridge.mjs", "$env:USERPROFILE\.grip\install.json" -ErrorAction SilentlyContinue
+   ```
+
+   If the bridge file exists, tell the user: "Grip is already installed. Reinstalling overwrites the installed bridge and plugin files. To upgrade, you can instead ask me to update Grip, which asks you first and shows what is new. Reinstall anyway?" Wait for their answer. If they decline, stop. If `install.json` says `"source": "clone"`, this is a developer install from a git clone: do not reinstall over it, tell the user to use `git pull && node bridge/install.mjs` in their clone, and stop.
+
+3. **Detect the platform.** This step only reads.
+
+   ```bash
+   uname -s
+   ```
+
+   `Darwin` is macOS and `Linux` is Linux: use the macOS / Linux blocks. If the command does not exist, you are on Windows: use the PowerShell blocks. Do not ask the user to confirm.
+
+4. **Download the install package and its checksum list** from the latest GitHub release into a new private folder. Each block prints the folder's path; the next steps need it.
+
+   ```bash
+   # macOS / Linux
+   DL="$(mktemp -d "${TMPDIR:-/tmp}/grip-install.XXXXXX")" && echo "Download folder: $DL" \
+     && curl -fsSL --proto '=https' --connect-timeout 20 --max-time 600 --retry 3 --retry-delay 2 -o "$DL/grip-install.zip" https://github.com/spendolas/grip/releases/latest/download/grip-install.zip \
+     && curl -fsSL --proto '=https' --connect-timeout 20 --max-time 600 --retry 3 --retry-delay 2 -o "$DL/SHA256SUMS.txt" https://github.com/spendolas/grip/releases/latest/download/SHA256SUMS.txt
+   ```
+
+   ```powershell
+   # Windows (PowerShell)
+   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+   $ProgressPreference = 'SilentlyContinue'
+   $dl = Join-Path $env:TEMP ("grip-install-" + [guid]::NewGuid().ToString("N"))
+   New-Item -ItemType Directory -Path $dl | Out-Null
+   "Download folder: $dl"
+   Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/spendolas/grip/releases/latest/download/grip-install.zip" -OutFile "$dl\grip-install.zip"
+   Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/spendolas/grip/releases/latest/download/SHA256SUMS.txt" -OutFile "$dl\SHA256SUMS.txt"
+   ```
+
+   If a download fails (for example HTTP 404 because no release exists yet), stop and report the exact error. Do not take the files from anywhere else.
+
+5. **Verify the checksum before you extract anything.** Replace `<download folder step 4 printed>` with the folder step 4 printed. The file must match the line for `grip-install.zip` in `SHA256SUMS.txt`.
+
+   ```bash
+   # macOS
+   DL="<download folder step 4 printed>"
+   cd "$DL" && grep ' grip-install.zip$' SHA256SUMS.txt | shasum -a 256 -c -
+   ```
+
+   ```bash
+   # Linux
+   DL="<download folder step 4 printed>"
+   cd "$DL" && grep ' grip-install.zip$' SHA256SUMS.txt | sha256sum -c -
+   ```
+
+   ```powershell
+   # Windows (PowerShell)
+   $dl = "<download folder step 4 printed>"
+   $line = Get-Content "$dl\SHA256SUMS.txt" | Where-Object { $_.EndsWith(' grip-install.zip') } | Select-Object -First 1
+   $want = if ($line) { $line.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)[0].ToLower() } else { $null }
+   $got = (Get-FileHash "$dl\grip-install.zip" -Algorithm SHA256).Hash.ToLower()
+   if ($want -and $got -eq $want) { "SHA-256 OK" } else { "SHA-256 MISMATCH: expected $want, got $got" }
+   ```
+
+   macOS and Linux must print `grip-install.zip: OK`; Windows must print `SHA-256 OK`. If it does not, stop and tell the user the download did not match its checksum. Never extract an archive that failed this check.
+
+6. **Ask the user how Grip should run, then run the installer.** Ask exactly this and wait for the answer: "Do you want Grip to start on demand (nothing stays running; the first time your agent uses Grip it starts the bridge), or as an always-on background service (a Login Item on macOS, a Startup entry on Windows, a systemd user service on Linux)? On-demand is the default and is fine for most people." Do not choose for them. Extract the package, then run the installer from the extracted folder (it copies the bridge and the plugin to `~/.grip` and registers Grip with your agent). Replace `<download folder step 4 printed>` as before.
+
+   ```bash
+   # macOS / Linux
+   DL="<download folder step 4 printed>"
+   unzip -q "$DL/grip-install.zip" -d "$DL/extract"
+   ```
+
+   ```bash
+   # macOS / Linux: on-demand (default)
+   DL="<download folder step 4 printed>"
+   node "$DL/extract/grip/bridge/install.mjs"
+   ```
+
+   ```bash
+   # macOS / Linux: only if the user chose the always-on service
+   DL="<download folder step 4 printed>"
+   node "$DL/extract/grip/bridge/install.mjs" --http
+   ```
+
+   ```powershell
+   # Windows (PowerShell)
+   $dl = "<download folder step 4 printed>"
+   Expand-Archive -LiteralPath "$dl\grip-install.zip" -DestinationPath "$dl\extract"
+   ```
+
+   ```powershell
+   # Windows (PowerShell): on-demand (default)
+   $dl = "<download folder step 4 printed>"
+   node "$dl\extract\grip\bridge\install.mjs"
+   ```
+
+   ```powershell
+   # Windows (PowerShell): only if the user chose the always-on service
+   $dl = "<download folder step 4 printed>"
+   node "$dl\extract\grip\bridge\install.mjs" --http
+   ```
+
+   The installer prints what it did. It ends with `Done. Grip <version> installed.` If it prints an error, stop and report it. Note that it registers Grip with your agent by running `claude mcp add` when the Claude Code CLI exists, otherwise by writing the server entry into `~/.claude.json`; tell the user it did this. If Claude Code's permission check blocks the installer, show the user the exact command from the block above and ask them to run it in a terminal and reply when it is done.
+
+7. **Tell the user to import the plugin in Figma. This step is theirs.** You cannot click in Figma. Say, with the right path for their system:
+
+   "In Figma, open **Plugins → Development → Import plugin from manifest…** and choose `~/.grip/figma-plugin/manifest.json` (Windows: `%USERPROFILE%\.grip\figma-plugin\manifest.json`). Import that copy, not a download folder, so later updates can refresh the plugin in place. Then run the plugin from **Plugins → Development → Grip** in any file. Reply when that is done."
+
+   Wait for them to confirm.
+
+8. **Clean up the download folder.** Replace `<download folder step 4 printed>` with the folder step 4 printed. Delete it as its own command.
+
+   ```bash
+   # macOS / Linux
+   DL="<download folder step 4 printed>"
+   rm -rf "$DL"
+   ```
+
+   ```powershell
+   # Windows (PowerShell)
+   $dl = "<download folder step 4 printed>"
+   Remove-Item -LiteralPath $dl -Recurse -Force
+   ```
+
+   Also delete the folder of any failed attempt.
+
+9. **Restart the agent and verify.** Tell the user to restart their agent (quit and reopen the Claude desktop app, or start a new Claude Code session) so it picks up the new Grip server. In the new session, with the plugin running in a Figma file, run `grip_health` (the bridge is up and shows the connected plugin) and then `get_page_context` (it names the open file and page). If `get_page_context` reports no plugin connected, ask the user to run the Grip plugin in Figma (step 7) and try again. The plugin's small status strip turns green when it is connected. If the install was run in a session that already had Grip registered, say plainly that the verification happens after the restart, and ask the user to come back and say "check Grip".
+
+</details>
+
+---
 
 ## What's in here
 
 ```
 figma-plugin/     the plugin — 3 files, nothing to build (the installer copies it to ~/.grip/figma-plugin)
-bridge/           the bridge + installer — single self-contained files, plus version.json (release manifest)
-scripts/          build helper that writes bridge/version.json
+bridge/           the bridge + installer — single self-contained files
+scripts/          release packaging and the release gate (used by CI)
 src/              source for both halves (ignore unless you're changing Grip)
 assets/           artwork for the Community listing — not used at runtime
+CHANGELOG.md      what changed in each release (also the release notes)
 ```
 
 - **[`CLAUDE.md`](./CLAUDE.md)** — architecture (canonical).
@@ -63,17 +218,52 @@ assets/           artwork for the Community listing — not used at runtime
 
 The Figma sandbox can't launch a local process, so opening the plugin **before** any agent has called Grip shows it disconnected (grey). That's expected — the first agent call starts the bridge and the plugin reconnects within a couple of seconds. Use `--http` if you'd rather it always be running.
 
-## Developing
+## Updating
+
+Grip never updates itself behind your back: **an update happens only when you say so.** It does check once a day whether a newer release exists (one small request, see below) and tells you in three places. Pick whichever you like:
+
+1. **Ask your agent: "update Grip".** It calls `grip_update`, tells you what's new (the release notes), and installs only after you say yes.
+2. **Click the plugin strip.** When an update exists, a small **↑ update** label appears on the Grip plugin's status strip (hover it for the one-line summary). Click it, then click again on **click to confirm** (you have 5 seconds).
+3. **Manually.** `node ~/.grip/grip-bridge.mjs update` (asks first; `--yes` skips the question, `--check` only reports and shows the notes, `--rollback` puts the previous bridge back).
+4. **Developer installs (a git clone).** `git pull && node bridge/install.mjs`. An install made from a clone is never updated in place: the updater, the agent tool and the plugin all tell you to use `git pull` instead. (`update --force` on the command line overrides that.)
+
+After an update the bridge restarts itself within a second (your agent may need one retry; agents on the HTTP transport may have to reconnect). If you imported the plugin from `~/.grip/figma-plugin` it was refreshed in place; re-run it in Figma (or turn on **Plugins → Development → Hot reload plugin**). If you imported it from a git clone instead, `git pull` there.
+
+**What gets downloaded, from where.** Updates come from this repository's [GitHub Releases](https://github.com/spendolas/grip/releases). The bridge asks `api.github.com` which release is the latest, then downloads four files from that release (`grip-bridge.mjs`, `grip-plugin-code.js`, `grip-plugin-ui.html`, `grip-plugin-manifest.json`) plus its `SHA256SUMS.txt`. Downloads may only come from `github.com`, `api.github.com` and `*.githubusercontent.com` (GitHub redirects release downloads to `release-assets.githubusercontent.com`; anything else is refused). Every file must be listed in `SHA256SUMS.txt` and match its hash, and stay under a size cap, *before* anything is written; writes are atomic and confined to `~/.grip`, and the previous bridge is kept. The request carries only a generic user agent (`grip-bridge/<version>`): no account, email or machine identifier.
+
+**Firewalls.** If you run an outbound firewall (LuLu, Little Snitch, a corporate proxy), allow `api.github.com`, `github.com` and `release-assets.githubusercontent.com` for `node`. Without them the daily check just fails quietly.
+
+**Turning it off.** `GRIP_NO_UPDATE_CHECK=1` (in the environment of your agent / daemon) stops the daily check and every notice; nothing is contacted until you explicitly update yourself.
+
+**What that does and does not prove.** Releases are built by CI (GitHub Actions) from the tagged commit in this repository, and the checksum list is published with each release. The checksums catch corruption and a half-published release. They do not make the download independent of this repository: `SHA256SUMS.txt` comes from the same release as the files, so you are trusting the repo owner exactly as much as you do when you `git pull`.
+
+**Undo.** `node ~/.grip/grip-bridge.mjs update --rollback` puts the previous bridge back.
+
+## For developers
+
+Install from a clone when you want to change Grip:
 
 ```sh
-npm run setup     # install dependencies for both halves
-npm run build     # rebuild the plugin and the bridge bundles
-npm test          # test suites
+npm run setup                  # install dependencies for both halves
+npm run build                  # rebuild the plugin and the bridge bundles
+node bridge/install.mjs        # install your build into ~/.grip (a "developer install"; add --http for the always-on daemon)
+npm test                       # bridge suites + the release gate and packager tests
 ```
 
-`figma-plugin/code.js`, `bridge/*.mjs` and `bridge/version.json` are build artifacts that are **deliberately committed**, so users don't need a toolchain and the self-updater has a manifest to read. Rebuild with `npm run build` at the repo root (it writes `version.json` last, after the bridge and plugin builds) and commit them whenever you change source; `npm test` fails if `version.json` is stale.
+`figma-plugin/code.js` and `bridge/*.mjs` are build artifacts that are **deliberately committed**: they are what a release ships, and CI fails if they differ from a clean rebuild. Rebuild with `npm run build` and commit them together with the source change.
+
+A clone install is recorded in `~/.grip/install.json` (`{"source":"clone"}`), which is why the in-place updater leaves it alone: update with `git pull && node bridge/install.mjs`.
 
 For live work, `npm --prefix src/plugin run dev` watches the plugin (it hot-reloads in Figma); the bridge picks up changes when its parent agent restarts.
+
+### Releasing
+
+Releases are cut by CI. Do not create tags or releases by hand.
+
+1. Bump the version in the four lockstep places: `BRIDGE_VERSION` in `src/bridge/src/types.ts`, `PLUGIN_VERSION` in `src/plugin/code.ts`, and `version` in `src/bridge/package.json` and `src/plugin/package.json` (`npm run package` refuses to build if they differ).
+2. Add a `## <version>` section to the top of [`CHANGELOG.md`](./CHANGELOG.md): the exact version number, a one-line bold headline, then plain bullets a designer can read. The section becomes the release notes, and the release does not publish without it.
+3. `npm run build` and commit the regenerated `bridge/` and `figma-plugin/` files with the rest.
+4. Push to `main`. [`.github/workflows/release.yml`](./.github/workflows/release.yml) rebuilds from source and fails if the committed bundles differ, runs the tests, packages the assets (`node scripts/package-release.mjs`: `grip-bridge.mjs`, `install.mjs`, `grip-plugin-*`, `grip-install.zip`, `SHA256SUMS.txt`), smoke-tests the zip install, and publishes release `v<version>` with the notes. A push that does not bump the version publishes nothing. **Run workflow** (manual) is a dry run by default: it only uploads the assets as a workflow artifact.
 
 ## Licence
 

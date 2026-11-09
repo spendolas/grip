@@ -91,7 +91,7 @@ up changes.
 - `GRIP_PERSISTENT=1` — disable idle-exit + lifetime ceiling (set by the
   launchd LaunchAgent, which owns the daemon's lifecycle).
 - `GRIP_NO_UPDATE_CHECK=1` — disable the daily update check and all update notices (explicit `update` / `grip_update install` still work).
-- `GRIP_UPDATE_BASE` — base URL for `bridge/version.json` + release files (default `https://raw.githubusercontent.com/spendolas/grip/main/`; https, or http on 127.0.0.1/localhost).
+- `GRIP_RELEASES_API` — full URL of the "latest release" API (default `https://api.github.com/repos/spendolas/grip/releases/latest`; https, or http on 127.0.0.1/localhost). Used by tests and forks; downloads are limited to `github.com`, `api.github.com`, `*.githubusercontent.com` plus this URL's own origin.
 - `GRIP_HOME` — override `~/.grip` (where the installer/updater put the bridge and plugin).
 - `GRIP_SUPERVISED=1` — set by the Login Item / systemd unit written by the installer: after a self-update the daemon just exits and the supervisor restarts it (otherwise it spawns its own replacement).
 - `GRIP_IPC_PATH` — override the leader's UNIX-socket path
@@ -104,7 +104,7 @@ up changes.
 
 ## Self-update
 
-`node ~/.grip/grip-bridge.mjs update [--check] [--yes] [--rollback]` (alias `--update`) checks / installs a newer release without starting a daemon. The same routine backs the `grip_update` MCP tool and the plugin strip's "↑ update" click. Plugin WS protocol additions (all optional, ignored by older peers): bridge → plugin `{type:'update', available, latest}` (on hello and on change) and `{type:'update_result', status, from?, to?, restart?, message?}`; plugin → bridge `{type:'update_request'}`. See the repo README (Updating) and CLAUDE.md.
+`node ~/.grip/grip-bridge.mjs update [--check] [--yes] [--rollback] [--force]` (alias `--update`) checks / installs a newer GitHub Release without starting a daemon (`--force` overwrites a developer/clone install, which is otherwise left alone). The same routine backs the `grip_update` MCP tool and the plugin strip's "↑ update" click. Plugin WS protocol additions (all optional, ignored by older peers): bridge → plugin `{type:'update', available, latest, headline?}` (on hello and on change) and `{type:'update_result', status, from?, to?, restart?, next?, message?}` (`status` may be `clone_install`); plugin → bridge `{type:'update_request'}`. See the repo README (Updating) and CLAUDE.md.
 
 ## Important
 
