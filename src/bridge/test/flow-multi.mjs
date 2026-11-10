@@ -280,6 +280,74 @@ const A = mcp(); const B = mcp();
   assert.match(l.e.message, /safe to retry/);
 }
 
+// Two live windows of one file: wait until both have said hello (plugin()
+// only waits for the first window of a fileKey).
+const twoWindows = (key) => waitUntil(() => bridge.snapshot().plugins.filter((x) => x.fileKey === key && x.hello).length === 2);
+{
+  // A genuine wedge on the NEWEST window of a file is a timeout, even though an
+  // OLDER window of the same file is still open: only a newer window means the
+  // call was lost to a reconnect.
+  const W1 = await plugin('kW', 'File W');
+  await sleep(5);
+  const W2 = await plugin('kW', 'File W');
+  await twoWindows('kW');
+  W2.hold.add('get_selection');
+  const t = await settle(bridge.request('get_selection', {}, mcp()));
+  assert.ok(!t.ok && /^request_timeout: 'get_selection' exceeded 0.6s/.test(t.e.message), t.e?.message);
+  assert.ok(!/plugin_reconnected/.test(t.e.message));
+  assert.strictEqual(W1.got.length, 0, 'the older window was not used');
+  assert.strictEqual(W2.got.length, 1, 'sent once, not re-sent to the older window');
+  W2.replyAll();   // a late reply clears the wedge evidence
+  W1.ws.close(); W2.ws.close();
+  await waitUntil(() => bridge.snapshot().plugins.length === 0);
+}
+{
+  // Calls still QUEUED on an old window move to a newer window of the same file
+  // as soon as it says hello; calls already sent stay on the old one.
+  const Q1 = await plugin('kQ', 'File Q');
+  Q1.hold.add('get_node');
+  const ag = mcp();
+  const sent = [settle(bridge.request('get_node', { nodeId: '1:1', tag: 'S1' }, ag)), settle(bridge.request('get_node', { nodeId: '1:1', tag: 'S2' }, ag))];
+  const queued = [
+    settle(bridge.request('set_node_property', { nodeId: '1:1', property: 'opacity', value: 1, tag: 'Q1' }, ag)),
+    settle(bridge.request('set_node_property', { nodeId: '1:1', property: 'opacity', value: 1, tag: 'Q2' }, ag)),
+  ];
+  await sleep(20);
+  assert.strictEqual(Q1.held.size, 2, 'two sent (max in flight), two queued');
+  const Q2 = await plugin('kQ', 'File Q');
+  await twoWindows('kQ');
+  const q = await Promise.all(queued);
+  assert.deepStrictEqual(q.map((x) => x.ok && x.v.tag), ['Q1', 'Q2'], 'the queued calls ran on the newer window');
+  assert.deepStrictEqual(Q2.got.map((m) => m.params.tag), ['Q1', 'Q2'], 'in order');
+  assert.deepStrictEqual(Q1.got.map((m) => m.params.tag), ['S1', 'S2'], 'the old window only ever got the calls already sent to it');
+  Q1.replyAll();
+  const s = await Promise.all(sent);
+  assert.ok(s.every((x) => x.ok), 'the sent calls are answered by the old window');
+  Q1.ws.close(); Q2.ws.close();
+  await waitUntil(() => bridge.snapshot().plugins.length === 0);
+}
+{
+  // run_script log lines: buffered while the call is pending and attached to its
+  // timeout; a line that arrives after the call settled is dropped, not kept in
+  // a buffer nothing will ever clear.
+  const L = await plugin('kL', 'File L');
+  L.hold.add('run_script');
+  const run = settle(bridge.request('run_script', { code: 'x' }, mcp()));
+  await waitUntil(() => L.held.size === 1);
+  const [id] = [...L.held.keys()];
+  L.ws.send(JSON.stringify({ scriptLog: true, id, line: 'step 1' }));
+  const r = await run;
+  assert.ok(!r.ok && /^request_timeout: 'run_script'/.test(r.e.message), r.e?.message);
+  assert.match(r.e.message, /Partial logs before timeout \(1\): step 1/);
+  assert.strictEqual(bridge.scriptLogs.size, 0, 'cleared on settle');
+  L.ws.send(JSON.stringify({ scriptLog: true, id, line: 'late line' }));
+  await sleep(50);
+  assert.strictEqual(bridge.scriptLogs.size, 0, 'a late log line does not recreate the buffer');
+  L.replyAll();
+  L.ws.close();
+  await waitUntil(() => bridge.snapshot().plugins.length === 0);
+}
+
 bridge.close();
 console.log('flow-multi.mjs OK');
 process.exit(0);

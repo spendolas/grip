@@ -136,13 +136,27 @@ export function isRealFileKey(key: string | undefined | null): key is string {
   return typeof key === 'string' && key !== '' && key !== PLACEHOLDER_FILE_KEY;
 }
 
-// The stable identity of the file a plugin session is showing: its fileUid
-// when the plugin reports one, else its real fileKey, else undefined (the file
-// cannot be told apart from other key-less files; route/list/bind then treat
-// each such WINDOW on its own and never merge or guess between them).
-export function fileIdentity(s: { fileUid?: string; fileKey?: string }): string | undefined {
-  if (typeof s.fileUid === 'string' && s.fileUid !== '') return s.fileUid;
+// The stable identity of the file a plugin session is showing:
+//  - its real fileKey when it has one. A fileUid never overrides a real key:
+//    the plugin re-mints a uid only when it recorded a real key for it, so a
+//    uid minted while the key was still unknown is copied into every duplicate
+//    of that file, and two DIFFERENT files can share one uid.
+//  - for a key-less file ("0:0" or empty) that reports a fileUid: the uid plus
+//    the file name. Two key-less windows that share a uid are one file only
+//    when their names also match; a duplicate keeps the uid but gets another
+//    name, so they are listed separately and nothing guesses between them.
+//  - else undefined: the file cannot be told apart from other key-less files;
+//    route/list/bind then treat each such WINDOW on its own.
+export function fileIdentity(s: { fileUid?: string; fileKey?: string; fileName?: string }): string | undefined {
   if (isRealFileKey(s.fileKey)) return s.fileKey;
+  if (typeof s.fileUid === 'string' && s.fileUid !== '') return `uid:${s.fileUid}:${s.fileName ?? ''}`;
+  return undefined;
+}
+
+// How a file's identity is shown to agents (never the internal uid:name form).
+function identityLabel(s: { fileUid?: string; fileKey?: string }): string | undefined {
+  if (isRealFileKey(s.fileKey)) return s.fileKey;
+  if (typeof s.fileUid === 'string' && s.fileUid !== '') return `file id ${s.fileUid}`;
   return undefined;
 }
 
@@ -418,7 +432,7 @@ export class PluginBridge extends EventEmitter {
     const r = this.route(mcp);
     if (r.kind === 'ok') {
       const match = r.session;
-      process.stderr.write(`[grip] mcp ${mcp.id.slice(0, 8)} bound → ${match.fileName} (${fileIdentity(match) ?? 'window ' + match.id.slice(0, 8)})\n`);
+      process.stderr.write(`[grip] mcp ${mcp.id.slice(0, 8)} bound → ${match.fileName} (${identityLabel(match) ?? 'window ' + match.id.slice(0, 8)})\n`);
       const counts = this.boundCounts(others);
       const entry = this.entryOf(match);
       const file = this.fileInfo(entry, match.id, counts);
@@ -757,10 +771,12 @@ export class PluginBridge extends EventEmitter {
     // Distinguish reconnect churn from a genuine timeout. If a NEWER live
     // session now serves this file, the plugin iframe reconnected during the
     // call (new sessionId) and we were talking to a zombie. That's not a wedge,
-    // and the fix is NOT "reload the Figma tab".
+    // and the fix is NOT "reload the Figma tab". It must be newer (later
+    // hello): an older second window of the same file says nothing about this
+    // one, so a genuine wedge there is still reported as one.
     const ident = fileIdentity(session);
     const fresh = ident
-      ? this.newestLive((s) => fileIdentity(s) === ident && s.id !== session.id)
+      ? this.newestLive((s) => fileIdentity(s) === ident && s.id !== session.id && s.helloAt > session.helloAt)
       : null;
     if (fresh) {
       p.release();
@@ -857,7 +873,7 @@ export class PluginBridge extends EventEmitter {
     const giveUp = () => {
       for (const { item, sent } of items) {
         item.reject(new Error(
-          `plugin_disconnected: the Figma plugin for "${old.fileName || ident || 'this file'}" disconnected and no ` +
+          `plugin_disconnected: the Figma plugin for "${old.fileName || identityLabel(old) || 'this file'}" disconnected and no ` +
             `plugin for that file reconnected within ${PluginBridge.PLUGIN_WAIT_MS / 1000}s. ` +
             (sent
               ? `'${item.method}' only reads, so it is safe to retry once the plugin is back.`
@@ -941,8 +957,8 @@ export class PluginBridge extends EventEmitter {
   // drop it).
   private static pinMatchesBind(s: Session, bind: FileBind | null): boolean {
     if (!bind) return true;
-    if (bind.uid) return s.fileUid === bind.uid;
     if (bind.key) return s.fileKey === bind.key;
+    if (bind.uid) return s.fileUid === bind.uid;
     return true;
   }
 
@@ -974,13 +990,30 @@ export class PluginBridge extends EventEmitter {
       ?? { id: this.entryId(s), identity: fileIdentity(s), name: s.fileName, newest: s, sessions: [s] };
   }
 
+  // The open files (entries) that carry fileUid `uid`, narrowed to the ones
+  // named `name` when given. Several = the uid was copied into a duplicate.
+  private uidEntries(uid: string, name?: string): FileEntry[] {
+    const nm = name?.toLowerCase();
+    return [...this.distinctOpenFiles().values()].filter((e) =>
+      e.sessions.some((x) => x.fileUid === uid) && (nm === undefined || e.name.toLowerCase() === nm));
+  }
+
   // Match a binding against the open windows. Pure (no mutation). Order:
-  // uid, real key, a live bound window, then the exact name. A name that maps
-  // to >1 open file/window is reported as 'many' (ambiguous), never guessed.
+  // real key, uid (+ name), a live bound window, then the exact name. A uid or
+  // name that maps to >1 open file/window is reported as 'many' (ambiguous),
+  // never guessed.
   private matchBind(bind: FileBind): BindMatch {
     const one = (s: Session | null): BindMatch => (s ? { kind: 'one', session: s } : { kind: 'none' });
-    if (bind.uid) return one(this.newestLive((s) => s.fileUid === bind.uid));
     if (bind.key) return one(this.newestLive((s) => s.fileKey === bind.key));
+    if (bind.uid) {
+      // A uid is shared by every duplicate of a file whose uid was minted
+      // before it had a key, so it only identifies a file together with its
+      // name (key-less) or when exactly one open file carries it.
+      const hits = this.uidEntries(bind.uid, bind.name);
+      if (hits.length === 1) return { kind: 'one', session: hits[0].newest };
+      if (hits.length > 1) return { kind: 'many', candidates: hits };
+      return { kind: 'none' };
+    }
     if (bind.sessionId) {
       const s = this.sessions.get(bind.sessionId);
       if (s && PluginBridge.isLive(s)) return { kind: 'one', session: s };
@@ -995,14 +1028,19 @@ export class PluginBridge extends EventEmitter {
     return { kind: 'none' };
   }
 
-  // After a bind resolved to `s`: promote a name/sessionId bind to the file's
-  // stable identity when it has one (uid, else real key). A key-less file
-  // stays bound by name / sessionId (a sessionId bind follows the window it
-  // fell back to by name).
+  // After a bind resolved to `s`: promote a uid/name/sessionId bind to the
+  // file's stable identity when it has one (real key, else uid + name). A
+  // file with neither stays bound by name / sessionId (a sessionId bind
+  // follows the window it fell back to by name).
   private promote(bind: FileBind, s: Session): void {
-    if (bind.key || bind.uid) return;
-    if (s.fileUid) { bind.uid = s.fileUid; delete bind.sessionId; return; }
-    if (isRealFileKey(s.fileKey)) { bind.key = s.fileKey; delete bind.sessionId; return; }
+    if (bind.key) return;
+    if (isRealFileKey(s.fileKey)) { bind.key = s.fileKey; delete bind.uid; delete bind.sessionId; return; }
+    if (s.fileUid) {
+      bind.uid = s.fileUid;
+      if (!bind.name) bind.name = s.fileName;   // a uid alone may also match a later duplicate
+      delete bind.sessionId;
+      return;
+    }
     if (bind.sessionId) bind.sessionId = s.id;
   }
 
@@ -1013,13 +1051,14 @@ export class PluginBridge extends EventEmitter {
     //    if a NEWER live session serves the same file (reconnect overlap),
     //    re-pin to it so we never keep talking to a dying zombie. Only
     //    possible for files with a stable identity; a key-less window is
-    //    kept while it is open (another window may be another file).
+    //    kept while it is open (another window may be another file). The
+    //    new window must match the binding too, so a re-pin can never hop.
     if (mcp.activeFileId) {
       const s = this.sessions.get(mcp.activeFileId);
       if (s && PluginBridge.isLive(s) && PluginBridge.pinMatchesBind(s, mcp.bind)) {
         const ident = fileIdentity(s);
         if (ident) {
-          const newest = this.newestLive((x) => fileIdentity(x) === ident);
+          const newest = this.newestLive((x) => fileIdentity(x) === ident && PluginBridge.pinMatchesBind(x, mcp.bind));
           if (newest && newest.id !== s.id) {
             mcp.activeFileId = newest.id;
             return { kind: 'ok', session: newest };
@@ -1062,8 +1101,8 @@ export class PluginBridge extends EventEmitter {
     // that window, with its name as the fallback when the window respawns.
     const sess = this.sessions.get(trimmed);
     if (sess && sess.helloAt > 0) {
-      if (sess.fileUid) return { uid: sess.fileUid };
       if (isRealFileKey(sess.fileKey)) return { key: sess.fileKey };
+      if (sess.fileUid) return { uid: sess.fileUid, name: sess.fileName };
       return { sessionId: sess.id, name: sess.fileName };
     }
     if (trimmed === PLACEHOLDER_FILE_KEY) {
@@ -1073,15 +1112,24 @@ export class PluginBridge extends EventEmitter {
       );
     }
     for (const s of this.sessions.values()) {
-      if (!PluginBridge.isLive(s)) continue;
-      if (s.fileUid && s.fileUid === trimmed) return { uid: trimmed };
-      if (s.fileKey === trimmed) return { key: trimmed };
+      if (PluginBridge.isLive(s) && s.fileKey === trimmed) return { key: trimmed };
+    }
+    // A fileUid: one open file carries it → that file's key (or uid + name);
+    // several (a duplicate kept the uid) → ambiguous, never guessed.
+    const uidHits = this.uidEntries(trimmed);
+    if (uidHits.length === 1) {
+      const n = uidHits[0].newest;
+      return isRealFileKey(n.fileKey) ? { key: n.fileKey } : { uid: trimmed, name: n.fileName };
+    }
+    if (uidHits.length > 1) {
+      if (lenient) return { uid: trimmed };
+      throw this.ambiguousNameError({ uid: trimmed }, uidHits);
     }
     const nameHits = [...this.distinctOpenFiles().values()].filter((v) => v.name.toLowerCase() === trimmed.toLowerCase());
     if (nameHits.length === 1) {
-      const e = nameHits[0];
-      if (e.newest.fileUid) return { uid: e.newest.fileUid };
-      if (e.identity) return { key: e.identity };
+      const n = nameHits[0].newest;
+      if (isRealFileKey(n.fileKey)) return { key: n.fileKey };
+      if (n.fileUid) return { uid: n.fileUid, name: n.fileName };
       return { name: trimmed };   // key-less file: stay bound by name, never by "0:0"
     }
     if (nameHits.length > 1) {
@@ -1121,9 +1169,9 @@ export class PluginBridge extends EventEmitter {
   }
 
   private static windowLabel(e: FileEntry): string {
-    return e.identity
-      ? `"${e.name}" (${e.identity})`
-      : `"${e.name}" (no stable file key, sessionId ${e.newest.id})`;
+    if (isRealFileKey(e.newest.fileKey)) return `"${e.name}" (${e.newest.fileKey})`;
+    if (e.identity) return `"${e.name}" (${identityLabel(e.newest)}, sessionId ${e.newest.id})`;
+    return `"${e.name}" (no stable file key, sessionId ${e.newest.id})`;
   }
 
   private fileList(files: FileMap): string {
@@ -1135,10 +1183,10 @@ export class PluginBridge extends EventEmitter {
   }
 
   private ambiguousError(files: FileMap): Error {
-    const keyless = [...files.values()].some((e) => !e.identity);
+    const keyless = [...files.values()].some((e) => !isRealFileKey(e.newest.fileKey));
     const what = keyless ? 'Figma files/windows are open' : 'Figma files are open';
     const why = keyless
-      ? ' Windows marked "no stable file key" (local or unsaved files) cannot be told apart by key, so each is listed on its own; if two of them are the same file reconnecting, retry in a few seconds.'
+      ? ' Local or unsaved files have no real file key, so windows that cannot be proven to show one file (marked "no stable file key", or sharing a file id under different names) are listed on their own; if two of them are the same file reconnecting, retry in a few seconds.'
       : '';
     return new Error(
       `ambiguous_active_file: ${files.size} ${what} (${this.fileList(files)}).${why} ` +
@@ -1149,17 +1197,18 @@ export class PluginBridge extends EventEmitter {
 
   private ambiguousNameError(bind: FileBind, candidates: FileEntry[]): Error {
     const list = candidates
-      .map((e) => `"${e.name}" (${e.identity ? 'fileKey ' + e.identity : 'no stable file key'}, sessionId ${e.newest.id})`)
+      .map((e) => `"${e.name}" (${isRealFileKey(e.newest.fileKey) ? 'fileKey ' + e.newest.fileKey : e.identity ? identityLabel(e.newest) : 'no stable file key'}, sessionId ${e.newest.id})`)
       .join(', ');
+    const what = bind.name ? `the file name "${bind.name}"` : `the file id ${bind.uid}`;
     return new Error(
-      `ambiguous_file_name: the file name "${bind.name}" matches ${candidates.length} open files/windows: ${list}. ` +
+      `ambiguous_file_name: ${what} matches ${candidates.length} open files/windows: ${list}. ` +
         `grip won't guess which one. Call set_active_file with the fileKey, or with the sessionId of the window you mean.`,
     );
   }
 
   private deferredError(bind: FileBind, files: FileMap): Error {
     const label = bind.key ? `fileKey ${bind.key}`
-      : bind.uid ? `file id ${bind.uid}`
+      : bind.uid ? `file id ${bind.uid}${bind.name ? ` ("${bind.name}")` : ''}`
       : bind.sessionId ? `window ${bind.sessionId}${bind.name ? ` ("${bind.name}")` : ''}`
       : `file "${bind.name}"`;
     const others = files.size ? ` Open now: ${this.fileList(files)}.` : ' No Figma files are open.';
@@ -1212,9 +1261,12 @@ export class PluginBridge extends EventEmitter {
     }
 
     // Streamed run_script log line — buffer it (bounded) against its request id
-    // so a later timeout can surface how far the script got.
+    // so a later timeout can surface how far the script got. A line for a call
+    // that already settled (timed out, answered, dropped) is ignored: its
+    // buffer was cleared on settle and must not be recreated (never cleared).
     if ((msg as any).scriptLog && typeof (msg as any).id === 'string') {
       const { id, line } = msg as unknown as { id: string; line: string };
+      if (!this.pending.has(id)) return;
       let buf = this.scriptLogs.get(id);
       if (!buf) { buf = []; this.scriptLogs.set(id, buf); }
       buf.push(String(line ?? '').slice(0, 300));
@@ -1292,10 +1344,34 @@ export class PluginBridge extends EventEmitter {
         `[grip] WARNING plugin ${sess.pluginVersion} in "${hello.fileName}" needs bridge >= ${sess.minBridge} but this is ${BRIDGE_VERSION}: the bridge is out of date, update it.\n`,
       );
     }
+    this.adoptQueued(sess);
     // Listeners (update signal) recompute against the new session list and
     // broadcast; then make sure THIS strip has the current state (deduped).
     this.emit('session-change');
     this.pushUpdate(sessionId);
+  }
+
+  // A newer window of the same file just said hello while older ones are still
+  // open (reconnect overlap): routing now goes to it, so calls still QUEUED on
+  // the older windows (never sent) move here instead of being sent to a window
+  // that is about to die. Calls already sent stay where they are (their reply
+  // or the disconnect handling settles them).
+  private adoptQueued(newer: Session): void {
+    const ident = fileIdentity(newer);
+    if (!ident) return;
+    const moved: QueuedRequest[] = [];
+    for (const [sid, pq] of this.queues) {
+      if (sid === newer.id) continue;
+      const old = this.sessions.get(sid);
+      if (!old || old.helloAt > newer.helloAt || fileIdentity(old) !== ident) continue;
+      for (const q of pq.bySession.values()) moved.push(...q);
+      this.queues.delete(sid);
+    }
+    if (moved.length === 0) return;
+    moved.sort((a, b) => a.enqueuedAt - b.enqueuedAt);
+    process.stderr.write(`[grip] moving ${moved.length} queued request(s) for "${newer.fileName}" to the newer window ${newer.id.slice(0, 8)}\n`);
+    for (let i = moved.length - 1; i >= 0; i--) this.enqueue(newer.id, moved[i], true);
+    this.pump(newer.id);
   }
 
   // ---------- update notices ----------

@@ -1,3 +1,5 @@
+import { resolveMerged } from './tools.js';
+
 // Method classification the bridge needs for flow control (reconnect retry,
 // `maybe_applied`, event `causedBy`).
 //
@@ -64,4 +66,23 @@ const EVENTFUL_READ_ONLY = new Set<string>(['set_selection', 'set_current_page',
 // `causedBy` field on event notifications.
 export function causesEvents(method: string): boolean {
   return !READ_ONLY_METHODS.has(method) || EVENTFUL_READ_ONLY.has(method);
+}
+
+// Tools the bridge answers itself that never change the document (routing,
+// health, tool scope, update checks/installs, event subscriptions).
+const BRIDGE_SIDE_SAFE_TOOLS = new Set<string>([
+  'list_files', 'set_active_file', 'grip_health', 'grip_diagnose',
+  'grip_capabilities', 'grip_load_tools', 'grip_update', 'subscribe',
+]);
+
+// Could a tools/call of `tool` with `args` have changed the document? Used by
+// the shim (proxy.ts) to decide whether a call lost with a dropped socket may
+// already have been applied. Unknown or mutating tools say yes; merged tools
+// are judged by the method their op/target resolves to.
+export function toolMayChangeDocument(tool: string | undefined, args: unknown): boolean {
+  if (!tool) return true;
+  if (BRIDGE_SIDE_SAFE_TOOLS.has(tool)) return false;
+  const merged = resolveMerged(tool, args);
+  if (merged) return 'method' in merged ? !READ_ONLY_METHODS.has(merged.method) : false; // a bad op is refused before the plugin
+  return !READ_ONLY_METHODS.has(tool);
 }

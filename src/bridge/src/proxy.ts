@@ -1,5 +1,5 @@
 import { connect, Socket } from 'node:net';
-import { READ_ONLY_METHODS } from './methods.js';
+import { toolMayChangeDocument } from './methods.js';
 
 // Lost the leader-bind race. Run as a proxy: parse JSON-RPC frames from
 // stdio so we can emit typed errors when the leader dies mid-request,
@@ -93,15 +93,16 @@ export async function runProxy(ipcPath: string): Promise<boolean> {
 
   // Track in-flight request ids. On close we emit a typed error response
   // for each so the client never gets a silent -32000 hang.
-  // id -> { JSON-RPC method, tool name for tools/call }.
-  const inflight = new Map<string | number, { method: string; tool?: string }>();
+  // id -> { JSON-RPC method, tool name for tools/call, could it change the document }.
+  const inflight = new Map<string | number, { method: string; tool?: string; mayChange: boolean }>();
 
   onStdinLine = (line: string) => {
     try {
       const msg = JSON.parse(line);
       if (msg && msg.id !== undefined && typeof msg.method === 'string') {
         const tool = msg.method === 'tools/call' && typeof msg.params?.name === 'string' ? msg.params.name : undefined;
-        inflight.set(msg.id, { method: msg.method, tool });
+        const mayChange = msg.method === 'tools/call' && toolMayChangeDocument(tool, msg.params?.arguments);
+        inflight.set(msg.id, { method: msg.method, tool, mayChange });
       }
     } catch {
       // not JSON, still forward
@@ -138,10 +139,10 @@ export async function runProxy(ipcPath: string): Promise<boolean> {
       // Tell the client about each dropped in-flight request with a typed
       // error so it can retry cleanly. Without this, MCP SDK surfaces a
       // generic -32000 Connection closed and the agent has no signal.
-      for (const [id, { method, tool }] of inflight) {
+      for (const [id, { method, tool, mayChange }] of inflight) {
         // The daemon may have run the call before the socket dropped. Only a
         // call that cannot change the document is safe to repeat blindly.
-        const maybeApplied = method === 'tools/call' && !(tool && READ_ONLY_METHODS.has(tool));
+        const maybeApplied = mayChange;
         const advice = maybeApplied
           ? `'${tool ?? method}' may already have been applied before the connection dropped: re-read before retrying (a blind retry can apply it twice)`
           : 'it does not change the document, so it is safe to retry';

@@ -41,9 +41,11 @@ export interface WSHello {
   minBridge?: string;
   capabilities?: string[];
   fileKey: string;
-  // Optional per-file unique id (a future plugin will send it). When present it
-  // is the file's identity, so files without a real fileKey (local/unsaved
-  // files all report the placeholder "0:0") can still be told apart.
+  // Per-file unique id from the plugin's document plugin data (capability fileUid;
+  // absent when it cannot be written, e.g. view-only). It identifies a file only
+  // when the file has no real fileKey (local/unsaved files all report the
+  // placeholder "0:0"), and then together with the file name: a duplicate of a
+  // file keeps its uid, so a uid is never trusted over a real key.
   fileUid?: string;
   fileName: string;
   currentPageId: string;
@@ -72,7 +74,7 @@ export interface FileWindowInfo {
 }
 
 // One entry of list_files: one per FILE when the file has a stable identity
-// (fileUid, else a real fileKey), one per WINDOW when it does not ("0:0").
+// (a real fileKey, else fileUid + name), one per WINDOW when it does not ("0:0").
 // The first six fields are the pre-grouping PluginSessionInfo shape, taken
 // from the newest live window, so older callers keep working.
 export interface ListedFileInfo extends PluginSessionInfo {

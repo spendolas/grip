@@ -30,13 +30,13 @@ List the Figma files open in this Grip bridge, one entry per file.
 - Params: none.
 - Returns: `{ files[], myBinding, connecting }`.
   - Each `files[]` entry keeps the older fields `{ sessionId, fileKey, fileName, currentPageId, currentPageName, active }` (taken from the file's newest live window; `active` is true for the file this MCP session's calls go to) and adds `stableKey`, `fileUid?`, `windows[]` (`{ sessionId, currentPageId, currentPageName, pluginVersion, helloAgoMs }`, newest first), `boundAgents` (how many OTHER agents are bound or pinned to that file: a count, never who) and `note?`.
-  - Grouping: windows are grouped by file identity, which is the plugin-reported `fileUid` when present, else a real `fileKey`. Reconnect duplicates of one file collapse into one entry. A file with no stable identity (local or unsaved files all report `fileKey: "0:0"`) has `stableKey: false` and is listed **once per window**, never merged with other `"0:0"` windows.
+  - Grouping: windows are grouped by file identity, which is a real `fileKey` when the file has one, else the plugin-reported `fileUid` together with the file name (a duplicated file can keep its original's `fileUid`, so it never overrides a real key, and two local windows that share a `fileUid` under different names are listed separately). Reconnect duplicates of one file collapse into one entry. A file with no stable identity (local or unsaved files all report `fileKey: "0:0"`) has `stableKey: false` and is listed **once per window**, never merged with other `"0:0"` windows.
   - `myBinding`: `{ state: 'live'|'waiting'|'unbound', target?, sessionId?, fileName?, reason? }`. `live` = bound and routing to `sessionId`; `waiting` = bound but `reason: 'not_open'` (the file is not open) or `'ambiguous_name'` (the bound name matches several open files); `unbound` = no binding (`sessionId` is set when exactly one file is open, so calls auto-route there).
   - `connecting`: plugin sockets that are open but have not said hello yet (they are not listed).
 
 ### `set_active_file`
 Bind this MCP session to one Figma file; every later call routes there.
-- Params: `target` (req): a fileKey, an exact file name, a sessionId, or a figma.com URL (a plugin-reported fileUid also works).
+- Params: `target` (req): a fileKey, an exact file name, a sessionId, or a figma.com URL (a plugin-reported fileUid also works; if several open files carry it, the call errors `ambiguous_file_name` and lists them).
 - Returns: `{ bound: true, resolved, target, file?, reason?, open?, candidates?, warnings? }`. `resolved: true` + `file` (a `list_files` entry) when the file is open now; otherwise `reason: 'not_open'` (held, resolves when it connects) with `open` (the current `list_files` entries, so a typo is obvious). `warnings[]` appears when another agent is already bound to the same file (your edits can collide).
 - `target` is stored as `{ key }` (a real fileKey), `{ uid }`, `{ name }` or `{ sessionId, name }`. A name or sessionId of a file with a real key is promoted to `{ key }`. A file with no stable key (`"0:0"`) stays bound by name, or by sessionId with the name as fallback when that window respawns; it is never bound by `"0:0"`, and `target: "0:0"` errors `not_a_file_key`.
 - A name that matches more than one open file or window errors `ambiguous_file_name`, listing each candidate (name, fileKey, sessionId): bind by the fileKey or the sessionId instead. A held name bind that later becomes ambiguous fails each call with the same error (not `bound_file_not_open`).
@@ -414,7 +414,7 @@ These don't round-trip the plugin per call: they flip a flag on the calling MCP 
 ### `subscribe`
 Merged (bridge-side): subscribe to a live event stream, dispatched on `target`.
 - `target: 'selection'` — stream `selectionchange` events. Payload: `[{ id, name, type }]`.
-- `target: 'document'` — stream `documentchange` events (debounced 500ms). Payload: `{ changes: <count>, origins: { LOCAL: <n>, REMOTE: <n> } }`, counted over the whole 500ms window. `LOCAL` = made in this Figma session (the user here, or any agent through Grip); `REMOTE` = another collaborator. `origins` needs plugin capability `docChangeOrigins`.
+- `target: 'document'`: stream `documentchange` events (debounced 500ms). Payload: `{ changes: <count>, origins: { LOCAL: <n>, REMOTE: <n> } }`, counted over the whole 500ms window. `LOCAL` = made in this Figma session (the user here, or any agent through Grip); `REMOTE` = another collaborator. `origins` needs plugin capability `docChangeOrigins`.
 - `target: 'currentpage'` — stream `currentpagechange` events. Payload: `{ pageId, pageName }`.
 
 ---

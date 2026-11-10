@@ -25,8 +25,13 @@ const freePort = () => new Promise((res) => {
 assert.strictEqual(fileIdentity({ fileKey: '0:0' }), undefined, '"0:0" is not an identity');
 assert.strictEqual(fileIdentity({ fileKey: '' }), undefined, 'empty key is not an identity');
 assert.strictEqual(fileIdentity({ fileKey: 'AbCdEfGhIjKlMnOp12' }), 'AbCdEfGhIjKlMnOp12', 'a real key is the identity');
-assert.strictEqual(fileIdentity({ fileKey: '0:0', fileUid: 'uid-1' }), 'uid-1', 'fileUid wins when present');
-assert.strictEqual(fileIdentity({ fileKey: 'AbCdEfGhIjKlMnOp12', fileUid: 'uid-2' }), 'uid-2', 'fileUid wins over a real key');
+assert.strictEqual(fileIdentity({ fileKey: '0:0', fileUid: 'uid-1', fileName: 'F' }), 'uid:uid-1:F', 'key-less: fileUid together with the name');
+assert.strictEqual(fileIdentity({ fileKey: 'AbCdEfGhIjKlMnOp12', fileUid: 'uid-2' }), 'AbCdEfGhIjKlMnOp12', 'a real key wins over fileUid (a duplicate can share the uid)');
+assert.notStrictEqual(
+  fileIdentity({ fileKey: '0:0', fileUid: 'u', fileName: 'A' }),
+  fileIdentity({ fileKey: '0:0', fileUid: 'u', fileName: 'A copy' }),
+  'key-less windows sharing a uid under different names are different files',
+);
 assert.ok(!isRealFileKey('0:0') && !isRealFileKey('') && isRealFileKey('k1'));
 
 const port = await freePort();
@@ -253,8 +258,9 @@ async function agent(b = bridge) {
   // grip_health of the waiting agent
   assert.strictEqual((await third.call('grip_health')).json.session.binding.state, 'waiting');
 
-  // fileUid (future plugin): two "0:0" windows with DIFFERENT uids are distinct files,
-  // two windows with the SAME uid are one file; binding by sessionId promotes to the uid
+  // fileUid: two "0:0" windows with DIFFERENT uids are distinct files, two
+  // windows with the SAME uid and name are one file; binding by sessionId
+  // stores the uid together with the name
   const u1 = await openPlugin({ fileKey: '0:0', fileName: 'Uid file', fileUid: 'uid-aaa' });
   const u2 = await openPlugin({ fileKey: '0:0', fileName: 'Uid file', fileUid: 'uid-aaa' });
   const u3 = await openPlugin({ fileKey: '0:0', fileName: 'Uid file 2', fileUid: 'uid-bbb' });
@@ -263,12 +269,120 @@ async function agent(b = bridge) {
   assert.strictEqual(uf.length, 2, 'grouped by fileUid');
   assert.strictEqual(uf.find((f) => f.fileUid === 'uid-aaa').windows.length, 2);
   const su = await un.call('set_active_file', { target: u1.sessionId });
-  assert.deepStrictEqual(su.json.target, { uid: 'uid-aaa' }, 'a uid file is bound by its uid');
+  assert.deepStrictEqual(su.json.target, { uid: 'uid-aaa', name: 'Uid file' }, 'a key-less uid file is bound by its uid + name');
   assert.strictEqual((await un.call('get_node', { nodeId: '1:1' })).json.servedBy, u2.sessionId, 'newest window of the uid file');
 
   for (const a of [me, other, third, un]) a.done();
   half.close();
   for (const p of [x1, x2, u1, u2, u3]) await closePlugin(p);
+}
+
+// ---------------------------------------------------------------- 6. a fileUid copied into a duplicate (real keys)
+// The plugin re-mints a uid only when it recorded a real key for it, so a uid
+// minted while the key was null ends up in every duplicate. Different real keys
+// are different files, whatever their uid says.
+{
+  const KEY_A = 'KeyAKeyAKeyAKeyAKeyA';
+  const KEY_B = 'KeyBKeyBKeyBKeyBKeyB';
+  const o1 = await openPlugin({ fileKey: KEY_A, fileName: 'Original', fileUid: 'uid-dup' });
+  const bound = await agent();
+  const s = await bound.call('set_active_file', { target: KEY_A });
+  assert.deepStrictEqual(s.json.target, { key: KEY_A });
+  assert.strictEqual((await bound.call('get_node', { nodeId: '1:1' })).json.servedBy, o1.sessionId);
+
+  const c1 = await openPlugin({ fileKey: KEY_B, fileName: 'Original (Copy)', fileUid: 'uid-dup' });
+  for (let i = 0; i < 3; i++) {
+    c1.hello({ currentPageName: `copy page ${i}` });   // the copy keeps saying hello last
+    await sleep(20);
+    const g = await bound.call('get_node', { nodeId: '1:1' });
+    assert.strictEqual(g.json.servedBy, o1.sessionId, 'a key-bound agent never hops to a copy that shares the uid');
+  }
+  assert.strictEqual(c1.calls.length, 0, 'the copy never received a call');
+
+  const un = await agent();
+  const lf = await un.call('list_files');
+  assert.strictEqual(lf.json.files.length, 2, 'two files, not one entry with two windows');
+  assert.deepStrictEqual(lf.json.files.map((f) => [f.fileName, f.fileKey, f.windows.length]).sort((x, y) => x[0].localeCompare(y[0])),
+    [['Original', KEY_A, 1], ['Original (Copy)', KEY_B, 1]], 'each entry carries its own window and name');
+  assert.match((await un.call('get_node', { nodeId: '1:1' })).text, /^ambiguous_active_file: 2 Figma files are open/);
+
+  // binding by the shared uid cannot pick one: loud, never a guess
+  const byUid = await un.call('set_active_file', { target: 'uid-dup' });
+  assert.ok(byUid.isError);
+  assert.match(byUid.text, /^ambiguous_file_name: the file id uid-dup matches 2 open files/);
+  // binding by the original's name resolves to its key
+  const byName = await un.call('set_active_file', { target: 'Original' });
+  assert.deepStrictEqual(byName.json.target, { key: KEY_A });
+  assert.strictEqual(byName.json.file.sessionId, o1.sessionId);
+
+  // a newer window of the ORIGINAL: the re-pin follows it, not the copy
+  const o2 = await openPlugin({ fileKey: KEY_A, fileName: 'Original', fileUid: 'uid-dup' });
+  c1.hello({ currentPageName: 'copy again' });
+  await sleep(20);
+  assert.strictEqual((await bound.call('get_node', { nodeId: '1:1' })).json.servedBy, o2.sessionId, 're-pins to the newest window of the bound file');
+
+  // the original closes: the bound agent waits, it never falls to the copy
+  await closePlugin(o1);
+  await closePlugin(o2);
+  assert.match((await bound.call('get_node', { nodeId: '1:1' })).text, /^bound_file_not_open/);
+  assert.strictEqual(c1.calls.length, 0, 'still nothing reached the copy');
+  for (const a of [bound, un]) a.done();
+  await closePlugin(c1);
+}
+
+// ---------------------------------------------------------------- 7. key-less windows sharing a fileUid
+{
+  // same uid + same name = one file (two windows of one local file)
+  const l1 = await openPlugin({ fileKey: '0:0', fileName: 'Local doc', fileUid: 'uid-local' });
+  const l2 = await openPlugin({ fileKey: '0:0', fileName: 'Local doc', fileUid: 'uid-local' });
+  const un = await agent();
+  let lf = await un.call('list_files');
+  assert.strictEqual(lf.json.files.length, 1, 'same uid and name: one file');
+  assert.strictEqual(lf.json.files[0].windows.length, 2);
+  assert.strictEqual(lf.json.files[0].stableKey, true);
+  assert.strictEqual((await un.call('get_node', { nodeId: '1:1' })).json.servedBy, l2.sessionId, 'unbound: routes to the newest window');
+
+  // a duplicate (same uid, another name) is another file: listed apart, unbound is ambiguous
+  const d1 = await openPlugin({ fileKey: '0:0', fileName: 'Local doc copy', fileUid: 'uid-local' });
+  lf = await un.call('list_files');
+  assert.deepStrictEqual(lf.json.files.map((f) => [f.fileName, f.windows.length]).sort((x, y) => x[0].localeCompare(y[0])),
+    [['Local doc', 2], ['Local doc copy', 1]]);
+  const amb = await un.call('get_node', { nodeId: '1:1' });
+  assert.match(amb.text, /^ambiguous_active_file: 2 Figma files\/windows are open/);
+  assert.match(amb.text, /file id uid-local/);
+  assert.strictEqual(d1.calls.length, 0);
+
+  // binding by the original's name works and sticks
+  const b = await agent();
+  const s = await b.call('set_active_file', { target: 'Local doc' });
+  assert.ok(!s.isError, s.text);
+  assert.deepStrictEqual(s.json.target, { uid: 'uid-local', name: 'Local doc' });
+  assert.strictEqual((await b.call('get_node', { nodeId: '1:1' })).json.servedBy, l2.sessionId);
+  d1.hello({ currentPageName: 'copy page' });
+  await sleep(20);
+  assert.strictEqual((await b.call('get_node', { nodeId: '1:1' })).json.servedBy, l2.sessionId, 'stays on the original after the copy says hello');
+  // a launch-time bind by name after both are open (the reviewer's probe)
+  const lb = await agent();
+  bridge.bindFromLaunch('Local doc', lb.session);
+  assert.strictEqual((await lb.call('get_node', { nodeId: '1:1' })).json.servedBy, l2.sessionId);
+  // the copy, bound by its window, gets its own uid + name
+  const c = await agent();
+  const sc = await c.call('set_active_file', { target: d1.sessionId });
+  assert.deepStrictEqual(sc.json.target, { uid: 'uid-local', name: 'Local doc copy' });
+  assert.strictEqual((await c.call('get_node', { nodeId: '1:1' })).json.servedBy, d1.sessionId);
+  // a bare uid bind matches both files: ambiguous, never a guess
+  const bu = await un.call('set_active_file', { target: 'uid-local' });
+  assert.ok(bu.isError);
+  assert.match(bu.text, /^ambiguous_file_name: the file id uid-local matches 2/);
+
+  // the original closes entirely: its agent waits, never hops to the copy
+  const copyCalls = d1.calls.length;
+  await closePlugin(l1);
+  await closePlugin(l2);
+  assert.match((await b.call('get_node', { nodeId: '1:1' })).text, /^bound_file_not_open: this agent is bound to file id uid-local \("Local doc"\)/);
+  assert.strictEqual(d1.calls.length, copyCalls, 'the copy got nothing from the original\'s agent');
+  for (const a of [un, b, lb, c]) a.done();
+  await closePlugin(d1);
 }
 
 // ---------------------------------------------------------------- 5. HTTP ?file= launch bind
