@@ -56,6 +56,17 @@ export function isRetrySafe(method: string): boolean {
   return READ_ONLY_METHODS.has(method) && !NOT_REPEATABLE.has(method);
 }
 
+// Read-only for undo purposes but still run through the plugin's write queue
+// (they must act on a finished step). Mirrors UNDO_CONTROL_METHODS in
+// src/plugin/code.ts; test/serial-writes.mjs fails if the two drift.
+export const UNDO_CONTROL_METHODS = new Set<string>(['commit_undo', 'trigger_undo']);
+
+// Does a plugin with the `serialMutations` capability run this method one at a
+// time in its write queue? (Same rule as `serialize` in code.ts onmessage.)
+export function serializedByPlugin(method: string): boolean {
+  return !READ_ONLY_METHODS.has(method) || UNDO_CONTROL_METHODS.has(method);
+}
+
 // Read-only methods that still make the plugin emit a subscription event
 // (selectionchange / currentpagechange / documentchange).
 const EVENTFUL_READ_ONLY = new Set<string>(['set_selection', 'set_current_page', 'trigger_undo']);
