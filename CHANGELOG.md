@@ -2,6 +2,14 @@
 
 Newest first. Each `## <version>` heading is the exact version number; the GitHub Release for that version uses its section as the release notes. The history starts at 0.6.0.
 
+## Unreleased
+
+- Several agents can share one Figma window more smoothly. Calls wait in a fair queue: each agent gets its turn, so one agent sending many calls no longer holds up another agent's single call. A call that waited 2 seconds or more says so in its result.
+- A slow but healthy call (an export, loading a big page, a long `map_nodes` or a `run_script` with a larger `timeoutMs`) no longer makes other agents' calls fail with "the Figma tab must be reloaded". While the plugin is busy, other calls either go through or get a new `plugin_working` error that names what the plugin is doing and says when to retry. `plugin_busy` (and the reload advice) is now only for a call that ran past its own time limit with no reply.
+- "Too busy" errors (`plugin_working`, `plugin_busy`, `plugin_overloaded`) now say how long to wait before retrying (`retryAfterMs`).
+- When Figma reconnects the plugin in the middle of a call, Grip re-sends reads, and calls that had not been sent yet, once to the reconnected plugin instead of failing them. A change that had already been sent is never re-sent: it fails with a new `maybe_applied` error that says the change may already have been made and to check before retrying. Messages that used to say "retry safe" for any call now only say so when it is true.
+- Live event subscriptions only deliver events from the file the agent is working on (its bound file, or the only open file), and each event now says which file it came from (`fileKey`, `fileName`) and whether this agent, another agent, or probably the user caused it (`causedBy`).
+
 ## 0.8.0
 
 **Grip can update itself, but only when you say so, and only to a version your Figma plugin can talk to.**

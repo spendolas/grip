@@ -1,4 +1,5 @@
 import { connect, Socket } from 'node:net';
+import { READ_ONLY_METHODS } from './methods.js';
 
 // Lost the leader-bind race. Run as a proxy: parse JSON-RPC frames from
 // stdio so we can emit typed errors when the leader dies mid-request,
@@ -92,13 +93,15 @@ export async function runProxy(ipcPath: string): Promise<boolean> {
 
   // Track in-flight request ids. On close we emit a typed error response
   // for each so the client never gets a silent -32000 hang.
-  const inflight = new Map<string | number, string>();
+  // id -> { JSON-RPC method, tool name for tools/call }.
+  const inflight = new Map<string | number, { method: string; tool?: string }>();
 
   onStdinLine = (line: string) => {
     try {
       const msg = JSON.parse(line);
       if (msg && msg.id !== undefined && typeof msg.method === 'string') {
-        inflight.set(msg.id, msg.method);
+        const tool = msg.method === 'tools/call' && typeof msg.params?.name === 'string' ? msg.params.name : undefined;
+        inflight.set(msg.id, { method: msg.method, tool });
       }
     } catch {
       // not JSON, still forward
@@ -135,14 +138,20 @@ export async function runProxy(ipcPath: string): Promise<boolean> {
       // Tell the client about each dropped in-flight request with a typed
       // error so it can retry cleanly. Without this, MCP SDK surfaces a
       // generic -32000 Connection closed and the agent has no signal.
-      for (const [id, method] of inflight) {
+      for (const [id, { method, tool }] of inflight) {
+        // The daemon may have run the call before the socket dropped. Only a
+        // call that cannot change the document is safe to repeat blindly.
+        const maybeApplied = method === 'tools/call' && !(tool && READ_ONLY_METHODS.has(tool));
+        const advice = maybeApplied
+          ? `'${tool ?? method}' may already have been applied before the connection dropped: re-read before retrying (a blind retry can apply it twice)`
+          : 'it does not change the document, so it is safe to retry';
         const errPayload = {
           jsonrpc: '2.0' as const,
           id,
           error: {
             code: -32000,
-            message: `${code}: ${reason} (method=${method}); retry safe`,
-            data: { code, method, retry: true },
+            message: `${code}: ${reason} (method=${method}${tool ? `, tool=${tool}` : ''}); ${advice}`,
+            data: { code, method, tool, retry: true, maybeApplied },
           },
         };
         try { process.stdout.write(JSON.stringify(errPayload) + '\n'); } catch {}

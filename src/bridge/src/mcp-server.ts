@@ -13,8 +13,9 @@ import {
   TOOLS, toolInputSchema, resolveToolScope, mergeToolScope, toolInScope, toolCategorySummary, toolDetail,
   MERGED_TOOLS, resolveMerged,
 } from './tools.js';
-import type { PluginBridge } from './ws-server.js';
-import type { McpSession, WSEvent } from './types.js';
+import type { PluginBridge, BridgeEvent } from './ws-server.js';
+import { callContext, QUEUED_NOTE_MS, type CallContext } from './ws-server.js';
+import type { McpSession } from './types.js';
 import { BRIDGE_VERSION } from './types.js';
 import {
   getUpdateState, updatesDisabled, checkForUpdate, installAndScheduleRestart, updateNoticeText,
@@ -165,20 +166,32 @@ let eventsWired = false;
 function wireBridgeEvents(bridge: PluginBridge) {
   if (eventsWired) return;
   eventsWired = true;
-  bridge.on('event', (evt: WSEvent) => {
+  bridge.on('event', (evt: BridgeEvent) => {
     for (const { server, session } of liveSessions) {
       const subbed =
         (evt.event === 'selectionchange' && session.subscriptions.selection) ||
         (evt.event === 'documentchange' && session.subscriptions.document) ||
         (evt.event === 'currentpagechange' && session.subscriptions.currentPage);
       if (!subbed) continue;
+      // Only events from the file this session routes to (its bound file, or
+      // the one open file when unbound; nothing while ambiguous). Without this
+      // every agent got every file's events with no way to tell them apart.
+      if (!bridge.sessionTargets(session, evt.sessionId)) continue;
       server
         .notification({
           method: 'notifications/message',
           params: {
             level: 'info',
             logger: 'grip',
-            data: { event: evt.event, payload: evt.data },
+            // event + payload as before; the rest is additive.
+            data: {
+              event: evt.event,
+              payload: evt.data,
+              fileKey: evt.fileKey,
+              fileName: evt.fileName,
+              pluginSessionId: evt.sessionId,
+              causedBy: bridge.eventCause(session, evt.sessionId),
+            },
           },
         })
         .catch((err: Error) => {
@@ -268,7 +281,16 @@ export function createSession(bridge: PluginBridge): LiveSession {
     if (name === 'run_script' && typeof (args as any).code === 'string') {
       process.stderr.write(`[grip] run_script[${sid}] code:\n${(args as any).code}\n[grip] run_script[${sid}] /code\n`);
     }
-    const res = await handleCall(name, args);
+    // Per-call context the bridge fills in (time spent queued behind other
+    // calls, a retry hint on plugin_working / plugin_busy / plugin_overloaded).
+    const ctx: CallContext = {};
+    const res = await callContext.run(ctx, () => handleCall(name, args));
+    if ((ctx.queuedMs ?? 0) >= QUEUED_NOTE_MS || ctx.retryAfterMs !== undefined) {
+      const meta: Record<string, unknown> = { ...((res as any)._meta ?? {}) };
+      if ((ctx.queuedMs ?? 0) >= QUEUED_NOTE_MS) meta['grip/queuedMs'] = ctx.queuedMs;
+      if (ctx.retryAfterMs !== undefined) meta['grip/retryAfterMs'] = ctx.retryAfterMs;
+      (res as any)._meta = meta;
+    }
     // Update notice: ONE extra text block on the first SUCCESSFUL result of
     // this session (never on errors, never on grip_update itself), only while
     // the update is signalled (available AND compatible with every connected
@@ -292,7 +314,8 @@ export function createSession(bridge: PluginBridge): LiveSession {
     const text = (res as any)?.content?.[0]?.text ?? '';
     const size = typeof text === 'string' ? text.length : 0;
     process.stderr.write(
-      `[grip] « ${sid} ${name} ${ms}ms ${isErr ? 'ERR ' + String(text).slice(0, 100) : size + 'B'}\n`,
+      `[grip] « ${sid} ${name} ${ms}ms ${isErr ? 'ERR ' + String(text).slice(0, 100) : size + 'B'}` +
+        `${ctx.queuedMs ? ` queuedMs=${ctx.queuedMs}` : ''}\n`,
     );
     return res;
   });
