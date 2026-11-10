@@ -81,7 +81,7 @@ up changes.
 - `GRIP_MAX_INFLIGHT` — max requests in flight to one plugin at once (default
   `8`); excess is queued and drained transparently so a command burst can't
   saturate/wedge the single-threaded plugin.
-- `GRIP_MAX_WRITE_WAIT_MS` — longest a change may wait in the bridge's
+- `GRIP_MAX_WRITE_WAIT_MS`: longest a change may wait in the bridge's
   one-at-a-time write queue (plugins with `serialMutations`) behind a long
   change before it fails with `plugin_working`, never sent (default `60000`).
 - `GRIP_MAX_QUEUE` — per-plugin queue backstop (default `500`); a deeper
