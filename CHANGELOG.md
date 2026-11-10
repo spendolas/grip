@@ -16,6 +16,14 @@ Newest first. Each `## <version>` heading is the exact version number; the GitHu
 - "Too busy" errors (`plugin_working`, `plugin_busy`, `plugin_overloaded`) now say how long to wait before retrying (`retryAfterMs`).
 - When Figma reconnects the plugin in the middle of a call, Grip re-sends reads, and calls that had not been sent yet, once to the reconnected plugin instead of failing them. A change that had already been sent is never re-sent: it fails with a new `maybe_applied` error that says the change may already have been made and to check before retrying. Messages that used to say "retry safe" for any call now only say so when it is true.
 - Live event subscriptions only deliver events from the file the agent is working on (its bound file, or the only open file), and each event now says which file it came from (`fileKey`, `fileName`) and whether this agent, another agent, or probably the user caused it (`causedBy`).
+These changes are in the Figma plugin, so they take effect only once the updated plugin is republished in Figma (and each user's plugin has updated).
+
+- When several agents edit the same file at once, their edits no longer get tangled. Each edit now runs to the end before the next one starts, in the order they arrived, so every tool call is exactly one undo step. Reads still run alongside edits without waiting. Undo requests wait for the edit in progress instead of landing in the middle of it.
+- An edit that had to wait so long that the agent was already told it timed out is now skipped, with a clear error saying nothing changed, instead of quietly running later.
+- Scripts that run at the same time no longer disturb each other's pacing.
+- `set_selection` and `scroll_to` accept `keepPage: true`, which never switches the page you are looking at (it reports an error naming the other page instead). `get_selection`, `find_with_criteria` and `create_node` accept `pageId` to work on a specific page without switching to it. Without these options nothing changes.
+- Each file now gets its own ID, stored in the file, so files that have no Figma file key (local or unsaved files) can be told apart. A file you can only view gets no ID. A duplicated file starts with the same ID as its original; Grip notices this when both files are saved in Figma, otherwise it treats the two as ambiguous.
+- Document change notifications now say how many changes came from this Figma session and how many from other people in the file, and count every change in the half-second window instead of only the last batch.
 
 ## 0.8.0
 

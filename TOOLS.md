@@ -19,6 +19,7 @@ Conventions:
   - `plugin_disconnected` / `plugin_reconnected`: a read, or a call that was never sent, could not be completed even after the bridge re-sent it once on the file's next plugin session. Safe to retry.
   - `request_timeout`: no reply within the call's budget. For a change, the plugin may still apply it: re-read before retrying.
   - `retryAfterMs` appears in the message (`retryAfterMs=<n>`) and in the result's `_meta['grip/retryAfterMs']`. Calls are queued fairly across agents (round-robin); a call that waited 2s or more in the queue reports `_meta['grip/queuedMs']`.
+- **Write ordering (per open file).** The plugin runs mutating calls one at a time, in the order they arrive (FIFO), so each call is exactly one Cmd-Z step even when several agents write to the same file at once. Read-only calls never wait behind a write. `commit_undo`/`trigger_undo` wait for the write in progress. A write that waited in the plugin longer than its own timeout is not run and fails with `plugin_queue_timeout` (nothing changed; retry). Needs plugin capability `serialMutations`.
 
 ---
 
@@ -98,7 +99,7 @@ Bulk read.
 
 ### `get_selection`
 Currently selected nodes on the active page.
-- Params: rich-read params.
+- Params: rich-read params, `pageId` (read that page's own selection without switching the file's current page; default current page).
 - Returns: `SerializedNode[]`.
 
 ### `get_styles`
@@ -201,7 +202,7 @@ Set any one property on a node.
 
 ### `create_node`
 Create a new node + optionally apply a batch of props.
-- Params: `type` (req: `FRAME | TEXT | RECTANGLE | ELLIPSE | LINE | POLYGON | STAR | VECTOR | COMPONENT | INSTANCE`), `parentId` (default current page), `name`, `x`, `y`, `width`, `height`, `componentId` (req for INSTANCE), `props` (any `set_node_property` values, applied in order at creation), `selectAfter`.
+- Params: `type` (req: `FRAME | TEXT | RECTANGLE | ELLIPSE | LINE | POLYGON | STAR | VECTOR | COMPONENT | INSTANCE`), `parentId` (default current page), `pageId` (no `parentId`: create on this page without switching the current page), `name`, `x`, `y`, `width`, `height`, `componentId` (req for INSTANCE), `props` (any `set_node_property` values, applied in order at creation), `selectAfter`.
 - Returns: `{ id, name }`.
 
 ### `create_tree`
@@ -237,14 +238,14 @@ Merged: group/ungroup, dispatched on `op`.
 
 ### `set_selection`
 Replace current page selection.
-- Params: `nodeIds[]` (req), `scrollTo` (default false).
-- Auto-switches to the page containing the first target node.
+- Params: `nodeIds[]` (req), `scrollTo` (default false), `keepPage` (default false).
+- Auto-switches to the page containing the first target node, unless `keepPage: true`: then it never switches, and fails with `node_on_other_page` (naming that page) if any node is elsewhere.
 - Returns: `{ selected: [id] }`.
 
 ### `scroll_to`
 Scroll + zoom to fit.
-- Params: `nodeId` or `nodeIds[]`.
-- Auto-switches pages.
+- Params: `nodeId` or `nodeIds[]`, `keepPage` (default false).
+- Auto-switches pages, unless `keepPage: true`: then it never switches, and fails with `node_on_other_page` if any node is on another page.
 - Returns: `{ focused: [id] }`.
 
 ---
@@ -413,7 +414,7 @@ These don't round-trip the plugin per call: they flip a flag on the calling MCP 
 ### `subscribe`
 Merged (bridge-side): subscribe to a live event stream, dispatched on `target`.
 - `target: 'selection'` — stream `selectionchange` events. Payload: `[{ id, name, type }]`.
-- `target: 'document'` — stream `documentchange` events (debounced 500ms). Payload: `{ changes: <count> }`.
+- `target: 'document'` — stream `documentchange` events (debounced 500ms). Payload: `{ changes: <count>, origins: { LOCAL: <n>, REMOTE: <n> } }`, counted over the whole 500ms window. `LOCAL` = made in this Figma session (the user here, or any agent through Grip); `REMOTE` = another collaborator. `origins` needs plugin capability `docChangeOrigins`.
 - `target: 'currentpage'` — stream `currentpagechange` events. Payload: `{ pageId, pageName }`.
 
 ---
@@ -692,7 +693,7 @@ Bulk-edit matched nodes with a **Grip-owned, chunked, yielding loop** — the sa
 
 ### `run_script`
 Execute JS in the plugin sandbox — powerful, for bulk ops / custom logic. Returns `{ result, logs[], ms }`.
-- Scope injects, besides `figma`/`args`/`serializeNode`/`coerce`/`asIds`/`log`/`getNode`, the **gentle bulk helpers**: `findNodes(query)` (typed, findAllWithCriteria; refuses a bare page walk), `forEachNode(itemsOrQuery, fn, {chunk,budget})` / `mapNodes(...)` (chunk + yield so the thread never freezes), and `yieldNow()`.
+- Scope injects, besides `figma`/`args`/`serializeNode`/`coerce`/`asIds`/`log`/`getNode`, the **gentle bulk helpers**: `findNodes(query)` (typed, findAllWithCriteria; refuses a bare page walk), `forEachNode(itemsOrQuery, fn, {chunk,budget})` / `mapNodes(...)` (chunk + yield so the thread never freezes), and `yieldNow()`. Each script has its own yield pacing clock, so concurrent work never shifts another script's yields.
 - **The transport inspects your code and pushes back.** Freeze patterns are rejected BEFORE running with a teaching `run_script_rejected: …` error: `while(true)`/`for(;;)`, and page/document-wide `figma.currentPage|root.findAll(...)`. Do bulk work via `await forEachNode(findNodes({types:[...]}), n => {...})`; bound any hand-written loop and `await yieldNow()`. Single-threaded plugin: a synchronous loop cannot be interrupted, so this is enforced up front, not mid-run.
 
 ---
@@ -701,7 +702,7 @@ Execute JS in the plugin sandbox — powerful, for bulk ops / custom logic. Retu
 
 ### `find_with_criteria`
 Optimized subtree walker (typed). Faster than `search_nodes` for plain type filters.
-- Params: `scope` (default current page), `types[]`, `pluginData`, `sharedPluginData`, `maxResults` (default 200).
+- Params: `scope` (default current page), `pageId` (search that page, loaded but not made current; `scope` wins), `types[]`, `pluginData`, `sharedPluginData`, `maxResults` (default 200).
 - Returns: array of `{ id, name, type, parentId }`.
 
 ### `get_style_consumers`

@@ -369,7 +369,8 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'get_selection',
     description: 'Returns the currently selected nodes with rich serialization. Bounded by default (depth 12, maxNodes 3000 shared across the selection) so a large selection returns fast instead of stalling. Pass depth:-1 + maxNodes:0 for full fidelity.',
-    schema: z.object({ ...RichRead }),
+    detail: "pageId: read THAT page's selection (selection is per page in Figma) without switching the file's current page. Omit it for the current page (unchanged default).",
+    schema: z.object({ pageId: z.string().optional(), ...RichRead }),
   },
   {
     name: 'get_page_context',
@@ -537,6 +538,7 @@ export const TOOLS: ToolDef[] = [
         'COMPONENT', 'INSTANCE',
       ]),
       parentId: z.string().optional(),
+      pageId: z.string().optional(),
       name: z.string().optional(),
       x: z.number().optional(),
       y: z.number().optional(),
@@ -598,17 +600,21 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'set_selection',
     description: 'Replace the current selection with the given nodes. Switches to the page they live on. Optional scrollTo.',
+    detail: "keepPage:true never switches the file's current page (another agent or the user may be working there): if any node is on another page the call fails with node_on_other_page (naming that page) and changes nothing. Default (keepPage omitted) is unchanged: switch to the nodes' page, then select.",
     schema: z.object({
       nodeIds: z.array(z.string()).min(1),
       scrollTo: z.boolean().optional(),
+      keepPage: z.boolean().optional(),
     }),
   },
   {
     name: 'scroll_to',
     description: 'Scroll and zoom the viewport to fit the given node(s). Switches pages if needed.',
+    detail: "keepPage:true never switches the file's current page: if any node is on another page the call fails with node_on_other_page (naming that page) and the viewport does not move. Default (keepPage omitted) is unchanged: switch to the nodes' page, then scroll.",
     schema: z.object({
       nodeId: z.string().optional(),
       nodeIds: z.array(z.string()).optional(),
+      keepPage: z.boolean().optional(),
     }),
   },
 
@@ -1071,8 +1077,10 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'find_with_criteria',
     description: 'Optimized subtree search by node types and/or pluginData. Faster than search_nodes for plain type filtering.',
+    detail: "Search root: scope (a subtree nodeId) > pageId (that page, loaded but NOT made current) > the current page.",
     schema: z.object({
       scope: z.string().optional(),
+      pageId: z.string().optional(),
       types: z.array(NodeTypeEnum).optional(),
       pluginData: z.record(z.string(), z.any()).optional(),
       sharedPluginData: z.record(z.string(), z.any()).optional(),
@@ -1475,7 +1483,10 @@ export function toolInputSchema(name: string): Record<string, unknown> {
     case 'get_selection':
       return {
         type: 'object',
-        properties: { ...richReadProps },
+        properties: {
+          pageId: { type: 'string', description: "Read this page's selection without switching pages (default: current page)" },
+          ...richReadProps,
+        },
         additionalProperties: false,
       };
     case 'get_deep_link':
@@ -1612,6 +1623,7 @@ export function toolInputSchema(name: string): Record<string, unknown> {
             enum: ['FRAME', 'TEXT', 'RECTANGLE', 'ELLIPSE', 'LINE', 'POLYGON', 'STAR', 'VECTOR', 'COMPONENT', 'INSTANCE'],
           },
           parentId: { type: 'string' },
+          pageId: { type: 'string', description: 'No parentId: create on this page without switching pages (default: current page)' },
           name: { type: 'string' },
           x: { type: 'number' },
           y: { type: 'number' },
@@ -1660,6 +1672,7 @@ export function toolInputSchema(name: string): Record<string, unknown> {
         properties: {
           nodeIds: { type: 'array', items: { type: 'string' }, minItems: 1 },
           scrollTo: { type: 'boolean' },
+          keepPage: { type: 'boolean', description: 'true: never switch pages; fails with node_on_other_page if a node is elsewhere' },
         },
         required: ['nodeIds'],
         additionalProperties: false,
@@ -1670,6 +1683,7 @@ export function toolInputSchema(name: string): Record<string, unknown> {
         properties: {
           nodeId: { type: 'string' },
           nodeIds: { type: 'array', items: { type: 'string' } },
+          keepPage: { type: 'boolean', description: 'true: never switch pages; fails with node_on_other_page if a node is elsewhere' },
         },
         additionalProperties: false,
       };
@@ -2264,6 +2278,7 @@ export function toolInputSchema(name: string): Record<string, unknown> {
         type: 'object',
         properties: {
           scope: { type: 'string' },
+          pageId: { type: 'string', description: 'Search this page (loaded, not made current); scope wins' },
           types: { type: 'array', items: { type: 'string' } },
           pluginData: { type: 'object' },
           sharedPluginData: { type: 'object' },
