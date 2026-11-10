@@ -1044,17 +1044,25 @@ async function importByKey<T>(what: string, key: string, run: () => Promise<T>):
 // a >10s timeout (one ~1s yield per iteration). Fix: only pay the real yield
 // when enough REAL work has elapsed since the last one (default ~500ms); every
 // other call is a near-free microtask. Bounded work finishes with zero real
-// yields; long work breathes ~twice a second. `resetYieldClock()` is called at
-// the start of each run_script so the first stretch of work isn't charged a yield.
-let _lastRealYieldAt = 0;
+// yields; long work breathes ~twice a second.
+//
+// PER-INVOCATION CLOCK: the "last real yield" timestamp lives in a closure made
+// by createYieldClock(), one per run_script and one per forEachNode run, so two
+// concurrent scripts (or a script and a map_nodes) never reset or consume each
+// other's pacing. The clock starts "just yielded", so the first stretch of work
+// is never charged a (throttled) real yield. There is deliberately no shared
+// module-level clock.
+// ---- grip:yield-clock begin (self-contained: src/bridge/test/plugin-mutex.mjs evaluates this block from code.js) ----
 const YIELD_MIN_INTERVAL_MS = 500;
-function resetYieldClock(): void { _lastRealYieldAt = Date.now(); }
-function yieldNow(): Promise<void> {
-  const now = Date.now();
-  if (now - _lastRealYieldAt < YIELD_MIN_INTERVAL_MS) return Promise.resolve();
-  _lastRealYieldAt = now;
-  return new Promise((r) => setTimeout(() => { _lastRealYieldAt = Date.now(); r(); }, 0));
-}
+function createYieldClock(minIntervalMs: number = YIELD_MIN_INTERVAL_MS): () => Promise<void> {
+  let lastRealYieldAt = Date.now();
+  return function yieldNow(): Promise<void> {
+    const now = Date.now();
+    if (now - lastRealYieldAt < minIntervalMs) return Promise.resolve();
+    lastRealYieldAt = now;
+    return new Promise((r) => setTimeout(() => { lastRealYieldAt = Date.now(); r(); }, 0));
+  };
+} // ---- grip:yield-clock end ----
 
 interface NodeQuery {
   types?: string | string[];
@@ -1096,6 +1104,10 @@ async function forEachNode(
   itemsOrQuery: SceneNode[] | NodeQuery,
   fn: (n: SceneNode, i: number) => unknown | Promise<unknown>,
   opts: { chunk?: number; budget?: number } = {},
+  // Internal (not exposed to scripts): the pacing clock. A run_script passes its
+  // own so the script's yieldNow and its forEachNode share one clock; any other
+  // caller gets a fresh clock for this run.
+  yieldNow: () => Promise<void> = createYieldClock(),
 ): Promise<number> {
   const arr = Array.isArray(itemsOrQuery) ? itemsOrQuery : await findNodes(itemsOrQuery);
   const chunk = opts.chunk && opts.chunk > 0 ? opts.chunk : 200;
@@ -1114,9 +1126,10 @@ async function mapNodes<T>(
   itemsOrQuery: SceneNode[] | NodeQuery,
   fn: (n: SceneNode, i: number) => T | Promise<T>,
   opts: { chunk?: number; budget?: number } = {},
+  yieldNow: () => Promise<void> = createYieldClock(),
 ): Promise<T[]> {
   const out: T[] = [];
-  await forEachNode(itemsOrQuery, async (n, i) => { out.push(await fn(n, i)); }, opts);
+  await forEachNode(itemsOrQuery, async (n, i) => { out.push(await fn(n, i)); }, opts, yieldNow);
   return out;
 }
 
@@ -1221,8 +1234,11 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       // huge selected frame can't run for minutes and trip the caller's
       // stall watchdog. Caller can pass depth:-1 / maxNodes:0 to opt out.
       const opts = serializeOptsFrom(params, depth, { includeChildren: include });
+      // pageId: read THAT page's selection (selection is per page in Figma)
+      // without switching the file's current page.
+      const selPage: PageNode = params.pageId ? await loadedPage(params.pageId) : figma.currentPage;
       const out: any[] = [];
-      for (const n of figma.currentPage.selection) {
+      for (const n of selPage.selection) {
         out.push(await serializeNode(n, opts));
       }
       return out;
@@ -1819,8 +1835,11 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         const n = await getNode(id);
         if ('parent' in n) nodes.push(n as SceneNode);
       }
-      // Switch the current page if all targets live on a different one.
+      // Switch the current page if all targets live on a different one, unless
+      // the caller asked to keep the page (keepPage:true): then refuse, naming
+      // the page, instead of moving the user's view.
       if (nodes.length) {
+        if (params.keepPage) assertOnCurrentPage(nodes, 'set_selection');
         const page = pageOf(nodes[0]);
         if (page && page !== figma.currentPage) await figma.setCurrentPageAsync(page);
       }
@@ -1836,6 +1855,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         if ('parent' in n) nodes.push(n as SceneNode);
       }
       if (nodes.length) {
+        if (params.keepPage) assertOnCurrentPage(nodes, 'scroll_to');
         const page = pageOf(nodes[0]);
         if (page && page !== figma.currentPage) await figma.setCurrentPageAsync(page);
         figma.viewport.scrollAndZoomIntoView(nodes);
@@ -2625,7 +2645,10 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       return { success: true, reset: 'overrides' };
     }
     case 'find_with_criteria': {
-      const scope = params.scope ? await getNode(params.scope) : figma.currentPage;
+      // scope (subtree) > pageId (that page, loaded, never made current) > current page.
+      const scope = params.scope
+        ? await getNode(params.scope)
+        : params.pageId ? await loadedPage(params.pageId) : figma.currentPage;
       if (!('findAllWithCriteria' in scope)) throw new Error(`Scope ${scope.type} cannot search`);
       const criteria: any = {};
       if (Array.isArray(params.types) && params.types.length) criteria.types = params.types;
@@ -3675,7 +3698,21 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         if (reqId) { try { figma.ui.postMessage({ kind: 'scriptLog', id: reqId, line }); } catch {} }
       };
       const t0 = Date.now();
-      resetYieldClock();  // don't charge a real (throttled) yield to this script's first work window
+      // This script's own pacing clock (starts "just yielded", so the first work
+      // window is never charged a real, throttled yield). Concurrent scripts each
+      // get their own, so they never disturb each other's pacing. The helpers the
+      // script sees keep their documented signatures.
+      const scriptYield = createYieldClock();
+      const scriptForEachNode = (
+        items: SceneNode[] | NodeQuery,
+        each: (n: SceneNode, i: number) => unknown | Promise<unknown>,
+        o?: { chunk?: number; budget?: number },
+      ) => forEachNode(items, each, o, scriptYield);
+      const scriptMapNodes = <T>(
+        items: SceneNode[] | NodeQuery,
+        each: (n: SceneNode, i: number) => T | Promise<T>,
+        o?: { chunk?: number; budget?: number },
+      ) => mapNodes(items, each, o, scriptYield);
       let result: unknown;
       try {
         // Injected scope carries the gentle bulk-iteration helpers so the safe
@@ -3688,7 +3725,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
         );
         result = await fn(
           scriptArgs, figma, serializeNode, coerce, asIds, log, getNode,
-          findNodes, forEachNode, mapNodes, yieldNow,
+          findNodes, scriptForEachNode, scriptMapNodes, scriptYield,
         );
       } catch (err) {
         throw new Error(`run_script failed: ${(err as Error).message}`);
@@ -4033,6 +4070,29 @@ function pageOf(n: BaseNode | null): PageNode | null {
   let cur: BaseNode | null = n;
   while (cur && cur.type !== 'PAGE') cur = cur.parent ?? null;
   return cur as PageNode | null;
+}
+
+// keepPage:true on set_selection / scroll_to: never switch the file's current
+// page (another agent, or the user, may be working there). Throws a clear,
+// typed error naming the page the nodes are on.
+function assertOnCurrentPage(nodes: SceneNode[], method: string): void {
+  const off = nodes.filter((n) => pageOf(n) !== figma.currentPage);
+  if (!off.length) return;
+  const pg = pageOf(off[0]);
+  throw new Error(
+    `node_on_other_page: ${method} with keepPage:true will not switch pages, but ${off.length} node(s) ` +
+      `(e.g. ${off[0].id}) are on page "${pg?.name ?? '?'}" (${pg?.id ?? '?'}), not the current page ` +
+      `"${figma.currentPage.name}" (${figma.currentPage.id}). Omit keepPage to switch, or pass only nodes on the current page.`,
+  );
+}
+
+// A page addressed by id WITHOUT making it current: validate + load its content
+// (dynamic-page access needs loadAsync before reading or appending).
+async function loadedPage(pageId: string): Promise<PageNode> {
+  const n = await getNode(String(pageId));
+  if (n.type !== 'PAGE') throw new Error(`Not a page: ${pageId}`);
+  await (n as PageNode).loadAsync();
+  return n as PageNode;
 }
 
 // Some MCP clients JSON-stringify object/array args when the JSON Schema
@@ -4606,6 +4666,10 @@ async function createByType(params: any): Promise<SceneNode> {
     const p = await getNode(params.parentId);
     if (!hasChildren(p)) throw new Error(`Parent ${params.parentId} cannot contain children`);
     parent = p;
+  } else if (params.pageId) {
+    // Parent-less creation on an explicit page, without switching the file's
+    // current page (parentId, when given, wins).
+    parent = await loadedPage(params.pageId);
   }
 
   let node: SceneNode;
@@ -4673,7 +4737,9 @@ async function createByType(params: any): Promise<SceneNode> {
   }
 
   if (params.selectAfter) {
-    figma.currentPage.selection = [node];
+    // Select on the page the node landed on (selection is per page); assigning
+    // an off-page node to currentPage.selection would throw.
+    (pageOf(node) ?? figma.currentPage).selection = [node];
   }
 
   return node;
@@ -4827,15 +4893,70 @@ const MIN_BRIDGE_VERSION = '0.8.0';
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
 // if two builds share a number). 'nodeBudget' = bounded serialize is live.
-const PLUGIN_CAPABILITIES = ['nodeBudget', 'deepLink'];
+// 'fileUid' = hello may carry a per-file UID (see fileUid() below).
+// 'serialMutations' = mutating calls run one at a time, in arrival order (see
+// the mutation queue below). 'keepPage' = set_selection/scroll_to accept
+// keepPage and get_selection/find_with_criteria/create_node accept pageId.
+// 'docChangeOrigins' = documentchange events carry origins {LOCAL, REMOTE}.
+const PLUGIN_CAPABILITIES = ['nodeBudget', 'deepLink', 'fileUid', 'serialMutations', 'keepPage', 'docChangeOrigins'];
+
+// Per-file identity. figma.fileKey is null for local/unpublished files (and in
+// some editors), and the fallback figma.root.id is the constant "0:0" in EVERY
+// file, so files without a real key were indistinguishable. Each file gets a
+// random UID stored in its document-level plugin data, created on first use.
+//
+// Known catch: duplicating a Figma file copies plugin data, so a duplicate starts
+// with the SAME UID as its original. When both copies have a real fileKey we
+// detect that (the UID records the fileKey it was minted for) and mint a fresh
+// one; for keyless duplicates the bridge must treat a UID shared by two open
+// files as ambiguous rather than trust it.
+//
+// Failure is tolerated: a file where plugin data can't be written (view-only,
+// Dev Mode) simply sends no fileUid. Computed once per plugin run (lazily, on the
+// first hello) and cached.
+const FILE_UID_KEY = 'grip.fileUid';
+const FILE_UID_FOR_KEY = 'grip.fileUidFileKey';
+let _fileUid: string | null | undefined;
+function newUid(): string {
+  try {
+    const c = (globalThis as any).crypto;
+    if (c && typeof c.randomUUID === 'function') return c.randomUUID();
+  } catch { /* fall through */ }
+  const hex = (n: number) => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+  return `${hex(8)}-${hex(4)}-4${hex(3)}-${(8 + Math.floor(Math.random() * 4)).toString(16)}${hex(3)}-${hex(12)}`;
+}
+function fileUid(): string | null {
+  if (_fileUid !== undefined) return _fileUid;
+  try {
+    const existing = figma.root.getPluginData(FILE_UID_KEY);
+    const mintedFor = figma.root.getPluginData(FILE_UID_FOR_KEY);
+    const key = figma.fileKey ?? '';
+    // Keep an existing UID unless it was minted for a DIFFERENT real fileKey
+    // (= this file is a duplicate of that one).
+    if (existing && !(key && mintedFor && mintedFor !== key)) {
+      _fileUid = existing;
+      return _fileUid;
+    }
+    const uid = newUid();
+    figma.root.setPluginData(FILE_UID_KEY, uid);
+    figma.root.setPluginData(FILE_UID_FOR_KEY, key);
+    // Read back: some editors accept the call but don't persist it.
+    _fileUid = figma.root.getPluginData(FILE_UID_KEY) === uid ? uid : null;
+  } catch {
+    _fileUid = null;
+  }
+  return _fileUid;
+}
 
 function sendHello() {
+  const uid = fileUid();
   figma.ui.postMessage({
     kind: 'hello',
     version: PLUGIN_VERSION,
     minBridge: MIN_BRIDGE_VERSION,
     capabilities: PLUGIN_CAPABILITIES,
     fileKey: figma.fileKey ?? figma.root.id,
+    ...(uid ? { fileUid: uid } : {}),
     fileName: figma.root.name,
     currentPageId: figma.currentPage.id,
     currentPageName: figma.currentPage.name,
@@ -4884,6 +5005,106 @@ const READ_ONLY_METHODS = new Set<string>([
   'open_external_url',
 ]);
 
+// ---------- mutating-call serialization ----------
+//
+// The bridge sends up to 8 requests to this plugin at once, and the async
+// handler interleaves at every `await`. For READS that is fine (and fast). For
+// WRITES it broke undo: each mutating call brackets itself with commitUndo() at
+// start and end, so two agents' half-done calls interleaving meant one call's
+// undo group closed mid-way through another's (split or merged Cmd-Z steps), and
+// trigger_undo could land in the middle of someone else's call.
+//
+// ORDERING GUARANTEE (per plugin window, i.e. per open file): mutating calls run
+// ONE AT A TIME, in the order they arrived from the bridge (FIFO). Each one's
+// undo group is therefore exactly its own work. Read-only methods
+// (READ_ONLY_METHODS) never wait here and still run concurrently, including
+// while a write is in progress. commit_undo / trigger_undo are read-only for
+// undo-bracketing purposes but DO take the queue, so they act on a finished
+// step rather than tearing the one in progress. (trigger_undo still undoes the
+// last finished step in the file, which may be another agent's or the user's.)
+//
+// Liveness:
+//  - a call that throws releases the queue (try/finally);
+//  - a call that waited in the queue longer than its bridge-side budget is NOT
+//    run (the bridge already reported it as timed out; running it late would
+//    change the document behind the agent's back) and fails with
+//    plugin_queue_timeout instead;
+//  - a call that never settles releases the queue after its own budget plus a
+//    small margin (max 125s), with a console warning. Its late completion can
+//    then overlap the next call (logged trade-off: liveness over ordering). A
+//    truly synchronous freeze cannot be released by any timer; see plugin_busy
+//    on the bridge.
+interface MutationQueueOpts { holdMs: number; maxWaitMs?: number }
+interface MutationQueue {
+  run<T>(label: string, opts: MutationQueueOpts, task: () => Promise<T>): Promise<T>;
+  depth(): number;   // calls waiting + running
+}
+// ---- grip:mutation-queue begin (self-contained: src/bridge/test/plugin-mutex.mjs evaluates this block from code.js) ----
+function createMutationQueue(onStuck: (label: string, heldMs: number) => void): MutationQueue {
+  let tail: Promise<void> = Promise.resolve();
+  let depth = 0;
+  return {
+    depth: () => depth,
+    run<T>(label: string, opts: MutationQueueOpts, task: () => Promise<T>): Promise<T> {
+      depth++;
+      const enqueuedAt = Date.now();
+      const prev = tail;
+      let open!: () => void;
+      // The next caller waits on this gate; it opens when THIS call releases.
+      tail = new Promise<void>((r) => { open = r; });
+      return prev.then(async () => {
+        let released = false;
+        const release = () => { if (!released) { released = true; depth--; open(); } };
+        const waited = Date.now() - enqueuedAt;
+        if (typeof opts.maxWaitMs === 'number' && waited > opts.maxWaitMs) {
+          release();
+          throw new Error(
+            `plugin_queue_timeout: '${label}' waited ${(waited / 1000).toFixed(1)}s behind other mutating calls on this file ` +
+              `(budget ${(opts.maxWaitMs / 1000).toFixed(1)}s) and was NOT run, so nothing changed. Retry it.`,
+          );
+        }
+        const startedAt = Date.now();
+        const guard = setTimeout(() => {
+          if (released) return;
+          onStuck(label, Date.now() - startedAt);
+          release();
+        }, opts.holdMs);
+        try {
+          return await task();
+        } finally {
+          clearTimeout(guard);
+          release();
+        }
+      });
+    },
+  };
+}
+// ---- grip:mutation-queue end ----
+
+const MAX_MUTATION_HOLD_MS = 125_000;
+// commit_undo / trigger_undo: no undo bracket (they ARE the undo controls), but
+// they queue behind in-progress writes.
+const UNDO_CONTROL_METHODS = new Set<string>(['commit_undo', 'trigger_undo']);
+
+// How long the bridge waits for this call (mirrors ws-server.ts defaults). A
+// bridge may send `timeoutMs` on the request frame itself; that wins.
+function requestBudgetMs(msg: any): number {
+  if (typeof msg?.timeoutMs === 'number' && msg.timeoutMs > 0) return msg.timeoutMs;
+  const p = msg?.params ?? {};
+  if (msg?.method === 'run_script' && typeof p.timeoutMs === 'number') {
+    return Math.min(Math.max(p.timeoutMs, 1000), 120_000);
+  }
+  if (msg?.method === 'map_nodes') return 60_000;
+  return 10_000;
+}
+
+const mutationQueue = createMutationQueue((label, heldMs) => {
+  console.warn(
+    `[grip] mutating call '${label}' held the write queue ${(heldMs / 1000).toFixed(1)}s without settling; ` +
+      `releasing it so later calls are not blocked (its late completion may overlap the next call).`,
+  );
+});
+
 figma.ui.onmessage = async (msg: ToolRequest | any) => {
   if (msg && msg.kind === 'welcome') {
     sendHello();
@@ -4903,15 +5124,38 @@ figma.ui.onmessage = async (msg: ToolRequest | any) => {
     return;
   }
   if (!msg || msg.kind !== 'request') return;
+  // busy:true now (a queued call counts as busy too); exactly one busy:false in
+  // the outer finally, whatever happens, so ui.html's busyCount stays balanced.
   figma.ui.postMessage({ kind: 'busy', busy: true });
   const mutates = !READ_ONLY_METHODS.has(msg.method);
-  if (mutates) {
-    // Close any prior open undo group so this call's mutations don't
-    // merge with whatever the user (or a previous tool call) was doing.
-    try { figma.commitUndo(); } catch {}
-  }
+  const serialize = mutates || UNDO_CONTROL_METHODS.has(msg.method);
+  const run = async () => {
+    if (mutates) {
+      // Close any prior open undo group so this call's mutations don't
+      // merge with whatever the user (or a previous tool call) was doing.
+      try { figma.commitUndo(); } catch {}
+    }
+    try {
+      return await handle(msg.method, msg.params ?? {}, msg.id);
+    } finally {
+      if (mutates) {
+        // Close this call's own undo group: one tool call = one Cmd-Z step.
+        try { figma.commitUndo(); } catch {}
+      }
+    }
+  };
   try {
-    const result = await handle(msg.method, msg.params ?? {}, msg.id);
+    let result: unknown;
+    if (serialize) {
+      const budget = requestBudgetMs(msg);
+      result = await mutationQueue.run(
+        String(msg.method),
+        { maxWaitMs: budget, holdMs: Math.min(budget + 5_000, MAX_MUTATION_HOLD_MS) },
+        run,
+      );
+    } else {
+      result = await run();
+    }
     figma.ui.postMessage({ kind: 'response', id: msg.id, result });
   } catch (err) {
     // Only touch err.message. Reading err.stack triggers V8's lazy
@@ -4923,10 +5167,6 @@ figma.ui.onmessage = async (msg: ToolRequest | any) => {
     figma.ui.postMessage({ kind: 'response', id: msg.id, error: message });
     figma.ui.postMessage({ kind: 'error' });
   } finally {
-    if (mutates) {
-      // Close this call's own undo group — one tool call = one Cmd-Z step.
-      try { figma.commitUndo(); } catch {}
-    }
     figma.ui.postMessage({ kind: 'busy', busy: false });
   }
 };
@@ -4953,17 +5193,31 @@ figma.on('currentpagechange', () => {
 });
 
 let docTimer: number | undefined;
+// Accumulated over the 500ms debounce window, so a burst of Figma batches is
+// reported in full (before, only the LAST batch's count survived the debounce).
+let docPending = { changes: 0, LOCAL: 0, REMOTE: 0 };
 // documentchange is only registerable after loading all pages in
 // dynamic-page mode. Defer to an async bootstrap.
 async function registerDocumentChange() {
   await figma.loadAllPagesAsync();
   figma.on('documentchange', (e) => {
+    // Figma's per-change `origin`: LOCAL = made in THIS editor session (the
+    // user here, or this plugin, i.e. any grip agent on this file); REMOTE =
+    // another collaborator in the file.
+    for (const c of e.documentChanges) {
+      docPending.changes++;
+      if (c.origin === 'REMOTE') docPending.REMOTE++;
+      else docPending.LOCAL++;
+    }
     if (docTimer !== undefined) clearTimeout(docTimer);
     docTimer = setTimeout(() => {
+      const batch = docPending;
+      docPending = { changes: 0, LOCAL: 0, REMOTE: 0 };
+      docTimer = undefined;
       figma.ui.postMessage({
         kind: 'event',
         event: 'documentchange',
-        data: { changes: e.documentChanges.length },
+        data: { changes: batch.changes, origins: { LOCAL: batch.LOCAL, REMOTE: batch.REMOTE } },
       });
     }, 500) as unknown as number;
   });

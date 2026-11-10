@@ -128,10 +128,26 @@ const CONNECTED_TITLE = 'Connected';
   h.fromMain({ kind: 'hello', version: '0.8.0', minBridge: '0.7.0', capabilities: ['x'], fileKey: 'k', fileName: 'f', currentPageId: '0:1', currentPageName: 'P' });
   assert.deepStrictEqual(ws.sent.at(-1), { kind: 'hello', version: '0.8.0', minBridge: '0.7.0', capabilities: ['x'], fileKey: 'k', fileName: 'f', currentPageId: '0:1', currentPageName: 'P' }, 'full hello forwarded, minBridge included');
   assert.strictEqual(h.title(), CONNECTED_TITLE);
+  // the per-file UID (additive field) is forwarded too
+  h.fromMain({ kind: 'hello', version: '0.8.0', capabilities: ['fileUid'], fileKey: '0:0', fileUid: 'u-1', fileName: 'f', currentPageId: '0:1', currentPageName: 'P' });
+  assert.deepStrictEqual(ws.sent.at(-1), { kind: 'hello', version: '0.8.0', capabilities: ['fileUid'], fileKey: '0:0', fileUid: 'u-1', fileName: 'f', currentPageId: '0:1', currentPageName: 'P' }, 'fileUid forwarded');
 
   // busy pulse (existing behaviour) while connected and nothing on offer
   h.fromMain({ kind: 'busy', busy: true });
   assert.ok(h.has('pulsing') && h.has('connected'));
+  h.fromMain({ kind: 'busy', busy: false });
+  assert.ok(!h.has('pulsing'));
+  // calls queued in the plugin each send busy:true up front and busy:false when done:
+  // the pulse lasts until the LAST one ends, and a stray extra false never goes negative
+  for (let i = 0; i < 3; i++) h.fromMain({ kind: 'busy', busy: true });
+  h.fromMain({ kind: 'busy', busy: false });
+  h.fromMain({ kind: 'busy', busy: false });
+  assert.ok(h.has('pulsing'), 'still pulsing while one queued call remains');
+  h.fromMain({ kind: 'busy', busy: false });
+  assert.ok(!h.has('pulsing'));
+  h.fromMain({ kind: 'busy', busy: false });
+  h.fromMain({ kind: 'busy', busy: true });
+  assert.ok(h.has('pulsing'), 'an extra busy:false did not push the count below zero');
   h.fromMain({ kind: 'busy', busy: false });
   assert.ok(!h.has('pulsing'));
 
