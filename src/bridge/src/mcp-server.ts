@@ -188,6 +188,13 @@ function wireBridgeEvents(bridge: PluginBridge) {
   });
 }
 
+// The OTHER live MCP sessions (other agents). Used only for counts
+// (list_files boundAgents, set_active_file warnings, grip_health otherAgents);
+// no other agent's id or name is ever returned.
+function otherSessions(self: McpSession): McpSession[] {
+  return liveSessions.map((l) => l.session).filter((s) => s !== self);
+}
+
 export function createSession(bridge: PluginBridge): LiveSession {
   wireBridgeEvents(bridge);
 
@@ -327,7 +334,12 @@ export function createSession(bridge: PluginBridge): LiveSession {
           id: session.id,
           activeFileId: session.activeFileId,
           subscriptions: session.subscriptions,
+          // What this agent asked for (null = unbound) and whether it routes now.
+          bind: session.bind,
+          ...(typeof bridge.bindingState === 'function' ? { binding: bridge.bindingState(session) } : {}),
         },
+        // Other agents connected to this bridge right now (a count only).
+        otherAgents: otherSessions(session).length,
         update: updateSummary(undefined, pluginInfos(bridge)),
       });
     }
@@ -428,6 +440,7 @@ export function createSession(bridge: PluginBridge): LiveSession {
         mcpSession: {
           id: session.id,
           activeFileId: session.activeFileId,
+          bind: session.bind,
           subscriptions: session.subscriptions,
           rateBucket: session.rateBucket,
         },
@@ -438,29 +451,38 @@ export function createSession(bridge: PluginBridge): LiveSession {
       // Soak cold-start lag: wait briefly so a freshly-spawned bridge
       // doesn't hand back an empty list while plugins are still
       // reconnecting their WebSockets.
-      let files = bridge.list(session);
-      if (files.length === 0) {
+      let listing = bridge.fileListing(session, otherSessions(session));
+      if (listing.files.length === 0) {
         await bridge.waitForAnyPlugin(2_000);
-        files = bridge.list(session);
+        listing = bridge.fileListing(session, otherSessions(session));
       }
-      return okResult({ files });
+      return okResult(listing);
     }
     if (name === 'set_active_file') {
       try {
         const target = (parsed.data as { target: string }).target;
-        return okResult(bridge.setActive(target, session));
+        return okResult(bridge.setActive(target, session, otherSessions(session)));
       } catch (err) {
         return errorResult((err as Error).message);
       }
     }
     // get_page_context is a plugin round-trip, but we annotate it with this
     // agent's bind (bridge-side state) so the answer covers both "where am
-    // I" and "where am I bound" in one call. It routed, so bind is resolved.
+    // I" and "where am I bound" in one call. The state is read from the
+    // router after the call, not assumed: live / deferred / unbound.
     if (name === 'get_page_context') {
       try {
         const result = (await bridge.request(name, parsed.data as Record<string, unknown>, session)) as object;
-        const bind = session.bind ? { target: session.bind, resolved: true } : null;
-        return okResult({ ...result, bind });
+        const st = bridge.bindingState(session);
+        const state = st.state === 'waiting' ? 'deferred' : st.state;
+        const bind = session.bind ? { target: session.bind, resolved: state === 'live', state } : null;
+        const binding = {
+          state,
+          ...(st.target ? { target: st.target } : {}),
+          ...(st.sessionId ? { sessionId: st.sessionId } : {}),
+          ...(st.reason ? { reason: st.reason } : {}),
+        };
+        return okResult({ ...result, bind, binding });
       } catch (err) {
         return errorResult((err as Error).message);
       }

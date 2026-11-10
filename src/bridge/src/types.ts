@@ -41,6 +41,10 @@ export interface WSHello {
   minBridge?: string;
   capabilities?: string[];
   fileKey: string;
+  // Optional per-file unique id (a future plugin will send it). When present it
+  // is the file's identity, so files without a real fileKey (local/unsaved
+  // files all report the placeholder "0:0") can still be told apart.
+  fileUid?: string;
   fileName: string;
   currentPageId: string;
   currentPageName: string;
@@ -57,6 +61,55 @@ export interface PluginSessionInfo {
   active: boolean;
 }
 
+// One open Figma window (plugin session) inside a listed file.
+export interface FileWindowInfo {
+  sessionId: string;
+  currentPageId: string;
+  currentPageName: string;
+  pluginVersion: string;
+  // ms since this window's latest hello (newest window serves the file)
+  helloAgoMs: number;
+}
+
+// One entry of list_files: one per FILE when the file has a stable identity
+// (fileUid, else a real fileKey), one per WINDOW when it does not ("0:0").
+// The first six fields are the pre-grouping PluginSessionInfo shape, taken
+// from the newest live window, so older callers keep working.
+export interface ListedFileInfo extends PluginSessionInfo {
+  fileUid?: string;
+  // false = this file reports no unique id (local or unsaved files report the
+  // shared placeholder "0:0"), so it is listed once per window, never merged.
+  stableKey: boolean;
+  note?: string;
+  windows: FileWindowInfo[];
+  // How many OTHER agents are currently bound or pinned to this file.
+  boundAgents: number;
+}
+
+// What an agent asked to be bound to (set_active_file / GRIP_FILE / ?file=).
+// `key` is a real Figma fileKey (never the "0:0" placeholder), `uid` a
+// plugin-reported fileUid, `name` an exact file name, `sessionId` one window
+// (used only for files with no stable identity; falls back to `name` when that
+// window goes away).
+export interface FileBind {
+  key?: string;
+  uid?: string;
+  name?: string;
+  sessionId?: string;
+}
+
+// The binding state of one agent, as reported by list_files (myBinding),
+// get_page_context and grip_health.
+export interface BindingState {
+  state: 'live' | 'waiting' | 'unbound';
+  target?: FileBind;
+  // the window calls route to right now (live, or unbound auto-routing)
+  sessionId?: string;
+  fileName?: string;
+  // why a bound agent is waiting
+  reason?: 'not_open' | 'ambiguous_name';
+}
+
 // One MCP client session — either the stdio caller or one IPC proxy.
 // Holds per-client routing state so concurrent agents don't trample
 // each other's active file or subscription set.
@@ -68,10 +121,12 @@ export interface McpSession {
   activeFileId: string | null;
   // What file this agent WANTS — its durable binding, independent of how
   // many other files are open. Set by set_active_file (runtime) or a
-  // GRIP_FILE launch hint. `key` is a Figma fileKey; `name` is held until
-  // the file connects and resolves to a key. null = unbound (auto-route
-  // only when exactly one file is open, else ambiguous).
-  bind: { key?: string; name?: string } | null;
+  // GRIP_FILE / ?file= launch hint. `key` is a real Figma fileKey; `name` is
+  // held until the file connects and resolves to a key (files with no stable
+  // key stay bound by name or sessionId, never by the "0:0" placeholder).
+  // null = unbound (auto-route only when exactly one file is open, else
+  // ambiguous).
+  bind: FileBind | null;
   subscriptions: { selection: boolean; document: boolean; currentPage: boolean };
   // Token-bucket rate limiter — refills at RATE_LIMIT_REFILL/sec, caps at
   // RATE_LIMIT_BURST. Tool calls cost 1 token. Stops an agent runaway

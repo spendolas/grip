@@ -1,7 +1,9 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID as uuid } from 'node:crypto';
 import { EventEmitter } from 'events';
-import type { McpSession, PluginSessionInfo, WSEvent, WSHello, WSResponse } from './types.js';
+import type {
+  BindingState, FileBind, ListedFileInfo, McpSession, WSEvent, WSHello, WSResponse,
+} from './types.js';
 import { BRIDGE_VERSION } from './types.js';
 import { compareSemver, isSemver } from './update.js';
 
@@ -29,6 +31,8 @@ interface Session {
   id: string;
   ws: WebSocket;
   fileKey: string;
+  // Plugin-reported per-file unique id (optional; see fileIdentity).
+  fileUid?: string;
   fileName: string;
   currentPageId: string;
   currentPageName: string;
@@ -66,8 +70,44 @@ export function originAllowedForUpdate(origin: string | undefined): boolean {
   } catch { return false; }
 }
 
-// Distinct open files, keyed by fileKey → newest live session for that file.
-type FileMap = Map<string, { name: string; newest: Session }>;
+// The fileKey every file WITHOUT a real key reports: the plugin sends
+// `figma.fileKey ?? figma.root.id`, and root.id is "0:0" in every file. It
+// must never be treated as a file identity, or different local/unsaved files
+// merge into one entry and routing flips between their windows.
+export const PLACEHOLDER_FILE_KEY = '0:0';
+
+// A fileKey that actually identifies one file (non-empty, not the placeholder).
+export function isRealFileKey(key: string | undefined | null): key is string {
+  return typeof key === 'string' && key !== '' && key !== PLACEHOLDER_FILE_KEY;
+}
+
+// The stable identity of the file a plugin session is showing: its fileUid
+// when the plugin reports one, else its real fileKey, else undefined (the file
+// cannot be told apart from other key-less files; route/list/bind then treat
+// each such WINDOW on its own and never merge or guess between them).
+export function fileIdentity(s: { fileUid?: string; fileKey?: string }): string | undefined {
+  if (typeof s.fileUid === 'string' && s.fileUid !== '') return s.fileUid;
+  if (isRealFileKey(s.fileKey)) return s.fileKey;
+  return undefined;
+}
+
+// One open file (sessions sharing a stable identity) or, for a file with no
+// stable identity, one single window. `id` is the identity, or
+// `window:<sessionId>` for an identity-less window.
+interface FileEntry {
+  id: string;
+  identity?: string;
+  name: string;
+  newest: Session;
+  sessions: Session[];
+}
+type FileMap = Map<string, FileEntry>;
+
+// Result of matching a binding against the open windows (pure, no mutation).
+type BindMatch =
+  | { kind: 'one'; session: Session }
+  | { kind: 'many'; candidates: FileEntry[] }          // a bound NAME matches >1 open file/window
+  | { kind: 'none' };
 
 // Outcome of resolving which plugin session a request should route to.
 // The non-ok cases are surfaced to the agent as in-band errors so a
@@ -75,8 +115,9 @@ type FileMap = Map<string, { name: string; newest: Session }>;
 type Routing =
   | { kind: 'ok'; session: Session }
   | { kind: 'none' }                                   // no plugin connected at all
-  | { kind: 'ambiguous'; files: FileMap }              // >1 file open, no bind — agent must choose
-  | { kind: 'deferred'; bind: { key?: string; name?: string }; files: FileMap }; // bound file not open (yet)
+  | { kind: 'ambiguous'; files: FileMap }              // >1 file/window open, no bind — agent must choose
+  | { kind: 'ambiguous_name'; bind: FileBind; candidates: FileEntry[] } // bound name matches >1 file
+  | { kind: 'deferred'; bind: FileBind; files: FileMap }; // bound file not open (yet)
 
 const REQUEST_TIMEOUT_MS = 10_000;          // tighter than before; matches heartbeat
 // Some plugin ops are legitimately slow and must NOT be fast-failed as if
@@ -231,57 +272,143 @@ export class PluginBridge extends EventEmitter {
 
   // ---------- session management ----------
 
-  list(mcp: McpSession): PluginSessionInfo[] {
+  // One entry per open FILE (grouped by stable identity), or per WINDOW for
+  // files with no stable identity. Only helloed, open sessions are listed
+  // (half-connected sockets are counted in fileListing().connecting).
+  // `others` = the OTHER MCP sessions, used only to count boundAgents.
+  list(mcp: McpSession, others: McpSession[] = []): ListedFileInfo[] {
     const activeId = this.resolveActiveId(mcp);
-    return Array.from(this.sessions.values()).map((s) => ({
-      sessionId: s.id,
-      fileKey: s.fileKey,
-      fileName: s.fileName,
-      currentPageId: s.currentPageId,
-      currentPageName: s.currentPageName,
-      active: s.id === activeId,
-    }));
+    const counts = this.boundCounts(others);
+    return [...this.distinctOpenFiles().values()].map((e) => this.fileInfo(e, activeId, counts));
+  }
+
+  // Everything list_files returns.
+  fileListing(mcp: McpSession, others: McpSession[] = []): {
+    files: ListedFileInfo[];
+    myBinding: BindingState;
+    connecting: number;
+  } {
+    let connecting = 0;
+    for (const s of this.sessions.values()) if (!PluginBridge.isLive(s) && s.ws.readyState === WebSocket.OPEN) connecting++;
+    return { files: this.list(mcp, others), myBinding: this.bindingState(mcp), connecting };
+  }
+
+  // This agent's binding, truthfully: live (routes now), waiting (bound but
+  // the file is not open, or the bound name matches several files) or
+  // unbound (sessionId set when single-file auto-routing would route).
+  bindingState(mcp: McpSession): BindingState {
+    const r = this.route(mcp);
+    if (!mcp.bind) {
+      return r.kind === 'ok'
+        ? { state: 'unbound', sessionId: r.session.id, fileName: r.session.fileName }
+        : { state: 'unbound' };
+    }
+    const target = { ...mcp.bind };
+    if (r.kind === 'ok') return { state: 'live', target, sessionId: r.session.id, fileName: r.session.fileName };
+    return { state: 'waiting', target, reason: r.kind === 'ambiguous_name' ? 'ambiguous_name' : 'not_open' };
   }
 
   // Bind an agent to a file by fileKey, exact file name, sessionId, or a
   // figma.com URL. Binds even if the file isn't open yet (deferred) so a
   // launcher/agent can declare intent ahead of the plugin connecting; the
   // binding survives reconnect churn and ignores every other open file.
-  setActive(target: string, mcp: McpSession): {
+  // A file with no stable identity ("0:0") is bound by name or by sessionId,
+  // never by the placeholder key.
+  setActive(target: string, mcp: McpSession, others: McpSession[] = []): {
     bound: true;
     resolved: boolean;
-    target: { key?: string; name?: string };
-    file?: PluginSessionInfo;
-    reason?: 'not_open';
-    open?: PluginSessionInfo[];
+    target: FileBind;
+    file?: ListedFileInfo;
+    reason?: 'not_open' | 'ambiguous_name';
+    open?: ListedFileInfo[];
+    candidates?: Array<{ fileName: string; fileKey: string; sessionId: string }>;
+    warnings?: string[];
   } {
-    const bind = this.resolveBind(target); // may throw ambiguous_file_name
+    const bind = this.resolveBind(target); // may throw ambiguous_file_name / not_a_file_key
     mcp.bind = bind;
     mcp.activeFileId = null; // force re-resolve against the new bind
-    const match = this.matchBind(bind);
-    if (match) {
-      mcp.activeFileId = match.id;
-      if (!bind.key && match.fileKey) bind.key = match.fileKey; // promote name→key
-      process.stderr.write(`[grip] mcp ${mcp.id.slice(0, 8)} bound → ${match.fileName} (${match.fileKey})\n`);
-      return { bound: true, resolved: true, target: bind, file: this.info(match) };
+    const r = this.route(mcp);
+    if (r.kind === 'ok') {
+      const match = r.session;
+      process.stderr.write(`[grip] mcp ${mcp.id.slice(0, 8)} bound → ${match.fileName} (${fileIdentity(match) ?? 'window ' + match.id.slice(0, 8)})\n`);
+      const counts = this.boundCounts(others);
+      const entry = this.entryOf(match);
+      const file = this.fileInfo(entry, match.id, counts);
+      const res: ReturnType<PluginBridge['setActive']> = { bound: true, resolved: true, target: bind, file };
+      if (file.boundAgents > 0) {
+        res.warnings = [
+          `${file.boundAgents} other agent${file.boundAgents === 1 ? ' is' : 's are'} already bound to "${file.fileName}". ` +
+            `Your edits can collide with theirs: agree on separate frames/pages, or work in a different file.`,
+        ];
+      }
+      return res;
+    }
+    if (r.kind === 'ambiguous_name') {
+      return {
+        bound: true, resolved: false, reason: 'ambiguous_name', target: bind,
+        candidates: this.candidateList(r.candidates), open: this.list(mcp, others),
+      };
     }
     // Not open yet — hold the binding (deferred). Return the open files so a
     // typo is caught immediately while a genuine cold-start file resolves
     // when it connects.
-    const label = bind.key ?? bind.name ?? target;
+    const label = bind.key ?? bind.uid ?? bind.name ?? bind.sessionId ?? target;
     process.stderr.write(`[grip] mcp ${mcp.id.slice(0, 8)} bound → ${label} (deferred, not open)\n`);
-    return { bound: true, resolved: false, reason: 'not_open', target: bind, open: this.list(mcp) };
+    const res: ReturnType<PluginBridge['setActive']> = { bound: true, resolved: false, reason: 'not_open', target: bind, open: this.list(mcp, others) };
+    const sameTarget = others.filter((o) => o.bind && ((bind.key && o.bind.key === bind.key) || (bind.uid && o.bind.uid === bind.uid))).length;
+    if (sameTarget > 0) {
+      res.warnings = [`${sameTarget} other agent${sameTarget === 1 ? ' is' : 's are'} already bound to this file. Your edits can collide with theirs once it opens.`];
+    }
+    return res;
   }
 
-  private info(s: Session): PluginSessionInfo {
-    return {
+  private fileInfo(e: FileEntry, activeId: string | null, counts: Map<string, number>): ListedFileInfo {
+    const s = e.newest;
+    const now = Date.now();
+    const info: ListedFileInfo = {
       sessionId: s.id,
       fileKey: s.fileKey,
       fileName: s.fileName,
       currentPageId: s.currentPageId,
       currentPageName: s.currentPageName,
-      active: true,
+      active: activeId !== null && e.sessions.some((x) => x.id === activeId),
+      ...(s.fileUid ? { fileUid: s.fileUid } : {}),
+      stableKey: e.identity !== undefined,
+      windows: e.sessions.map((x) => ({
+        sessionId: x.id,
+        currentPageId: x.currentPageId,
+        currentPageName: x.currentPageName,
+        pluginVersion: x.pluginVersion ?? 'unknown',
+        helloAgoMs: now - x.helloAt,
+      })),
+      boundAgents: counts.get(e.id) ?? 0,
     };
+    if (e.identity === undefined) {
+      info.note = 'This file has no stable file key (local or unsaved files all report "0:0"), so each window is listed on its own. Bind it by name or by this sessionId.';
+    }
+    return info;
+  }
+
+  // Entry id of each file other agents are bound/pinned to → how many agents.
+  // Pure: never moves another agent's pin.
+  private boundCounts(others: McpSession[]): Map<string, number> {
+    const m = new Map<string, number>();
+    for (const o of others) {
+      if (!o.bind) continue;
+      let s: Session | null = null;
+      if (o.activeFileId) {
+        const p = this.sessions.get(o.activeFileId);
+        if (p && PluginBridge.isLive(p)) s = p;
+      }
+      if (!s) {
+        const r = this.matchBind(o.bind);
+        if (r.kind === 'one') s = r.session;
+      }
+      if (!s) continue;
+      const id = this.entryId(s);
+      m.set(id, (m.get(id) ?? 0) + 1);
+    }
+    return m;
   }
 
   // ---------- request routing ----------
@@ -338,7 +465,7 @@ export class PluginBridge extends EventEmitter {
 
   private hasReadyPlugin(): boolean {
     for (const s of this.sessions.values()) {
-      if (s.fileKey && s.ws.readyState === WebSocket.OPEN) return true;
+      if (PluginBridge.isLive(s)) return true;
     }
     return false;
   }
@@ -350,6 +477,7 @@ export class PluginBridge extends EventEmitter {
       // actionable, in-band error instead of a silently-wrong file.
       const r = this.route(mcp);
       if (r.kind === 'ambiguous') throw this.ambiguousError(r.files);
+      if (r.kind === 'ambiguous_name') throw this.ambiguousNameError(r.bind, r.candidates);
       // 'none' (cold start) or 'deferred' (bound file mid-respawn / just
       // opening) may resolve once a plugin (re)connects — soak the reconnect
       // grace, then re-check. waitForPlugin re-runs route() on every hello,
@@ -358,6 +486,7 @@ export class PluginBridge extends EventEmitter {
       if (!session) {
         const r2 = this.route(mcp);
         if (r2.kind === 'ambiguous') throw this.ambiguousError(r2.files);
+        if (r2.kind === 'ambiguous_name') throw this.ambiguousNameError(r2.bind, r2.candidates);
         if (r2.kind === 'deferred') throw this.deferredError(r2.bind, r2.files);
         throw new Error('plugin_disconnected: No plugin connected');
       }
@@ -419,8 +548,9 @@ export class PluginBridge extends EventEmitter {
           // session now serves this file, the plugin iframe reconnected during
           // the call (new sessionId) and we were talking to a zombie — that's
           // RETRYABLE, and the fix is retry/pin, NOT "reload the Figma tab".
-          const fresh = session.fileKey
-            ? this.newestLive((s) => s.fileKey === session.fileKey && s.id !== session.id)
+          const ident = fileIdentity(session);
+          const fresh = ident
+            ? this.newestLive((s) => fileIdentity(s) === ident && s.id !== session.id)
             : null;
           if (fresh) {
             reject(new Error(
@@ -477,65 +607,131 @@ export class PluginBridge extends EventEmitter {
     if (q.length === 0) this.queues.delete(sid);
   }
 
+  // A plugin session that has said hello and whose socket is open.
+  private static isLive(s: Session): boolean {
+    return s.helloAt > 0 && s.ws.readyState === WebSocket.OPEN;
+  }
+
   // Pick the newest live, helloed session matching a predicate. Newest-wins
-  // so reconnect overlap (old dying iframe + fresh one, same fileKey) never
+  // so reconnect overlap (old dying iframe + fresh one, same file) never
   // routes to the zombie.
   private newestLive(pred: (s: Session) => boolean): Session | null {
     let best: Session | null = null;
     for (const s of this.sessions.values()) {
-      if (!s.fileKey || s.ws.readyState !== WebSocket.OPEN) continue;
+      if (!PluginBridge.isLive(s)) continue;
       if (!pred(s)) continue;
       if (!best || s.helloAt > best.helloAt) best = s;
     }
     return best;
   }
 
+  // A pin must still show the bound file (cheap guard; a name / sessionId
+  // bind trusts its pin while the window is open, so a file rename does not
+  // drop it).
+  private static pinMatchesBind(s: Session, bind: FileBind | null): boolean {
+    if (!bind) return true;
+    if (bind.uid) return s.fileUid === bind.uid;
+    if (bind.key) return s.fileKey === bind.key;
+    return true;
+  }
+
+  private entryId(s: Session): string {
+    return fileIdentity(s) ?? `window:${s.id}`;
+  }
+
   // Distinct open files → newest live session each. Collapses the many
-  // reconnect-churn sessions of one file into a single entry.
+  // reconnect-churn sessions of one file into a single entry, but ONLY for
+  // files with a stable identity: windows of key-less files ("0:0") are never
+  // merged, each is its own entry.
   private distinctOpenFiles(): FileMap {
     const m: FileMap = new Map();
     for (const s of this.sessions.values()) {
-      if (!s.fileKey || s.ws.readyState !== WebSocket.OPEN) continue;
-      const cur = m.get(s.fileKey);
-      if (!cur || s.helloAt > cur.newest.helloAt) m.set(s.fileKey, { name: s.fileName, newest: s });
+      if (!PluginBridge.isLive(s)) continue;
+      const identity = fileIdentity(s);
+      const id = identity ?? `window:${s.id}`;
+      const cur = m.get(id);
+      if (!cur) { m.set(id, { id, identity, name: s.fileName, newest: s, sessions: [s] }); continue; }
+      cur.sessions.push(s);
+      if (s.helloAt > cur.newest.helloAt) { cur.newest = s; cur.name = s.fileName; }
     }
+    for (const e of m.values()) e.sessions.sort((a, b) => b.helloAt - a.helloAt);
     return m;
   }
 
-  // Newest live session satisfying a bind target, or null. Never guesses
-  // across a name that maps to >1 distinct open file (that's ambiguous;
-  // the agent must use the fileKey) — such a name simply won't resolve.
-  private matchBind(bind: { key?: string; name?: string }): Session | null {
-    if (bind.key) return this.newestLive((s) => s.fileKey === bind.key);
+  private entryOf(s: Session): FileEntry {
+    return this.distinctOpenFiles().get(this.entryId(s))
+      ?? { id: this.entryId(s), identity: fileIdentity(s), name: s.fileName, newest: s, sessions: [s] };
+  }
+
+  // Match a binding against the open windows. Pure (no mutation). Order:
+  // uid, real key, a live bound window, then the exact name. A name that maps
+  // to >1 open file/window is reported as 'many' (ambiguous), never guessed.
+  private matchBind(bind: FileBind): BindMatch {
+    const one = (s: Session | null): BindMatch => (s ? { kind: 'one', session: s } : { kind: 'none' });
+    if (bind.uid) return one(this.newestLive((s) => s.fileUid === bind.uid));
+    if (bind.key) return one(this.newestLive((s) => s.fileKey === bind.key));
+    if (bind.sessionId) {
+      const s = this.sessions.get(bind.sessionId);
+      if (s && PluginBridge.isLive(s)) return { kind: 'one', session: s };
+      // that window went away (iframe respawn): fall back to the name below
+    }
     if (bind.name) {
       const nm = bind.name.toLowerCase();
       const hits = [...this.distinctOpenFiles().values()].filter((v) => v.name.toLowerCase() === nm);
-      return hits.length === 1 ? hits[0].newest : null;
+      if (hits.length === 1) return { kind: 'one', session: hits[0].newest };
+      if (hits.length > 1) return { kind: 'many', candidates: hits };
     }
-    return null;
+    return { kind: 'none' };
+  }
+
+  // After a bind resolved to `s`: promote a name/sessionId bind to the file's
+  // stable identity when it has one (uid, else real key). A key-less file
+  // stays bound by name / sessionId (a sessionId bind follows the window it
+  // fell back to by name).
+  private promote(bind: FileBind, s: Session): void {
+    if (bind.key || bind.uid) return;
+    if (s.fileUid) { bind.uid = s.fileUid; delete bind.sessionId; return; }
+    if (isRealFileKey(s.fileKey)) { bind.key = s.fileKey; delete bind.sessionId; return; }
+    if (bind.sessionId) bind.sessionId = s.id;
   }
 
   // The single routing decision. Never guesses among multiple files: a
   // wrong guess silently reads/writes the wrong canvas (the bug agents hit).
   private route(mcp: McpSession): Routing {
-    // 1. Honor the resolved live pin while its session is still open.
+    // 1. Honor the resolved live pin while its session is still open — but
+    //    if a NEWER live session serves the same file (reconnect overlap),
+    //    re-pin to it so we never keep talking to a dying zombie. Only
+    //    possible for files with a stable identity; a key-less window is
+    //    kept while it is open (another window may be another file).
     if (mcp.activeFileId) {
       const s = this.sessions.get(mcp.activeFileId);
-      if (s && s.ws.readyState === WebSocket.OPEN) return { kind: 'ok', session: s };
+      if (s && PluginBridge.isLive(s) && PluginBridge.pinMatchesBind(s, mcp.bind)) {
+        const ident = fileIdentity(s);
+        if (ident) {
+          const newest = this.newestLive((x) => fileIdentity(x) === ident);
+          if (newest && newest.id !== s.id) {
+            mcp.activeFileId = newest.id;
+            return { kind: 'ok', session: newest };
+          }
+        }
+        return { kind: 'ok', session: s };
+      }
       mcp.activeFileId = null; // session died (iframe respawn) — re-resolve
     }
     // 2. Bound to a specific file: route there, or defer until it connects.
     //    Never falls to another open file — that silent hop is the bug.
     if (mcp.bind) {
-      const match = this.matchBind(mcp.bind);
-      if (match) {
-        mcp.activeFileId = match.id;
-        if (!mcp.bind.key && match.fileKey) mcp.bind.key = match.fileKey; // promote name→key
-        return { kind: 'ok', session: match };
+      const m = this.matchBind(mcp.bind);
+      if (m.kind === 'one') {
+        mcp.activeFileId = m.session.id;
+        this.promote(mcp.bind, m.session);
+        return { kind: 'ok', session: m.session };
       }
+      if (m.kind === 'many') return { kind: 'ambiguous_name', bind: mcp.bind, candidates: m.candidates };
       return { kind: 'deferred', bind: mcp.bind, files: this.distinctOpenFiles() };
     }
-    // 3. Unbound. One open file → frictionless. Zero → none. Many → ambiguous.
+    // 3. Unbound. One open file → frictionless. Zero → none. Many (files, or
+    //    windows of key-less files that can't be told apart) → ambiguous.
     const files = this.distinctOpenFiles();
     if (files.size === 0) return { kind: 'none' };
     if (files.size === 1) return { kind: 'ok', session: files.values().next().value!.newest };
@@ -543,44 +739,60 @@ export class PluginBridge extends EventEmitter {
   }
 
   // Resolve a free-form target (fileKey | exact name | sessionId | figma.com
-  // URL) into a bind. Resolves against currently-open files where possible;
-  // an unmatched value is held as key (if keyish/URL) or name (deferred).
-  private resolveBind(input: string): { key?: string; name?: string } {
+  // URL | fileUid) into a bind. Resolves against currently-open files where
+  // possible; an unmatched value is held as key (if keyish/URL) or name
+  // (deferred). `lenient` (launch-time binds) keeps an ambiguous name as a
+  // name bind instead of throwing, so calls then fail loud with the candidates.
+  private resolveBind(input: string, lenient = false): FileBind {
     const trimmed = input.trim();
     const url = trimmed.match(PluginBridge.FIGMA_URL_RE);
     if (url) return { key: url[1] };
-    // sessionId of an open plugin → its fileKey
+    // sessionId of an open plugin → its file's identity, or (key-less file)
+    // that window, with its name as the fallback when the window respawns.
     const sess = this.sessions.get(trimmed);
-    if (sess && sess.fileKey) return { key: sess.fileKey };
-    const files = this.distinctOpenFiles();
-    if (files.has(trimmed)) return { key: trimmed };
-    const nameHits = [...files.entries()].filter(([, v]) => v.name.toLowerCase() === trimmed.toLowerCase());
-    if (nameHits.length === 1) return { key: nameHits[0][0] };
-    if (nameHits.length > 1) {
+    if (sess && sess.helloAt > 0) {
+      if (sess.fileUid) return { uid: sess.fileUid };
+      if (isRealFileKey(sess.fileKey)) return { key: sess.fileKey };
+      return { sessionId: sess.id, name: sess.fileName };
+    }
+    if (trimmed === PLACEHOLDER_FILE_KEY) {
       throw new Error(
-        `ambiguous_file_name: "${trimmed}" matches ${nameHits.length} open files ` +
-          `(${nameHits.map(([k]) => k).join(', ')}). Use the fileKey.`,
+        `not_a_file_key: "${PLACEHOLDER_FILE_KEY}" is the placeholder id that every local or unsaved Figma file reports, ` +
+          `so it does not identify one file. Bind by the file name or by the window's sessionId (see list_files).`,
       );
+    }
+    for (const s of this.sessions.values()) {
+      if (!PluginBridge.isLive(s)) continue;
+      if (s.fileUid && s.fileUid === trimmed) return { uid: trimmed };
+      if (s.fileKey === trimmed) return { key: trimmed };
+    }
+    const nameHits = [...this.distinctOpenFiles().values()].filter((v) => v.name.toLowerCase() === trimmed.toLowerCase());
+    if (nameHits.length === 1) {
+      const e = nameHits[0];
+      if (e.newest.fileUid) return { uid: e.newest.fileUid };
+      if (e.identity) return { key: e.identity };
+      return { name: trimmed };   // key-less file: stay bound by name, never by "0:0"
+    }
+    if (nameHits.length > 1) {
+      if (lenient) return { name: trimmed };
+      throw this.ambiguousNameError({ name: trimmed }, nameHits);
     }
     // Unresolved → defer. Bare Figma-style keys are ≥16 url-safe chars, no spaces.
     if (/^[A-Za-z0-9]{16,}$/.test(trimmed)) return { key: trimmed };
     return { name: trimmed };
   }
 
-  // Apply a launch-time (GRIP_FILE) binding. Best-effort: a bad target is
-  // logged and ignored — the agent still works (just unbound).
+  // Apply a launch-time binding (GRIP_FILE over stdio, ?file= over HTTP).
+  // Best-effort: a bad target is logged and ignored — the agent still works
+  // (just unbound).
   bindFromLaunch(target: string, mcp: McpSession): void {
     try {
-      const bind = this.resolveBind(target);
+      const bind = this.resolveBind(target, true);
       mcp.bind = bind;
       mcp.activeFileId = null;
-      const match = this.matchBind(bind);
-      if (match) {
-        mcp.activeFileId = match.id;
-        if (!bind.key && match.fileKey) bind.key = match.fileKey;
-      }
+      const r = this.route(mcp);
       process.stderr.write(
-        `[grip] mcp ${mcp.id.slice(0, 8)} launch-bound → ${bind.key ?? bind.name} (${match ? 'resolved' : 'deferred'})\n`,
+        `[grip] mcp ${mcp.id.slice(0, 8)} launch-bound → ${bind.key ?? bind.uid ?? bind.name ?? bind.sessionId} (${r.kind === 'ok' ? 'resolved' : r.kind === 'ambiguous_name' ? 'ambiguous name' : 'deferred'})\n`,
       );
     } catch (err) {
       process.stderr.write(`[grip] launch bind failed for '${target}': ${(err as Error).message}\n`);
@@ -597,20 +809,48 @@ export class PluginBridge extends EventEmitter {
     return r.kind === 'ok' ? r.session : null;
   }
 
+  private static windowLabel(e: FileEntry): string {
+    return e.identity
+      ? `"${e.name}" (${e.identity})`
+      : `"${e.name}" (no stable file key, sessionId ${e.newest.id})`;
+  }
+
   private fileList(files: FileMap): string {
-    return [...files.entries()].map(([key, v]) => `"${v.name}" (${key})`).join(', ');
+    return [...files.values()].map((e) => PluginBridge.windowLabel(e)).join(', ');
+  }
+
+  private candidateList(entries: FileEntry[]): Array<{ fileName: string; fileKey: string; sessionId: string }> {
+    return entries.map((e) => ({ fileName: e.name, fileKey: e.newest.fileKey, sessionId: e.newest.id }));
   }
 
   private ambiguousError(files: FileMap): Error {
+    const keyless = [...files.values()].some((e) => !e.identity);
+    const what = keyless ? 'Figma files/windows are open' : 'Figma files are open';
+    const why = keyless
+      ? ' Windows marked "no stable file key" (local or unsaved files) cannot be told apart by key, so each is listed on its own; if two of them are the same file reconnecting, retry in a few seconds.'
+      : '';
     return new Error(
-      `ambiguous_active_file: ${files.size} Figma files are open (${this.fileList(files)}). ` +
-        `grip won't guess which one — call set_active_file with the fileKey, file name, or sessionId of your ` +
+      `ambiguous_active_file: ${files.size} ${what} (${this.fileList(files)}).${why} ` +
+        `grip won't guess which one. Call set_active_file with the fileKey, file name, or sessionId of your ` +
         `target first, or use list_files to see them. This is deliberate: guessing silently reads/writes the wrong file.`,
     );
   }
 
-  private deferredError(bind: { key?: string; name?: string }, files: FileMap): Error {
-    const label = bind.key ? `fileKey ${bind.key}` : `file "${bind.name}"`;
+  private ambiguousNameError(bind: FileBind, candidates: FileEntry[]): Error {
+    const list = candidates
+      .map((e) => `"${e.name}" (${e.identity ? 'fileKey ' + e.identity : 'no stable file key'}, sessionId ${e.newest.id})`)
+      .join(', ');
+    return new Error(
+      `ambiguous_file_name: the file name "${bind.name}" matches ${candidates.length} open files/windows: ${list}. ` +
+        `grip won't guess which one. Call set_active_file with the fileKey, or with the sessionId of the window you mean.`,
+    );
+  }
+
+  private deferredError(bind: FileBind, files: FileMap): Error {
+    const label = bind.key ? `fileKey ${bind.key}`
+      : bind.uid ? `file id ${bind.uid}`
+      : bind.sessionId ? `window ${bind.sessionId}${bind.name ? ` ("${bind.name}")` : ''}`
+      : `file "${bind.name}"`;
     const others = files.size ? ` Open now: ${this.fileList(files)}.` : ' No Figma files are open.';
     return new Error(
       `bound_file_not_open: this agent is bound to ${label}, which isn't open in Figma.${others} ` +
@@ -708,7 +948,8 @@ export class PluginBridge extends EventEmitter {
   private applyHello(sessionId: string, hello: WSHello) {
     const sess = this.sessions.get(sessionId);
     if (!sess) return;
-    sess.fileKey = hello.fileKey;
+    sess.fileKey = typeof hello.fileKey === 'string' ? hello.fileKey : '';
+    sess.fileUid = typeof hello.fileUid === 'string' && hello.fileUid !== '' ? hello.fileUid : undefined;
     sess.fileName = hello.fileName;
     sess.currentPageId = hello.currentPageId;
     sess.currentPageName = hello.currentPageName;
@@ -828,6 +1069,8 @@ export class PluginBridge extends EventEmitter {
       plugins: Array.from(this.sessions.values()).map((s) => ({
         sessionId: s.id,
         fileKey: s.fileKey,
+        ...(s.fileUid ? { fileUid: s.fileUid } : {}),
+        stableKey: fileIdentity(s) !== undefined,
         fileName: s.fileName,
         currentPageId: s.currentPageId,
         currentPageName: s.currentPageName,

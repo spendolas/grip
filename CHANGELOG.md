@@ -2,6 +2,16 @@
 
 Newest first. Each `## <version>` heading is the exact version number; the GitHub Release for that version uses its section as the release notes. The history starts at 0.6.0.
 
+## Unreleased
+
+- Local and unsaved Figma files are no longer mixed up. These files have no real file key (Figma gives all of them the same placeholder, "0:0"), and Grip used to treat them as one file: your agent could end up reading or editing whichever of those windows had most recently switched pages. Now each of those windows is listed on its own, and when more than one is open your agent is asked to choose instead of guessing.
+- Binding your agent to a local file by its name (or by its window) now sticks to that file instead of drifting to another local file.
+- When Figma restarts the plugin (it does this every few minutes), an agent bound to that file moves to the fresh connection right away instead of lingering on the old one.
+- `list_files` now shows one entry per file, with its open windows, whether your agent is bound and connected, and how many other agents are working on the same file. Binding to a file another agent is already using gives a warning, so two agents don't edit the same thing by accident.
+- If the name you bind to matches more than one open file, Grip now says so and lists them (with their keys and window ids) instead of claiming the file isn't open.
+- `get_page_context` and `grip_health` now tell the truth about your agent's binding (connected, waiting for the file, or not bound), and `grip_health` shows how many other agents are connected.
+- Agents that connect over HTTP can pick their file in the address, for example `http://127.0.0.1:7778/mcp?file=<file key, name or link>`, the same way `GRIP_FILE` works for other agents.
+
 ## 0.8.0
 
 **Grip can update itself, but only when you say so, and only to a version your Figma plugin can talk to.**

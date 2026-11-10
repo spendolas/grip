@@ -17,14 +17,33 @@ Conventions:
 ## Session routing (bridge-side)
 
 ### `list_files`
-List all Figma plugins currently connected to this Grip bridge.
+List the Figma files open in this Grip bridge, one entry per file.
 - Params: none.
-- Returns: `{ files: Array<{ sessionId, fileKey, fileName, currentPageId, currentPageName, active }> }` — `active` is true for the plugin this MCP session targets by default.
+- Returns: `{ files[], myBinding, connecting }`.
+  - Each `files[]` entry keeps the older fields `{ sessionId, fileKey, fileName, currentPageId, currentPageName, active }` (taken from the file's newest live window; `active` is true for the file this MCP session's calls go to) and adds `stableKey`, `fileUid?`, `windows[]` (`{ sessionId, currentPageId, currentPageName, pluginVersion, helloAgoMs }`, newest first), `boundAgents` (how many OTHER agents are bound or pinned to that file: a count, never who) and `note?`.
+  - Grouping: windows are grouped by file identity, which is the plugin-reported `fileUid` when present, else a real `fileKey`. Reconnect duplicates of one file collapse into one entry. A file with no stable identity (local or unsaved files all report `fileKey: "0:0"`) has `stableKey: false` and is listed **once per window**, never merged with other `"0:0"` windows.
+  - `myBinding`: `{ state: 'live'|'waiting'|'unbound', target?, sessionId?, fileName?, reason? }`. `live` = bound and routing to `sessionId`; `waiting` = bound but `reason: 'not_open'` (the file is not open) or `'ambiguous_name'` (the bound name matches several open files); `unbound` = no binding (`sessionId` is set when exactly one file is open, so calls auto-route there).
+  - `connecting`: plugin sockets that are open but have not said hello yet (they are not listed).
 
 ### `set_active_file`
-Pin this MCP session to a specific connected plugin.
-- Params: `target` (req) — sessionId or fileKey.
-- Returns: the matched session info.
+Bind this MCP session to one Figma file; every later call routes there.
+- Params: `target` (req): a fileKey, an exact file name, a sessionId, or a figma.com URL (a plugin-reported fileUid also works).
+- Returns: `{ bound: true, resolved, target, file?, reason?, open?, candidates?, warnings? }`. `resolved: true` + `file` (a `list_files` entry) when the file is open now; otherwise `reason: 'not_open'` (held, resolves when it connects) with `open` (the current `list_files` entries, so a typo is obvious). `warnings[]` appears when another agent is already bound to the same file (your edits can collide).
+- `target` is stored as `{ key }` (a real fileKey), `{ uid }`, `{ name }` or `{ sessionId, name }`. A name or sessionId of a file with a real key is promoted to `{ key }`. A file with no stable key (`"0:0"`) stays bound by name, or by sessionId with the name as fallback when that window respawns; it is never bound by `"0:0"`, and `target: "0:0"` errors `not_a_file_key`.
+- A name that matches more than one open file or window errors `ambiguous_file_name`, listing each candidate (name, fileKey, sessionId): bind by the fileKey or the sessionId instead. A held name bind that later becomes ambiguous fails each call with the same error (not `bound_file_not_open`).
+- A bound agent always routes to the newest live window of its file (reconnect overlap never keeps it on a dying window).
+- Launch-time alternatives: env `GRIP_FILE=<key|name|url>` (stdio shim) or `?file=<key|name|url>` on the HTTP initialize URL (`http://127.0.0.1:7778/mcp?file=...`, combinable with `?tools=`).
+- Unbound calls with more than one file, or more than one `"0:0"` window, open error `ambiguous_active_file` naming each file/window.
+
+### `get_page_context`
+Cheap "where am I" probe (one plugin round-trip, no node tree).
+- Params: none.
+- Returns: `{ file: { key, name }, page: { id, name }, selectionCount, focusedSlideId?, bind, binding }`. `bind` is `null` when unbound, else `{ target, resolved, state }`. `binding` is always present: `{ state: 'live'|'deferred'|'unbound', target?, sessionId?, reason? }`, read from the router after the call (not assumed).
+
+### `grip_health`
+Bridge + plugin state, no plugin round-trip.
+- Params: none.
+- Returns: `{ role, leaderPid, pluginCount, pluginsReady, pendingCount, plugins[], session, otherAgents, update }`. `session` is `{ id, activeFileId, subscriptions, bind, binding }` (`binding` has the same shape as `list_files` `myBinding`). `otherAgents` = how many other MCP sessions are connected to this bridge (a count only). Each `plugins[]` entry carries `stableKey` (false for a `"0:0"` window) and `fileUid` when the plugin sends one.
 
 ### `grip_update`
 Check for, or install, a newer Grip. **User-triggered only: call `install` only after the user explicitly says yes** — never on your own.

@@ -312,6 +312,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'grip_health',
     description: 'Probe bridge + plugin state. Returns { role, leaderPid, pluginCount, pluginsReady, pendingCount, plugins[], session: { id, activeFileId, subscriptions } }. Safe to call without a plugin connected — use it before writes to confirm path is alive.',
+    detail: "Also returns session.bind (what this agent is bound to, null = unbound), session.binding ({state:'live'|'waiting'|'unbound', target?, sessionId?, fileName?, reason?}, same as list_files myBinding), otherAgents (how many other agents are connected to this bridge; a count only) and plugins[].stableKey (false for a window whose file has no unique key, fileKey \"0:0\").",
     schema: z.object({}),
   },
   {
@@ -321,7 +322,9 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'list_files',
-    description: 'List all Figma files currently connected to Grip. The "active" file is where read/write tools execute. With >1 file open and no binding, tools error with `ambiguous_active_file` until you set_active_file — grip never guesses.',
+    description: "List open Figma files, one entry per file; `active` = where your calls go. Plus `myBinding`, `boundAgents`. >1 file open and unbound: calls error `ambiguous_active_file` until set_active_file. More: grip_capabilities.",
+    detail:
+      "Returns { files[], myBinding, connecting }. Each files[] entry keeps the old fields (sessionId and page of the newest live window, fileKey, fileName, active) plus `stableKey`, `windows[]` ({sessionId, currentPageId, currentPageName, pluginVersion, helloAgoMs}) and `boundAgents` (how many OTHER agents are bound to that file; a count, never who). Files with a real fileKey (or a plugin-reported fileUid) are grouped: reconnect duplicates collapse into one entry. Files with NO stable key (local or unsaved files all report fileKey \"0:0\") have stableKey:false and are listed once per window, never merged; bind those by exact name or by the window's sessionId, never by \"0:0\". `myBinding` is {state:'live'|'waiting'|'unbound', target?, sessionId?, fileName?, reason?}: live = your calls route to sessionId now; waiting = bound but the file is not open (reason not_open) or the bound name matches several open files (reason ambiguous_name); unbound = no binding (sessionId is set when exactly one file is open, so calls auto-route). `connecting` counts plugin windows that opened a socket but have not said hello yet (not listed).",
     schema: z.object({}),
   },
   {
@@ -329,7 +332,7 @@ export const TOOLS: ToolDef[] = [
     description:
       "Bind this agent to a Figma file — all subsequent tool calls route there, regardless of how many other files are open. The binding persists across plugin reconnects, so pin for any multi-call task. `target` accepts a fileKey, an exact file name, a sessionId, or a figma.com URL; a not-yet-open file binds deferred. Returns `{ bound, resolved }` (plus the open-file list when unresolved, so a typo is obvious). Call grip_capabilities {tool:'set_active_file'} for reconnect handling, ambiguity rules, and the GRIP_FILE launch-time alternative.",
     detail:
-      "How the persistence works: on a plugin reconnect the binding re-resolves to that file's newest live session (not a fixed session id). Note: a call issued in the brief instant a reconnect is mid-flight can still return `plugin_reconnected` — that error is RETRYABLE (just call again); it does NOT mean reload Figma. Unbound agents (relying on single-open-file auto-routing) are more exposed to that window — bind to avoid it. If the file isn't open yet the binding is held (deferred) and resolves when it connects. A file name matching >1 open file errors `ambiguous_file_name` — use the fileKey. (Launchers can skip this by starting the agent with env GRIP_FILE=<key|name|url>.)",
+      "How the persistence works: on a plugin reconnect the binding re-resolves to that file's newest live session (not a fixed session id), and a bound agent moves to a newer live window of the same file as soon as one says hello. Note: a call issued in the brief instant a reconnect is mid-flight can still return `plugin_reconnected`: that error is RETRYABLE (just call again); it does NOT mean reload Figma. Unbound agents (relying on single-open-file auto-routing) are more exposed to that window; bind to avoid it. If the file isn't open yet the binding is held (deferred) and resolves when it connects. A file name matching >1 open file/window errors `ambiguous_file_name` listing the candidates (name, fileKey, sessionId): bind by the fileKey or the sessionId instead. Files with no stable key (local or unsaved files report fileKey \"0:0\") are never bound by \"0:0\" (that errors `not_a_file_key`): a name target stays a name bind, a sessionId target binds that window and falls back to its file name if the window respawns. The result carries `warnings[]` when another agent is already bound to the same file (edits can collide). (Launchers can skip this by starting the agent with env GRIP_FILE=<key|name|url> over stdio, or `?file=<key|name|url>` on the HTTP /mcp URL.)",
     schema: z.object({ target: z.string() }),
   },
   {
@@ -371,7 +374,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'get_page_context',
     description: "Cheap 'where am I' probe. Returns { file: {key, name}, page: {id, name}, selectionCount, bind } for the currently-routed plugin session — no node tree, no round-trip cost. Call before page-scoped reads when unsure which file/page is active. Call grip_capabilities {tool:'get_page_context'} for the empty-result caveat.",
-    detail: "`bind` is this agent's file binding ({ target, resolved } or null). Page-scoped reads (e.g. get_selection, search_nodes) return [] on a wrong page/file, not an error — an empty result from those means 'nothing here', not 'wrong page', only if this probe confirms you're on the file/page you intended.",
+    detail: "`bind` is this agent's file binding ({ target, resolved, state } or null when unbound); `binding` is always present: {state:'live'|'deferred'|'unbound', target?, sessionId?, reason?}, read from the router after the call (live = bound and routing to sessionId; unbound = auto-routed because exactly one file is open). Page-scoped reads (e.g. get_selection, search_nodes) return [] on a wrong page/file, not an error: an empty result from those means 'nothing here', not 'wrong page', only if this probe confirms you're on the file/page you intended.",
     schema: z.object({}),
   },
   {

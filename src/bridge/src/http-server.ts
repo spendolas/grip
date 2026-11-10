@@ -91,8 +91,15 @@ export class HttpServer {
     // query param on the initialize request itself (e.g. "?tools=core,motion").
     // Read only here — session creation — never on a reused mcp-session-id,
     // so a later POST on an already-initialized session can't clobber it.
-    const tools = new URL(req.url ?? '/', 'http://localhost').searchParams.get('tools');
+    const params = new URL(req.url ?? '/', 'http://localhost').searchParams;
+    const tools = params.get('tools');
     if (tools) live.session.toolScopeSpec = tools;
+    // Launch-time file binding over HTTP (the GRIP_FILE equivalent; there is
+    // no shim to forward env): `?file=<fileKey|name|url>` on the initialize
+    // request, applied through the same bindFromLaunch path. Session creation
+    // only, like ?tools=.
+    const file = params.get('file');
+    if (file) this.bridge.bindFromLaunch(file, live.session);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => uuid(),
       onsessioninitialized: (id) => {
