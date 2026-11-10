@@ -11,6 +11,14 @@ Conventions:
 - Boolean defaults given inline. Optional unless marked **req**.
 - "Active file" = the plugin instance the calling MCP session is pinned to. See `set_active_file`.
 - Throws return `{ isError: true, content: [{ type: 'text', text: <message> }] }` per MCP convention.
+- Errors start with a typed code. Transport codes any tool can return:
+  - `plugin_working`: the plugin is busy with another call (named, with how long it has run). Nothing was sent; retry after `retryAfterMs`. A call that timed out waiting behind a slow call also gets it (for a change: re-read before retrying).
+  - `plugin_busy`: a call ran past its own time budget with no reply; the plugin's thread is probably wedged. Retry after `retryAfterMs`; if it keeps happening, reload the Figma tab.
+  - `plugin_overloaded`: too many calls queued (per agent or per plugin). Nothing was sent; retry after `retryAfterMs` or batch the work.
+  - `maybe_applied`: the plugin disconnected or reconnected after a change was sent and before it replied. The change may already have been applied: re-read before retrying.
+  - `plugin_disconnected` / `plugin_reconnected`: a read, or a call that was never sent, could not be completed even after the bridge re-sent it once on the file's next plugin session. Safe to retry.
+  - `request_timeout`: no reply within the call's budget. For a change, the plugin may still apply it: re-read before retrying.
+  - `retryAfterMs` appears in the message (`retryAfterMs=<n>`) and in the result's `_meta['grip/retryAfterMs']`. Calls are queued fairly across agents (round-robin); a call that waited 2s or more in the queue reports `_meta['grip/queuedMs']`.
 
 ---
 
@@ -400,7 +408,7 @@ Write `pluginData` on a node. Use empty/null to clear.
 
 ## Subscribe (push notifications)
 
-These don't round-trip the plugin per call — they flip a flag on the calling MCP session. The bridge fans `selectionchange` / `documentchange` / `currentpagechange` events from the active plugin out to subscribed sessions as MCP `notifications/message` with `data: { event, payload }`.
+These don't round-trip the plugin per call: they flip a flag on the calling MCP session. The bridge sends `selectionchange` / `documentchange` / `currentpagechange` events to subscribed sessions as MCP `notifications/message` with `data: { event, payload, fileKey, fileName, pluginSessionId, causedBy }`. A session only receives events from the file it routes to: its bound file (`set_active_file` / `GRIP_FILE`), or the one open file when unbound; while it is ambiguous (several files open, not bound) it receives none. `causedBy` is a best-effort hint: `'self'` (this session had a change in flight on that file, or one finished in the last 1.5s), `'other'` (another agent did), `'unknown'` (nobody did, so probably the user; also when both did).
 
 ### `subscribe`
 Merged (bridge-side): subscribe to a live event stream, dispatched on `target`.

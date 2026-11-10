@@ -1,31 +1,86 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID as uuid } from 'node:crypto';
 import { EventEmitter } from 'events';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type {
-  BindingState, FileBind, ListedFileInfo, McpSession, WSEvent, WSHello, WSResponse,
+  BindingState, FileBind, ListedFileInfo, McpSession, PluginSessionInfo, WSEvent, WSHello, WSResponse,
 } from './types.js';
 import { BRIDGE_VERSION } from './types.js';
 import { compareSemver, isSemver } from './update.js';
+import { isRetrySafe, causesEvents } from './methods.js';
 
 interface Pending {
-  resolve: (result: unknown) => void;
-  reject: (err: Error) => void;
+  // The caller's request; settled through item.resolve / item.reject. Kept so
+  // a plugin drop can re-send a read on the file's next session.
+  item: QueuedRequest;
   timeout: NodeJS.Timeout;
   sessionId: string;
+  session: Session;
   startedAt: number;
   method: string;
+  mcpId: string;
+  // This call's own timeout budget (10s default, longer for SLOW_METHOD_TIMEOUT_MS
+  // or a run_script timeoutMs). The busy guard compares against it.
+  budgetMs: number;
+  // Free the in-flight slot (idempotent) and pump the queue.
+  release: () => void;
 }
 
-// A request accepted by the bridge but not yet sent to the plugin — held in a
-// per-plugin FIFO so a burst of commands is metered onto the single-threaded
-// plugin instead of flooding it. The caller's awaited promise is settled via
-// resolve/reject when the queued request finally dispatches and completes.
+// A request accepted by the bridge but not yet sent to the plugin. Held in a
+// per-plugin queue, one FIFO per MCP session, drained round-robin across
+// sessions so one agent's burst cannot starve another agent's single call.
+// The caller's awaited promise is settled via resolve/reject when the request
+// finally dispatches and completes.
 interface QueuedRequest {
   method: string;
   params: Record<string, unknown>;
+  mcpId: string;
+  enqueuedAt: number;
+  // The tool call this request belongs to (queuedMs / retryAfterMs metadata).
+  ctx?: CallContext;
+  // Already re-routed once after a plugin drop: never again.
+  retried?: boolean;
   resolve: (result: unknown) => void;
   reject: (err: Error) => void;
 }
+
+interface PluginQueue {
+  // mcpId -> that session's FIFO. Map order is the round-robin ring: pump takes
+  // from the first entry and moves it to the back.
+  bySession: Map<string, QueuedRequest[]>;
+  total: number;
+}
+
+// A request that ran past its own budget with no reply. It stays here (wedge
+// evidence for the busy guard) until any reply from that plugin proves its
+// thread is alive, the plugin session drops, or OVERDUE_FORGET_MS passes.
+interface Overdue {
+  sessionId: string;
+  method: string;
+  startedAt: number;
+  budgetMs: number;
+  overdueAt: number;
+}
+
+// Per tool call, carried through AsyncLocalStorage from mcp-server.ts so the
+// bridge can report how long the call waited in the queue and how long to wait
+// before retrying, without changing request()'s signature.
+export interface CallContext {
+  queuedMs?: number;
+  retryAfterMs?: number;
+}
+export const callContext = new AsyncLocalStorage<CallContext>();
+
+// A typed error that carries a retry hint (also written into the message as
+// `retryAfterMs=<n>` so it survives being turned into tool-result text).
+function retryError(message: string, retryAfterMs: number): Error & { retryAfterMs: number } {
+  const ms = Math.round(retryAfterMs);
+  const e = new Error(`${message} retryAfterMs=${ms}`) as Error & { retryAfterMs: number };
+  e.retryAfterMs = ms;
+  return e;
+}
+
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
 interface Session {
   id: string;
@@ -109,6 +164,11 @@ type BindMatch =
   | { kind: 'many'; candidates: FileEntry[] }          // a bound NAME matches >1 open file/window
   | { kind: 'none' };
 
+// A plugin event as the bridge re-emits it: tagged with the plugin session and
+// file it came from.
+export type BridgeEvent = WSEvent & { sessionId: string; fileKey: string; fileName: string };
+
+
 // Outcome of resolving which plugin session a request should route to.
 // The non-ok cases are surfaced to the agent as in-band errors so a
 // multi-file session can never silently read/write the wrong file.
@@ -119,7 +179,8 @@ type Routing =
   | { kind: 'ambiguous_name'; bind: FileBind; candidates: FileEntry[] } // bound name matches >1 file
   | { kind: 'deferred'; bind: FileBind; files: FileMap }; // bound file not open (yet)
 
-const REQUEST_TIMEOUT_MS = 10_000;          // tighter than before; matches heartbeat
+// Default per-call budget; GRIP_REQUEST_TIMEOUT_MS exists for tests and tuning.
+const REQUEST_TIMEOUT_MS = Number(process.env.GRIP_REQUEST_TIMEOUT_MS ?? 10_000);
 // Some plugin ops are legitimately slow and must NOT be fast-failed as if
 // wedged. A raster export (`exportAsync` → PNG/JPG/PDF) of a real frame on a
 // big file routinely runs tens of seconds — SVG of a 72×72 node measured
@@ -153,24 +214,44 @@ const SLOW_METHOD_TIMEOUT_MS: Record<string, number> = {
   get_node: PAGE_TIMEOUT_MS,
   get_nodes: PAGE_TIMEOUT_MS,
 };
-// Fail-fast threshold. The plugin runs on Figma's single main thread; a
-// synchronous run_script loop wedges it and CANNOT be preempted from here.
-// When a prior request to a plugin has been outstanding past this, the
-// thread is almost certainly stuck — so reject NEW requests instantly with
-// plugin_busy instead of letting each one eat a full 10s timeout (the
-// cascade that made the whole agent hang). Fast concurrent calls finish in
-// ms and never cross this, so normal multi-agent use is untouched.
-const BUSY_THRESHOLD_MS = 5_000;
+// Busy guard. The plugin runs on Figma's single main thread; a synchronous
+// run_script loop wedges it and CANNOT be preempted from here. Instead of
+// letting every new call eat a full timeout behind a frozen thread (the cascade
+// that hung whole agents), request() looks at what is already outstanding on
+// that plugin (see busyCheck):
+//   - an ordinary call (10s budget) outstanding past BUSY_THRESHOLD_MS, or a
+//     call that waited behind it: new calls fail fast with the RETRYABLE
+//     plugin_working (names the method, how long it has run, retryAfterMs);
+//   - a call past its OWN budget with no reply (and no in-budget slow call to
+//     explain it): plugin_busy, the thread is probably wedged;
+//   - a known-slow call (export, page load, map_nodes, run_script timeoutMs...)
+//     still inside its own longer budget is NOT evidence of anything: other
+//     agents' calls go through as normal.
+// Fast concurrent calls finish in ms and never cross any of this.
+const BUSY_THRESHOLD_MS = Number(process.env.GRIP_BUSY_THRESHOLD_MS ?? 5_000);
+// How long an unanswered past-budget call keeps counting as wedge evidence.
+const OVERDUE_FORGET_MS = Number(process.env.GRIP_OVERDUE_FORGET_MS ?? 30_000);
 // Flow control: the plugin runs on Figma's single main thread, so a flood of
 // concurrent commands saturates it and wedges the window (only a panel reload
 // recovers). The bridge meters requests per plugin — at most this many
 // in-flight at once; the rest queue (transparent to the agent) and drain as
-// responses return. This is the VOLUME guard (many fast ops); the plugin_busy
-// check above is the WEDGE guard (one op frozen >5s). Override with env.
+// responses return. This is the VOLUME guard (many fast ops); the busy guard
+// above is the WEDGE guard (one op frozen). Override with env.
 const MAX_INFLIGHT_PER_PLUGIN = Number(process.env.GRIP_MAX_INFLIGHT ?? 8);
 // Hard backstop on the queue so a runaway agent can't build unbounded backlog
 // (memory) — beyond this, shed load with a typed plugin_overloaded error.
 const MAX_QUEUE_PER_PLUGIN = Number(process.env.GRIP_MAX_QUEUE ?? 500);
+// Per MCP session share of one plugin's queue, so a single flooding agent
+// cannot fill the global backstop and lock every other agent out.
+const MAX_QUEUE_PER_SESSION = Number(process.env.GRIP_MAX_QUEUE_PER_SESSION ?? 125);
+// A tool call that waited at least this long in the queue reports it in the
+// tool result's _meta (grip/queuedMs). Every queued wait is logged.
+export const QUEUED_NOTE_MS = 2_000;
+// An event that arrives this soon after an event-causing call settled is still
+// attributed to it (the plugin debounces documentchange by 500ms).
+const CAUSE_ECHO_MS = 1_500;
+// Latency estimate before any reply has been measured (ms).
+const DEFAULT_LATENCY_MS = 250;
 const HEARTBEAT_INTERVAL_MS = 5_000;
 const HEARTBEAT_TIMEOUT_MS = 10_000;        // miss two pings → declare plugin dead
 // Reject plugin responses larger than this — a payload this big means an
@@ -195,7 +276,14 @@ export class PluginBridge extends EventEmitter {
   // Flow control (per plugin sessionId): count of requests sent-and-awaiting,
   // and the FIFO backlog of requests waiting for an in-flight slot.
   private inflight = new Map<string, number>();
-  private queues = new Map<string, QueuedRequest[]>();
+  private queues = new Map<string, PluginQueue>();
+  // Busy guard: calls that ran past their budget without a reply (by request id).
+  private overdue = new Map<string, Overdue>();
+  // Recent reply latency per plugin session (EWMA, ms), for retryAfterMs.
+  private latency = new Map<string, number>();
+  // Event-causing calls that settled recently, per plugin session, so an event
+  // that arrives just after (debounced documentchange) is still attributed.
+  private recentCauses = new Map<string, Array<{ mcpId: string; at: number }>>();
   // Streamed run_script log() lines, buffered per request id so a timed-out
   // script's partial logs can be attached to the error (the completing-late
   // response is discarded). Cleared when the request settles.
@@ -491,120 +579,343 @@ export class PluginBridge extends EventEmitter {
         throw new Error('plugin_disconnected: No plugin connected');
       }
     }
-    // Wedge guard: if a prior request to THIS plugin has been stuck past the
-    // busy threshold, the main thread is likely frozen. Fail fast so callers
-    // don't pile up 10s timeouts behind a dead thread.
-    const now = Date.now();
-    let stuck: Pending | undefined;
-    for (const p of this.pending.values()) {
-      if (p.sessionId === session.id && now - p.startedAt >= BUSY_THRESHOLD_MS) {
-        if (!stuck || p.startedAt < stuck.startedAt) stuck = p;
-      }
-    }
-    if (stuck) {
-      const heldMs = now - stuck.startedAt;
-      throw new Error(
-        `plugin_busy: '${stuck.method}' has run ${(heldMs / 1000).toFixed(1)}s on the plugin main thread; ` +
-          `it may be wedged (e.g. a synchronous run_script loop). Rejecting '${method}' fast. ` +
-          `If this persists, the Figma tab must be reloaded to recover.`,
-      );
+    // Busy guard (see BUSY_THRESHOLD_MS): fail fast instead of piling 10s
+    // timeouts behind a thread that is stuck or busy with someone's slow call.
+    const busy = this.busyCheck(session.id, method);
+    if (busy) {
+      const ctx = callContext.getStore();
+      if (ctx) ctx.retryAfterMs = busy.retryAfterMs;
+      throw busy;
     }
     // Flow control. If the plugin already has the max requests in flight,
-    // QUEUE this one (transparent to the agent — it just awaits a little
-    // longer) instead of piling onto the single-threaded plugin. The queue
-    // drains as responses return (see pump). A pathologically deep queue is
-    // shed with a typed error so a runaway agent can't OOM the daemon.
-    const sid = session.id;
-    if ((this.inflight.get(sid) ?? 0) >= MAX_INFLIGHT_PER_PLUGIN) {
-      let q = this.queues.get(sid);
-      if (!q) { q = []; this.queues.set(sid, q); }
-      if (q.length >= MAX_QUEUE_PER_PLUGIN) {
-        throw new Error(
-          `plugin_overloaded: ${q.length} requests already queued for this plugin (max ${MAX_QUEUE_PER_PLUGIN}); ` +
-            `shedding '${method}'. The plugin can't keep up — reduce concurrent calls or space them out.`,
-        );
+    // QUEUE this one (transparent to the agent, it just awaits a little
+    // longer) instead of piling onto the single-threaded plugin. Each MCP
+    // session has its own FIFO per plugin and pump() serves them round-robin.
+    // A pathologically deep queue is shed with a typed error so a runaway agent
+    // can't OOM the daemon or lock other agents out.
+    const sess = session;
+    return new Promise((resolve, reject) => {
+      const item: QueuedRequest = {
+        method, params, mcpId: mcp.id, enqueuedAt: Date.now(), ctx: callContext.getStore(), resolve, reject,
+      };
+      const sid = sess.id;
+      const pq = this.queues.get(sid);
+      if ((this.inflight.get(sid) ?? 0) < MAX_INFLIGHT_PER_PLUGIN && !(pq && pq.total > 0)) {
+        this.dispatch(sess, item);
+        return;
       }
-      return new Promise((resolve, reject) => { q!.push({ method, params, resolve, reject }); });
+      const shed = this.overloadCheck(sid, mcp.id, method);
+      if (shed) {
+        if (item.ctx) item.ctx.retryAfterMs = shed.retryAfterMs;
+        reject(shed);
+        return;
+      }
+      this.enqueue(sid, item);
+      this.pump(sid);
+    });
+  }
+
+  // This call's timeout budget. run_script may opt into a larger budget for a
+  // known-heavy script (capped); the default stays the fast-fail 10s so a wedge
+  // is caught quickly.
+  private budgetFor(method: string, params: Record<string, unknown>): number {
+    let timeoutMs = SLOW_METHOD_TIMEOUT_MS[method] ?? REQUEST_TIMEOUT_MS;
+    if (method === 'run_script' && typeof (params as any).timeoutMs === 'number') {
+      timeoutMs = Math.min(Math.max((params as any).timeoutMs, 1000), 120_000);
     }
-    return this.dispatch(session, method, params);
+    return timeoutMs;
+  }
+
+  // The oldest in-flight call on this plugin with a long (slow-method) budget
+  // that was sent at or before `sentAt`: a call queued behind it on the
+  // plugin's single thread is explained by it, not by a wedge.
+  private slowHolder(sid: string, sentAt: number, exceptId?: string): Pending | undefined {
+    let best: Pending | undefined;
+    for (const [id, p] of this.pending) {
+      if (id === exceptId || p.sessionId !== sid || p.budgetMs <= REQUEST_TIMEOUT_MS || p.startedAt > sentAt) continue;
+      if (!best || p.startedAt < best.startedAt) best = p;
+    }
+    return best;
+  }
+
+  // Busy guard decision for a new call to plugin `sid` (null = go ahead).
+  private busyCheck(sid: string, method: string): (Error & { retryAfterMs: number }) | null {
+    const now = Date.now();
+    // 1. Wedge evidence: a call past its own budget with no reply, that no
+    //    in-budget slow call explains.
+    let wedged: Overdue | undefined;
+    for (const [id, o] of this.overdue) {
+      if (now - o.overdueAt > OVERDUE_FORGET_MS) { this.overdue.delete(id); continue; }
+      if (o.sessionId !== sid || this.slowHolder(sid, o.startedAt)) continue;
+      if (!wedged || o.startedAt < wedged.startedAt) wedged = o;
+    }
+    if (wedged) {
+      const ranS = ((now - wedged.startedAt) / 1000).toFixed(1);
+      return retryError(
+        `plugin_busy: '${wedged.method}' has run ${ranS}s on the Figma plugin's main thread, past its ` +
+          `${wedged.budgetMs / 1000}s budget, with no reply. The thread is probably wedged (for example a synchronous ` +
+          `run_script loop). Rejecting '${method}' fast. If calls keep failing like this after retryAfterMs, the Figma ` +
+          `tab must be reloaded to recover.`,
+        clamp(OVERDUE_FORGET_MS - (now - wedged.overdueAt), 1_000, 30_000),
+      );
+    }
+    // 2. An ordinary (10s budget) call outstanding past the threshold: the
+    //    plugin is busy, not (yet) wedged. Name what is holding it.
+    let stuck: Pending | undefined;
+    for (const p of this.pending.values()) {
+      if (p.sessionId !== sid || p.budgetMs > REQUEST_TIMEOUT_MS || now - p.startedAt < BUSY_THRESHOLD_MS) continue;
+      if (!stuck || p.startedAt < stuck.startedAt) stuck = p;
+    }
+    if (stuck) {
+      const holder = this.slowHolder(sid, stuck.startedAt) ?? stuck;
+      const ranS = ((now - holder.startedAt) / 1000).toFixed(1);
+      return retryError(
+        `plugin_working: the Figma plugin is busy with '${holder.method}' (running ${ranS}s of its ` +
+          `${holder.budgetMs / 1000}s budget) and calls behind it are waiting. '${method}' was not sent. ` +
+          `Retry after retryAfterMs; nothing was changed.`,
+        clamp(holder.startedAt + holder.budgetMs - now, 500, 10_000),
+      );
+    }
+    // 3. A slow call inside its own budget is normal work: let this one through.
+    return null;
+  }
+
+  // Rough wait estimate for `depth` queued calls on plugin `sid` (bounded).
+  private retryAfterFor(sid: string, depth: number): number {
+    const lat = this.latency.get(sid) ?? DEFAULT_LATENCY_MS;
+    return clamp(Math.ceil((depth + 1) / MAX_INFLIGHT_PER_PLUGIN) * lat, 250, 30_000);
+  }
+
+  private overloadCheck(sid: string, mcpId: string, method: string): (Error & { retryAfterMs: number }) | null {
+    const pq = this.queues.get(sid);
+    const total = pq?.total ?? 0;
+    const mine = pq?.bySession.get(mcpId)?.length ?? 0;
+    if (total >= MAX_QUEUE_PER_PLUGIN) {
+      return retryError(
+        `plugin_overloaded: ${total} requests already queued for this plugin (max ${MAX_QUEUE_PER_PLUGIN}); ` +
+          `shedding '${method}', nothing was sent. The plugin can't keep up: reduce concurrent calls or space them out.`,
+        this.retryAfterFor(sid, total),
+      );
+    }
+    if (mine >= MAX_QUEUE_PER_SESSION) {
+      return retryError(
+        `plugin_overloaded: this agent already has ${mine} requests queued for this plugin (max ${MAX_QUEUE_PER_SESSION} ` +
+          `per agent); shedding '${method}', nothing was sent. Wait for earlier calls to finish, or batch the work ` +
+          `(map_nodes, run_script).`,
+        this.retryAfterFor(sid, total),
+      );
+    }
+    return null;
+  }
+
+  // Append (or, for re-homed requests, prepend) to the caller's FIFO.
+  private enqueue(sid: string, item: QueuedRequest, front = false): void {
+    let pq = this.queues.get(sid);
+    if (!pq) { pq = { bySession: new Map(), total: 0 }; this.queues.set(sid, pq); }
+    let q = pq.bySession.get(item.mcpId);
+    if (!q) { q = []; pq.bySession.set(item.mcpId, q); }
+    if (front) q.unshift(item); else q.push(item);
+    pq.total++;
   }
 
   // Send one request to the plugin now, tracking it as in-flight; on settle
   // (response / timeout / disconnect) free the slot and pump the queue.
-  private dispatch(session: Session, method: string, params: Record<string, unknown>): Promise<unknown> {
+  private dispatch(session: Session, item: QueuedRequest): void {
     const sid = session.id;
     const id = uuid();
-    let timeoutMs = SLOW_METHOD_TIMEOUT_MS[method] ?? REQUEST_TIMEOUT_MS;
-    // run_script may opt into a larger budget for a known-heavy script
-    // (capped). Default stays the fast-fail 10s so a wedge is caught quickly.
-    if (method === 'run_script' && typeof (params as any).timeoutMs === 'number') {
-      timeoutMs = Math.min(Math.max((params as any).timeoutMs, 1000), 120_000);
-    }
+    const { method, params } = item;
+    const timeoutMs = this.budgetFor(method, params);
+    const now = Date.now();
+    const queuedMs = now - item.enqueuedAt;
+    if (queuedMs > 0 && item.ctx) item.ctx.queuedMs = Math.max(item.ctx.queuedMs ?? 0, queuedMs);
     this.inflight.set(sid, (this.inflight.get(sid) ?? 0) + 1);
-    const p = new Promise<unknown>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (this.pending.delete(id)) {
-          // Distinguish reconnect churn from a genuine timeout. If a NEWER live
-          // session now serves this file, the plugin iframe reconnected during
-          // the call (new sessionId) and we were talking to a zombie — that's
-          // RETRYABLE, and the fix is retry/pin, NOT "reload the Figma tab".
-          const ident = fileIdentity(session);
-          const fresh = ident
-            ? this.newestLive((s) => fileIdentity(s) === ident && s.id !== session.id)
-            : null;
-          if (fresh) {
-            reject(new Error(
-              `plugin_reconnected: the Figma plugin for "${session.fileName}" reconnected during '${method}' ` +
-                `(new session id) — the call was routed to the old one. Retry it. For stability across Figma's ` +
-                `periodic reconnects, pin the file with set_active_file.`,
-            ));
-          } else {
-            // A mutating run_script that times out has almost certainly applied
-            // SOME of its changes before the deadline (the plugin keeps running
-            // after we give up) — warn so the agent re-reads instead of blindly
-            // retrying and double-applying.
-            const partial = method === 'run_script'
-              ? ` — a run_script may have PARTIALLY mutated the document before timing out; re-read state before retrying (a blind retry can double-apply). For a known-heavy script pass a larger timeoutMs (max 120s).`
-              : '';
-            // Surface the script's own log() lines captured before the deadline
-            // — turns "something may have happened" into "here's how far it got".
-            const streamed = this.scriptLogs.get(id);
-            const partialLogs = streamed && streamed.length
-              ? ` Partial logs before timeout (${streamed.length}): ${streamed.slice(-15).join(' | ')}`
-              : '';
-            reject(new Error(`request_timeout: '${method}' exceeded ${timeoutMs / 1000}s${partial}${partialLogs}`));
-          }
-        }
-      }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timeout, sessionId: sid, startedAt: Date.now(), method });
-      session.ws.send(JSON.stringify({ id, method, params }));
-    });
+    let released = false;
     const release = () => {
+      if (released) return;
+      released = true;
       this.inflight.set(sid, Math.max(0, (this.inflight.get(sid) ?? 1) - 1));
       this.scriptLogs.delete(id);   // clear buffered logs on any settle
+      if (causesEvents(method)) {
+        const list = (this.recentCauses.get(sid) ?? []).filter((r) => Date.now() - r.at <= CAUSE_ECHO_MS);
+        list.push({ mcpId: item.mcpId, at: Date.now() });
+        this.recentCauses.set(sid, list.slice(-20));
+      }
       this.pump(sid);
     };
-    p.then(release, release);
-    return p;
+    const timeout = setTimeout(() => this.onTimeout(id), timeoutMs);
+    this.pending.set(id, {
+      item, timeout, sessionId: sid, session, startedAt: now, method, mcpId: item.mcpId, budgetMs: timeoutMs, release,
+    });
+    session.ws.send(JSON.stringify({ id, method, params }));
   }
 
-  // Dispatch queued requests for a plugin while it has free in-flight slots.
-  // If the plugin died while requests were queued, reject them (the agent can
-  // retry; route() will re-resolve to a live session).
-  private pump(sid: string): void {
-    const q = this.queues.get(sid);
-    if (!q || q.length === 0) return;
-    while (q.length > 0 && (this.inflight.get(sid) ?? 0) < MAX_INFLIGHT_PER_PLUGIN) {
-      const sess = this.sessions.get(sid);
-      if (!sess || sess.ws.readyState !== WebSocket.OPEN) {
-        for (const item of q) item.reject(new Error('plugin_disconnected: plugin closed while request was queued'));
-        this.queues.delete(sid);
+  private onTimeout(id: string): void {
+    const p = this.pending.get(id);
+    if (!p) return;
+    this.pending.delete(id);
+    const { session, method, item, budgetMs } = p;
+    // Distinguish reconnect churn from a genuine timeout. If a NEWER live
+    // session now serves this file, the plugin iframe reconnected during the
+    // call (new sessionId) and we were talking to a zombie. That's not a wedge,
+    // and the fix is NOT "reload the Figma tab".
+    const ident = fileIdentity(session);
+    const fresh = ident
+      ? this.newestLive((s) => fileIdentity(s) === ident && s.id !== session.id)
+      : null;
+    if (fresh) {
+      p.release();
+      if (isRetrySafe(method) && !item.retried) {
+        item.retried = true;
+        process.stderr.write(`[grip] '${method}' lost to a reconnect of "${session.fileName}", re-sending once on ${fresh.id.slice(0, 8)}\n`);
+        this.enqueue(fresh.id, item, true);
+        this.pump(fresh.id);
         return;
       }
-      const item = q.shift()!;
-      this.dispatch(sess, item.method, item.params).then(item.resolve, item.reject);
+      item.reject(isRetrySafe(method)
+        ? new Error(
+            `plugin_reconnected: the Figma plugin for "${session.fileName}" reconnected during '${method}' ` +
+              `(new session id) and the bridge already re-sent it once. It only reads, so it is safe to call again. ` +
+              `For stability across Figma's periodic reconnects, pin the file with set_active_file.`,
+          )
+        : this.maybeAppliedError(method, session, 'reconnected (new session id) after'));
+      return;
     }
-    if (q.length === 0) this.queues.delete(sid);
+    // Genuine timeout: keep it as wedge evidence until the plugin answers
+    // anything again (see busyCheck).
+    this.overdue.set(id, { sessionId: session.id, method, startedAt: p.startedAt, budgetMs, overdueAt: Date.now() });
+    const holder = this.slowHolder(session.id, p.startedAt, id);
+    const mutating = !isRetrySafe(method);
+    // Surface the script's own log() lines captured before the deadline:
+    // turns "something may have happened" into "here's how far it got".
+    const streamed = this.scriptLogs.get(id);
+    const partialLogs = streamed && streamed.length
+      ? ` Partial logs before timeout (${streamed.length}): ${streamed.slice(-15).join(' | ')}`
+      : '';
+    p.release();
+    if (holder) {
+      // It waited behind someone's slow call on the single-threaded plugin.
+      const ranS = ((Date.now() - holder.startedAt) / 1000).toFixed(1);
+      const retryAfterMs = clamp(holder.startedAt + holder.budgetMs - Date.now(), 500, 10_000);
+      if (item.ctx) item.ctx.retryAfterMs = Math.round(retryAfterMs);
+      item.reject(retryError(
+        `plugin_working: '${method}' got no reply within ${budgetMs / 1000}s because the Figma plugin is busy with ` +
+          `'${holder.method}' (running ${ranS}s of its ${holder.budgetMs / 1000}s budget). ` +
+          (mutating
+            ? `The plugin may still apply '${method}' once it gets to it: re-read before retrying (a blind retry can apply it twice).`
+            : `It only reads, so it is safe to retry after retryAfterMs.`),
+        retryAfterMs,
+      ));
+      return;
+    }
+    // A mutating call that times out may still be applied (the plugin keeps
+    // running after we give up); a run_script has almost certainly applied SOME
+    // of its changes. Warn so the agent re-reads instead of double-applying.
+    const partial = method === 'run_script'
+      ? ` A run_script may have PARTIALLY changed the document before timing out: re-read state before retrying (a blind retry can double-apply). For a known-heavy script pass a larger timeoutMs (max 120s).`
+      : mutating
+        ? ` The plugin may still apply it after the timeout: re-read before retrying.`
+        : '';
+    item.reject(new Error(`request_timeout: '${method}' exceeded ${budgetMs / 1000}s.${partial}${partialLogs}`));
+  }
+
+  private maybeAppliedError(method: string, session: Session, what: string): Error {
+    return new Error(
+      `maybe_applied: the Figma plugin for "${session.fileName || session.fileKey || 'this file'}" ${what} '${method}' ` +
+        `was sent and before it replied, so the change may already have been applied (or not). Re-read the affected ` +
+        `nodes before retrying: a blind retry can apply it twice.`,
+    );
+  }
+
+  // Dispatch queued requests for a plugin while it has free in-flight slots,
+  // round-robin across MCP sessions (one call from each waiting agent per
+  // turn). A plugin that is closing keeps its queue; dropSession re-homes it.
+  private pump(sid: string): void {
+    const pq = this.queues.get(sid);
+    if (!pq || pq.total === 0) return;
+    const sess = this.sessions.get(sid);
+    if (!sess || sess.ws.readyState !== WebSocket.OPEN) return;
+    while (pq.total > 0 && (this.inflight.get(sid) ?? 0) < MAX_INFLIGHT_PER_PLUGIN) {
+      const first = pq.bySession.entries().next().value as [string, QueuedRequest[]] | undefined;
+      if (!first) break;
+      const [mcpId, q] = first;
+      pq.bySession.delete(mcpId);
+      const item = q.shift();
+      if (q.length) pq.bySession.set(mcpId, q);   // to the back of the ring
+      if (!item) continue;
+      pq.total--;
+      this.dispatch(sess, item);
+    }
+    if (pq.total === 0) this.queues.delete(sid);
+  }
+
+  // After a plugin session dropped: put requests that may be re-sent onto the
+  // newest live session of the same file, once it appears (within the
+  // cold-start grace), else reject them with a message that says what is safe.
+  private rehome(old: Session, items: Array<{ item: QueuedRequest; sent: boolean }>): void {
+    if (items.length === 0) return;
+    const ident = fileIdentity(old);
+    const giveUp = () => {
+      for (const { item, sent } of items) {
+        item.reject(new Error(
+          `plugin_disconnected: the Figma plugin for "${old.fileName || ident || 'this file'}" disconnected and no ` +
+            `plugin for that file reconnected within ${PluginBridge.PLUGIN_WAIT_MS / 1000}s. ` +
+            (sent
+              ? `'${item.method}' only reads, so it is safe to retry once the plugin is back.`
+              : `'${item.method}' was never sent to the plugin, so nothing was changed and it is safe to retry.`),
+        ));
+      }
+    };
+    if (!ident) { giveUp(); return; }
+    const go = (target: Session) => {
+      process.stderr.write(`[grip] re-sending ${items.length} request(s) for "${old.fileName}" on ${target.id.slice(0, 8)}\n`);
+      for (let i = items.length - 1; i >= 0; i--) this.enqueue(target.id, items[i].item, true);
+      this.pump(target.id);
+    };
+    const now = this.newestLive((s) => fileIdentity(s) === ident);
+    if (now) { go(now); return; }
+    const onChange = () => {
+      const s = this.newestLive((x) => fileIdentity(x) === ident);
+      if (!s) return;
+      cleanup();
+      go(s);
+    };
+    const timer = setTimeout(() => { cleanup(); giveUp(); }, PluginBridge.PLUGIN_WAIT_MS);
+    const cleanup = () => { clearTimeout(timer); this.off('session-change', onChange); };
+    this.on('session-change', onChange);
+  }
+
+  // ---------- event routing (read-only views of route()) ----------
+
+  // Does this MCP session route to the plugin session an event came from?
+  // Reuses route() on a throwaway copy so the real session's pin and bind are
+  // never touched: unbound + one file open -> yes; bound -> only its file;
+  // ambiguous / deferred / none -> no.
+  sessionTargets(mcp: McpSession, pluginSessionId: string): boolean {
+    const src = this.sessions.get(pluginSessionId);
+    if (!src) return false;
+    const probe: McpSession = { ...mcp, bind: mcp.bind ? { ...mcp.bind } : null };
+    const r = this.route(probe);
+    if (r.kind !== 'ok') return false;
+    const ident = fileIdentity(src);
+    return r.session.id === src.id || (!!ident && fileIdentity(r.session) === ident);
+  }
+
+  // Best-effort attribution of a plugin event: 'self' when this MCP session
+  // has an event-causing call in flight on that plugin (or one that settled in
+  // the last CAUSE_ECHO_MS), 'other' when only other sessions do, 'unknown'
+  // when nobody does (likely the user) or when both do.
+  eventCause(mcp: McpSession, pluginSessionId: string): 'self' | 'other' | 'unknown' {
+    let self = false;
+    let other = false;
+    const mark = (mcpId: string) => { if (mcpId === mcp.id) self = true; else other = true; };
+    for (const p of this.pending.values()) {
+      if (p.sessionId === pluginSessionId && causesEvents(p.method)) mark(p.mcpId);
+    }
+    const now = Date.now();
+    for (const r of this.recentCauses.get(pluginSessionId) ?? []) {
+      if (now - r.at <= CAUSE_ECHO_MS) mark(r.mcpId);
+    }
+    return self && !other ? 'self' : other && !self ? 'other' : 'unknown';
   }
 
   // A plugin session that has said hello and whose socket is open.
@@ -896,7 +1207,7 @@ export class PluginBridge extends EventEmitter {
 
     if ('event' in msg) {
       const sess = this.sessions.get(sessionId);
-      this.emit('event', { ...msg, sessionId, fileKey: sess?.fileKey ?? '' } as WSEvent & { sessionId: string; fileKey: string });
+      this.emit('event', { ...msg, sessionId, fileKey: sess?.fileKey ?? '', fileName: sess?.fileName ?? '' } as BridgeEvent);
       return;
     }
 
@@ -912,10 +1223,18 @@ export class PluginBridge extends EventEmitter {
     }
 
     if ('id' in msg) {
-      const pending = this.pending.get(msg.id);
-      if (!pending) return;
+      // Any reply proves this plugin's thread is not frozen: clear its wedge
+      // evidence (including a late reply to a call that already timed out).
+      for (const [oid, o] of this.overdue) if (o.sessionId === sessionId) this.overdue.delete(oid);
+      const p = this.pending.get(msg.id);
+      if (!p) return;
       this.pending.delete(msg.id);
-      clearTimeout(pending.timeout);
+      clearTimeout(p.timeout);
+      const ms = Date.now() - p.startedAt;
+      const prev = this.latency.get(sessionId);
+      this.latency.set(sessionId, prev === undefined ? ms : prev * 0.8 + ms * 0.2);
+      p.release();
+      const pending = { method: p.method, resolve: p.item.resolve, reject: p.item.reject };
       // Response-size backstop. An un-upgraded plugin (no nodeBudget cap)
       // can return a multi-MB serialized tree; ferrying that to the agent
       // and parsing it into context is what produces the 120s+ "idle"
@@ -1026,35 +1345,63 @@ export class PluginBridge extends EventEmitter {
     this.sessions.delete(sessionId);
     process.stderr.write(`[grip] session ${sessionId.slice(0, 8)} closed (${this.sessions.size} remain)\n`);
 
-    // Fail any in-flight requests bound to that session.
+    // In-flight and queued requests for that plugin. Take the queue first so
+    // releasing the in-flight slots below does not pump it into a dead socket.
+    const pq = this.queues.get(sessionId);
+    this.queues.delete(sessionId);
+    const again: Array<{ item: QueuedRequest; sent: boolean }> = [];
     for (const [reqId, p] of this.pending) {
-      if (p.sessionId === sessionId) {
-        clearTimeout(p.timeout);
-        p.reject(new Error('plugin_disconnected: Plugin disconnected'));
-        this.pending.delete(reqId);
+      if (p.sessionId !== sessionId) continue;
+      clearTimeout(p.timeout);
+      this.pending.delete(reqId);
+      p.release();
+      if (!isRetrySafe(p.method)) {
+        // Sent and possibly already applied: never re-send a change blindly.
+        p.item.reject(this.maybeAppliedError(p.method, sess, 'disconnected after'));
+      } else if (!p.item.retried) {
+        p.item.retried = true;           // a read: re-send once on the file's next session
+        again.push({ item: p.item, sent: true });
+      } else {
+        p.item.reject(new Error(
+          `plugin_disconnected: the Figma plugin disconnected during '${p.method}' and the bridge already re-sent it ` +
+            `once. It only reads, so it is safe to call again.`,
+        ));
       }
     }
-    // Fail anything still queued for that plugin, and clear its flow-control state.
-    const queued = this.queues.get(sessionId);
-    if (queued) {
-      for (const item of queued) item.reject(new Error('plugin_disconnected: Plugin disconnected'));
-      this.queues.delete(sessionId);
+    // Queued requests were never sent, so even a change is safe to re-send.
+    if (pq) {
+      for (const q of pq.bySession.values()) {
+        for (const item of q) {
+          if (!item.retried) { item.retried = true; again.push({ item, sent: false }); }
+          else item.reject(new Error(`plugin_disconnected: the Figma plugin disconnected again while '${item.method}' was waiting to be sent. It was never sent, so nothing was changed and it is safe to retry.`));
+        }
+      }
     }
     this.inflight.delete(sessionId);
+    this.latency.delete(sessionId);
+    this.recentCauses.delete(sessionId);
+    for (const [oid, o] of this.overdue) if (o.sessionId === sessionId) this.overdue.delete(oid);
 
     // Per-MCP-session pins clean themselves up lazily in resolveActiveId
     // when the pinned plugin is gone.
     this.emit('session-change');
+    this.rehome(sess, again);
   }
 
   close() {
     for (const [, p] of this.pending) {
       clearTimeout(p.timeout);
-      p.reject(new Error('leader_shutdown: Bridge shutting down'));
+      p.item.reject(new Error(
+        isRetrySafe(p.method)
+          ? 'leader_shutdown: Bridge shutting down'
+          : `leader_shutdown: Bridge shutting down while '${p.method}' was in flight; the change may already have been applied, re-read before retrying`,
+      ));
     }
     this.pending.clear();
-    for (const q of this.queues.values()) {
-      for (const item of q) item.reject(new Error('leader_shutdown: Bridge shutting down'));
+    for (const pq of this.queues.values()) {
+      for (const q of pq.bySession.values()) {
+        for (const item of q) item.reject(new Error('leader_shutdown: Bridge shutting down (the call was never sent)'));
+      }
     }
     this.queues.clear();
     this.inflight.clear();
@@ -1085,7 +1432,9 @@ export class PluginBridge extends EventEmitter {
         // in the queue. queued > 0 means the plugin is being throttled to keep
         // it responsive under a command burst.
         inflight: this.inflight.get(s.id) ?? 0,
-        queued: this.queues.get(s.id)?.length ?? 0,
+        queued: this.queues.get(s.id)?.total ?? 0,
+        // How many MCP sessions have calls waiting (served round-robin).
+        queuedSessions: this.queues.get(s.id)?.bySession.size ?? 0,
       })),
     };
   }
