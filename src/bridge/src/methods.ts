@@ -86,14 +86,16 @@ const BRIDGE_SIDE_SAFE_TOOLS = new Set<string>([
   'grip_capabilities', 'grip_load_tools', 'grip_update', 'subscribe',
 ]);
 
-// Could a tools/call of `tool` with `args` have changed the document? Used by
-// the shim (proxy.ts) to decide whether a call lost with a dropped socket may
-// already have been applied. Unknown or mutating tools say yes; merged tools
-// are judged by the method their op/target resolves to.
+// Could a tools/call of `tool` with `args` have changed the document (or done
+// anything else that must not happen twice)? Used by the shim (proxy.ts) to
+// decide whether a call lost with a dropped socket is safe to retry. Unknown
+// or mutating tools say yes, and so do the NOT_REPEATABLE ones (a lost
+// trigger_undo retried blindly would undo twice): anything that is not
+// isRetrySafe. Merged tools are judged by the method their op/target resolves to.
 export function toolMayChangeDocument(tool: string | undefined, args: unknown): boolean {
   if (!tool) return true;
   if (BRIDGE_SIDE_SAFE_TOOLS.has(tool)) return false;
   const merged = resolveMerged(tool, args);
-  if (merged) return 'method' in merged ? !READ_ONLY_METHODS.has(merged.method) : false; // a bad op is refused before the plugin
-  return !READ_ONLY_METHODS.has(tool);
+  if (merged) return 'method' in merged ? !isRetrySafe(merged.method) : false; // a bad op is refused before the plugin
+  return !isRetrySafe(tool);
 }

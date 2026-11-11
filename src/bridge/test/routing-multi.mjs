@@ -11,10 +11,15 @@ import { WebSocket } from 'ws';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { PluginBridge, fileIdentity, isRealFileKey } from '../dist/ws-server.js';
-import { createSession, destroySession } from '../dist/mcp-server.js';
-import { HttpServer } from '../dist/http-server.js';
-import { BRIDGE_VERSION } from '../dist/types.js';
+
+// A renamed key-less file is followed when its old file's last window closes
+// within this long of the renamed file's first window (Figma respawning the
+// iframe). Scaled down so a test can make a copy "older" than a respawn.
+process.env.GRIP_RESPAWN_MATCH_MS = '400';
+const { PluginBridge, fileIdentity, isRealFileKey } = await import('../dist/ws-server.js');
+const { createSession, destroySession } = await import('../dist/mcp-server.js');
+const { HttpServer } = await import('../dist/http-server.js');
+const { BRIDGE_VERSION } = await import('../dist/types.js');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const freePort = () => new Promise((res) => {
@@ -42,12 +47,13 @@ await new Promise((r) => bridge.once('listening', r));
 // so a test can tell WHICH window a call was routed to.
 async function openPlugin(file) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}`);
-  const state = { ws, sessionId: null, file: { ...file }, calls: [] };
+  const state = { ws, sessionId: null, file: { ...file }, calls: [], mute: false };
   ws.on('message', (d) => {
     const m = JSON.parse(d.toString());
     if (m.kind === 'welcome') { state.sessionId = m.sessionId; return; }
     if (m.id && m.method) {
       state.calls.push(m.method);
+      if (state.mute) return;   // a window that never answers (dying iframe)
       const result = m.method === 'get_page_context'
         ? { file: { key: state.file.fileKey, name: state.file.fileName }, page: { id: '0:1', name: 'Page 1' }, selectionCount: 0, servedBy: state.sessionId }
         : { servedBy: state.sessionId };
@@ -376,6 +382,9 @@ async function agent(b = bridge) {
   assert.match(bu.text, /^ambiguous_file_name: the file id uid-local matches 2/);
 
   // the original closes entirely: its agent waits, never hops to the copy
+  // (the copy has been open far longer than an iframe respawn overlap, so it
+  // is not taken for the original renamed)
+  await sleep(500);
   const copyCalls = d1.calls.length;
   await closePlugin(l1);
   await closePlugin(l2);
@@ -383,6 +392,99 @@ async function agent(b = bridge) {
   assert.strictEqual(d1.calls.length, copyCalls, 'the copy got nothing from the original\'s agent');
   for (const a of [un, b, lb, c]) a.done();
   await closePlugin(d1);
+}
+
+// ---------------------------------------------------------------- 8. renaming a key-less file keeps the binding
+{
+  const bindTo = async (p) => {
+    const a = await agent();
+    const r = await a.call('set_active_file', { target: p.sessionId });
+    assert.ok(!r.isError, r.text);
+    assert.strictEqual((await a.call('get_node', { nodeId: '1:1' })).json.servedBy, p.sessionId);
+    return a;
+  };
+  // (a) the window says hello under the new name (rename, then a page switch),
+  //     then Figma respawns the iframe: no call in between
+  const s1 = await openPlugin({ fileKey: '0:0', fileName: 'Untitled', fileUid: 'uid-ren-a' });
+  const a = await bindTo(s1);
+  assert.deepStrictEqual(a.session.bind, { uid: 'uid-ren-a', name: 'Untitled' });
+  s1.hello({ fileName: 'Landing page' });
+  await sleep(30);
+  assert.deepStrictEqual(a.session.bind, { uid: 'uid-ren-a', name: 'Landing page' }, 'the stored name follows the pinned window');
+  const s2 = await openPlugin({ fileKey: '0:0', fileName: 'Landing page', fileUid: 'uid-ren-a' });
+  await closePlugin(s1);
+  assert.strictEqual((await a.call('get_node', { nodeId: '1:1' })).json.servedBy, s2.sessionId, 'still bound after the respawn');
+
+  // (b) the old window never reports the new name: the respawned window under
+  //     the new name appears and the old one closes right after
+  const t1 = await openPlugin({ fileKey: '0:0', fileName: 'Draft', fileUid: 'uid-ren-b' });
+  const b = await bindTo(t1);
+  const t2 = await openPlugin({ fileKey: '0:0', fileName: 'Draft v2', fileUid: 'uid-ren-b' });
+  assert.strictEqual((await b.call('get_node', { nodeId: '1:1' })).json.servedBy, t1.sessionId, 'stays on its window while it is open');
+  await closePlugin(t1);
+  assert.strictEqual((await b.call('get_node', { nodeId: '1:1' })).json.servedBy, t2.sessionId, 'follows the renamed file');
+  assert.deepStrictEqual(b.session.bind, { uid: 'uid-ren-b', name: 'Draft v2' });
+
+  // (c) the old window closes first, the renamed one connects within the grace
+  const r1 = await openPlugin({ fileKey: '0:0', fileName: 'Alpha', fileUid: 'uid-ren-c' });
+  const c = await bindTo(r1);
+  await closePlugin(r1);
+  const r2 = await openPlugin({ fileKey: '0:0', fileName: 'Beta', fileUid: 'uid-ren-c' });
+  assert.strictEqual((await c.call('get_node', { nodeId: '1:1' })).json.servedBy, r2.sessionId);
+
+  // (d) a read in flight on the old window is re-sent on the renamed file
+  const q1 = await openPlugin({ fileKey: '0:0', fileName: 'Old name', fileUid: 'uid-ren-d' });
+  const d = await bindTo(q1);
+  q1.mute = true;
+  const inflight = d.call('get_node', { nodeId: '1:1' });
+  await sleep(30);
+  const q2 = await openPlugin({ fileKey: '0:0', fileName: 'New name', fileUid: 'uid-ren-d' });
+  await closePlugin(q1);
+  const rr = await inflight;
+  assert.ok(!rr.isError, rr.text);
+  assert.strictEqual(rr.json.servedBy, q2.sessionId, 'rehome finds the renamed file');
+
+  // (e) a copy (same uid, other name) opened long after the original closed
+  //     is another file: the binding waits, it never hops
+  const x1 = await openPlugin({ fileKey: '0:0', fileName: 'Gamma', fileUid: 'uid-ren-e' });
+  const e = await bindTo(x1);
+  await closePlugin(x1);
+  await sleep(500);
+  const x2 = await openPlugin({ fileKey: '0:0', fileName: 'Gamma copy', fileUid: 'uid-ren-e' });
+  assert.match((await e.call('get_node', { nodeId: '1:1' })).text, /^bound_file_not_open/);
+  assert.strictEqual(x2.calls.length, 0);
+
+  // (f) two open windows sharing a uid under different names at once: still
+  //     ambiguous for an unbound agent
+  const y1 = await openPlugin({ fileKey: '0:0', fileName: 'Delta', fileUid: 'uid-ren-f' });
+  const y2 = await openPlugin({ fileKey: '0:0', fileName: 'Delta copy', fileUid: 'uid-ren-f' });
+  for (const p of [s2, t2, r2, q2, x2]) await closePlugin(p);
+  const un = await agent();
+  assert.match((await un.call('get_node', { nodeId: '1:1' })).text, /^ambiguous_active_file: 2 Figma files\/windows are open/);
+  for (const ag of [a, b, c, d, e, un]) ag.done();
+  for (const p of [y1, y2]) await closePlugin(p);
+}
+
+// ---------------------------------------------------------------- 9. a page switch never makes an older window "newer"
+{
+  const KEY = 'PgPgPgPgPgPgPgPgPg09';
+  const w1 = await openPlugin({ fileKey: KEY, fileName: 'Pages' });
+  const w2 = await openPlugin({ fileKey: KEY, fileName: 'Pages' });   // the respawned iframe
+  const bound = await agent();
+  await bound.call('set_active_file', { target: KEY });
+  const un = await agent();
+  assert.strictEqual((await bound.call('get_node', { nodeId: '1:1' })).json.servedBy, w2.sessionId);
+  // the OLDER window re-sends hello (page switch): it must not become the newest
+  w1.hello({ currentPageId: '0:2', currentPageName: 'Other page' });
+  await sleep(30);
+  assert.strictEqual((await bound.call('get_node', { nodeId: '1:1' })).json.servedBy, w2.sessionId, 'bound: still the newer window');
+  assert.strictEqual((await un.call('get_node', { nodeId: '1:1' })).json.servedBy, w2.sessionId, 'unbound: still the newer window');
+  const lf = await un.call('list_files');
+  assert.strictEqual(lf.json.files[0].sessionId, w2.sessionId, 'list_files: entry = the newer window');
+  assert.deepStrictEqual(lf.json.files[0].windows.map((x) => x.sessionId), [w2.sessionId, w1.sessionId], 'newest window first');
+  assert.strictEqual(w1.calls.length, 0, 'nothing went to the older window');
+  for (const ag of [bound, un]) ag.done();
+  for (const p of [w1, w2]) await closePlugin(p);
 }
 
 // ---------------------------------------------------------------- 5. HTTP ?file= launch bind

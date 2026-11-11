@@ -54,6 +54,9 @@ interface QueuedRequest {
   // Write lane only: fires if the call waits in the bridge queue longer than
   // MAX_WRITE_QUEUE_WAIT_MS (it is then rejected, never sent).
   waitTimer?: NodeJS.Timeout;
+  // Write lane only: when the call first entered a write queue. Kept when it
+  // moves to another window of the file, so the wait cap is never restarted.
+  writeWaitSince?: number;
   resolve: (result: unknown) => void;
   reject: (err: Error) => void;
 }
@@ -111,10 +114,17 @@ interface Session {
   capabilities?: string[];
   lastPong: number;
   pingTimer?: NodeJS.Timeout;
-  // When this session's most recent hello arrived. Used to break ties when
-  // several live sessions share a fileKey (reconnect overlap): newest wins,
-  // so routing never lands on a dying zombie iframe.
+  // When this session's most recent hello arrived (0 = not helloed yet). The
+  // plugin re-sends hello on every page switch, so this is "last active", not
+  // "how new the window is": never use it to order windows.
   helloAt: number;
+  // When this session FIRST said hello (never bumped), plus a tie-breaking
+  // sequence number. Every "which window of a file is newer" decision uses
+  // these (routing newest-wins, adoptQueued, the write lane, onTimeout's
+  // reconnect check), so a page switch in an older window never makes it look
+  // newer than the iframe that replaced it.
+  firstHelloAt: number;
+  helloSeq: number;
   // HTTP Origin header of the WS upgrade (undefined for non-browser clients).
   // Used only to refuse update requests coming from a web page.
   origin?: string;
@@ -277,6 +287,21 @@ const MAX_QUEUE_PER_SESSION = Number(process.env.GRIP_MAX_QUEUE_PER_SESSION ?? 1
 // sent. Healthy writes take ms; this only bounds the wait behind a long write
 // (map_nodes, run_script with a large timeoutMs).
 const MAX_WRITE_QUEUE_WAIT_MS = Number(process.env.GRIP_MAX_WRITE_WAIT_MS ?? 60_000);
+// How long a write that timed out on the bridge (and may still be running in
+// the plugin) is remembered: the plugin releases a write that never settles
+// after budget + 5s, at most 125s (MAX_MUTATION_HOLD_MS in code.ts).
+const LOST_WRITE_FORGET_MS = 125_000;
+// Following a renamed key-less file. Its identity is fileUid + name, so a
+// rename changes it. A window that says hello under a new name is a rename for
+// sure; otherwise, when the last window of a key-less file closes and a window
+// of another key-less file with the same fileUid first appears within this long
+// of it (either order), that is Figma respawning the plugin iframe after a
+// rename. A copy (same uid, other name) that was open long before, or opened
+// long after, is never taken for the renamed file.
+const RESPAWN_MATCH_MS = Number(process.env.GRIP_RESPAWN_MATCH_MS ?? 15_000);
+// How long a rename / close is remembered (bounded: at most RENAME_MEMORY_MAX).
+const RENAME_MEMORY_MS = 24 * 60 * 60_000;
+const RENAME_MEMORY_MAX = 200;
 // A tool call that waited at least this long in the queue reports it in the
 // tool result's _meta (grip/queuedMs). Every queued wait is logged.
 export const QUEUED_NOTE_MS = 2_000;
@@ -324,6 +349,19 @@ export class PluginBridge extends EventEmitter {
   // script's partial logs can be attached to the error (the completing-late
   // response is discarded). Cleared when the request settles.
   private scriptLogs = new Map<string, string[]>();
+  // Write-lane calls that ran past their budget on the bridge with no reply
+  // yet (by request id): the plugin is still running them, so a later write to
+  // that window waits behind it inside the plugin. Cleared by the late reply,
+  // the window dropping, or LOST_WRITE_FORGET_MS.
+  private lostWrites = new Map<string, { sessionId: string; method: string; startedAt: number; at: number }>();
+  // The MCP sessions this bridge has routed for (weakly held), so a window's
+  // hello can refresh the file name stored in the bindings pinned to it.
+  private mcpRefs = new Map<string, WeakRef<McpSession>>();
+  // Key-less files seen renamed: old identity -> new identity (see
+  // RESPAWN_MATCH_MS), and when the last window of a key-less file closed.
+  private renamed = new Map<string, { to: string; at: number }>();
+  private closedFiles = new Map<string, { uid: string; name: string; at: number }>();
+  private static helloCounter = 0;
 
   constructor(port: number) {
     super();
@@ -342,6 +380,8 @@ export class PluginBridge extends EventEmitter {
         currentPageName: '',
         lastPong: Date.now(),
         helloAt: 0,
+        firstHelloAt: 0,
+        helloSeq: 0,
         origin: typeof req?.headers?.origin === 'string' ? req.headers.origin : undefined,
       };
       this.sessions.set(id, session);
@@ -421,6 +461,7 @@ export class PluginBridge extends EventEmitter {
   // the file is not open, or the bound name matches several files) or
   // unbound (sessionId set when single-file auto-routing would route).
   bindingState(mcp: McpSession): BindingState {
+    this.track(mcp);
     const r = this.route(mcp);
     if (!mcp.bind) {
       return r.kind === 'ok'
@@ -449,6 +490,7 @@ export class PluginBridge extends EventEmitter {
     warnings?: string[];
   } {
     const bind = this.resolveBind(target); // may throw ambiguous_file_name / not_a_file_key
+    this.track(mcp);
     mcp.bind = bind;
     mcp.activeFileId = null; // force re-resolve against the new bind
     const r = this.route(mcp);
@@ -595,6 +637,7 @@ export class PluginBridge extends EventEmitter {
   }
 
   async request(method: string, params: Record<string, unknown>, mcp: McpSession): Promise<unknown> {
+    this.track(mcp);
     let session = this.activeSession(mcp);
     if (!session) {
       // Not routable right now. Distinguish WHY so the agent gets an
@@ -638,7 +681,9 @@ export class PluginBridge extends EventEmitter {
       const lane = this.laneOf(sess, method);
       const L = this.laneState(lane);
       const pq = L.queues.get(sid);
-      if ((L.inflight.get(sid) ?? 0) < L.cap && !(pq && pq.total > 0)) {
+      // The write lane is per FILE: while an older window of this file still
+      // has a write in flight (reconnect overlap), this one waits its turn.
+      if ((L.inflight.get(sid) ?? 0) < L.cap && !(pq && pq.total > 0) && !(lane === 'write' && this.writeHeldElsewhere(sess))) {
         this.dispatch(sess, item, lane);
         return;
       }
@@ -775,9 +820,13 @@ export class PluginBridge extends EventEmitter {
     if (!q) { q = []; pq.bySession.set(item.mcpId, q); }
     if (front) q.unshift(item); else q.push(item);
     pq.total++;
+    if (item.waitTimer) { clearTimeout(item.waitTimer); item.waitTimer = undefined; }
     if (lane === 'write') {
-      if (item.waitTimer) clearTimeout(item.waitTimer);
-      item.waitTimer = setTimeout(() => this.onWriteWaitTimeout(sid, item), MAX_WRITE_QUEUE_WAIT_MS);
+      // The cap counts from when the call FIRST entered a write queue: moving
+      // it to a newer window of the file must not restart the clock.
+      if (item.writeWaitSince === undefined) item.writeWaitSince = Date.now();
+      const left = Math.max(0, MAX_WRITE_QUEUE_WAIT_MS - (Date.now() - item.writeWaitSince));
+      item.waitTimer = setTimeout(() => this.onWriteWaitTimeout(sid, item), left);
       item.waitTimer.unref?.();
     }
   }
@@ -796,14 +845,18 @@ export class PluginBridge extends EventEmitter {
     if (pq.total === 0) this.writeQueues.delete(sid);
     const now = Date.now();
     let holder: Pending | undefined;
-    for (const p of this.pending.values()) if (p.sessionId === sid && p.lane === 'write') holder = p;
+    const sess = this.sessions.get(sid);
+    const ident = sess ? fileIdentity(sess) : undefined;
+    for (const p of this.pending.values()) {
+      if (p.lane === 'write' && (p.sessionId === sid || (ident !== undefined && fileIdentity(p.session) === ident))) holder = p;
+    }
     const what = holder
       ? `'${holder.method}' (running ${((now - holder.startedAt) / 1000).toFixed(1)}s of its ${holder.budgetMs / 1000}s budget)`
       : 'earlier changes';
     const retryAfterMs = holder ? clamp(holder.startedAt + holder.budgetMs - now, 500, 10_000) : 1_000;
     if (item.ctx) item.ctx.retryAfterMs = Math.round(retryAfterMs);
     item.reject(retryError(
-      `plugin_working: '${item.method}' waited ${((now - item.enqueuedAt) / 1000).toFixed(1)}s for its turn behind ` +
+      `plugin_working: '${item.method}' waited ${((now - (item.writeWaitSince ?? item.enqueuedAt)) / 1000).toFixed(1)}s for its turn behind ` +
         `${what} on this file and was NOT sent, so nothing was changed. Retry after retryAfterMs.`,
       retryAfterMs,
     ));
@@ -833,7 +886,9 @@ export class PluginBridge extends EventEmitter {
         list.push({ mcpId: item.mcpId, at: Date.now() });
         this.recentCauses.set(sid, list.slice(-20));
       }
-      this.pump(sid);
+      // Also wakes the other windows of the file: a write held there because
+      // this window had one in flight (per-file write lane) can go now.
+      this.pumpFile(session);
     };
     const timeout = setTimeout(() => this.onTimeout(id), timeoutMs);
     this.pending.set(id, {
@@ -857,7 +912,7 @@ export class PluginBridge extends EventEmitter {
     // one, so a genuine wedge there is still reported as one.
     const ident = fileIdentity(session);
     const fresh = ident
-      ? this.newestLive((s) => fileIdentity(s) === ident && s.id !== session.id && s.helloAt > session.helloAt)
+      ? this.newestLive((s) => fileIdentity(s) === ident && s.id !== session.id && PluginBridge.isNewer(s, session))
       : null;
     if (fresh) {
       p.release();
@@ -880,6 +935,19 @@ export class PluginBridge extends EventEmitter {
     // Genuine timeout: keep it as wedge evidence until the plugin answers
     // anything again (see busyCheck).
     this.overdue.set(id, { sessionId: session.id, method, startedAt: p.startedAt, budgetMs, overdueAt: Date.now() });
+    // A write sent while an EARLIER write that the bridge already gave up on
+    // was still running in the plugin (no late reply yet) has been waiting in
+    // the plugin's own queue all along: it never started, and the plugin skips
+    // it (plugin_queue_timeout) once it gets its turn.
+    let behindLost: { method: string } | undefined;
+    if (p.lane === 'write') {
+      const now = Date.now();
+      for (const [lid, l] of this.lostWrites) {
+        if (now - l.at > LOST_WRITE_FORGET_MS) { this.lostWrites.delete(lid); continue; }
+        if (l.sessionId === session.id && l.startedAt < p.startedAt) behindLost = l;
+      }
+      this.lostWrites.set(id, { sessionId: session.id, method, startedAt: p.startedAt, at: now });
+    }
     const holder = this.slowHolder(session.id, p.startedAt, id);
     const mutating = !isRetrySafe(method);
     // Surface the script's own log() lines captured before the deadline:
@@ -907,6 +975,15 @@ export class PluginBridge extends EventEmitter {
     // A mutating call that times out may still be applied (the plugin keeps
     // running after we give up); a run_script has almost certainly applied SOME
     // of its changes. Warn so the agent re-reads instead of double-applying.
+    if (behindLost) {
+      item.reject(new Error(
+        `request_timeout: '${method}' exceeded ${budgetMs / 1000}s while an earlier change ('${behindLost.method}', which had ` +
+          `already timed out) was still running in the Figma plugin. '${method}' waited behind it inside the plugin and was ` +
+          `probably never started: the plugin skips a change whose time ran out while it waited (plugin_queue_timeout). ` +
+          `So it was most likely NOT applied, but re-read before retrying (a blind retry could apply it twice).${partialLogs}`,
+      ));
+      return;
+    }
     const partial = method === 'run_script'
       ? ` A run_script may have PARTIALLY changed the document before timing out: re-read state before retrying (a blind retry can double-apply). For a known-heavy script pass a larger timeoutMs (max 120s).`
       : mutating
@@ -932,8 +1009,43 @@ export class PluginBridge extends EventEmitter {
   private pump(sid: string): void {
     const sess = this.sessions.get(sid);
     if (!sess || sess.ws.readyState !== WebSocket.OPEN) return;
+    // Never send queued calls to a window that a newer window of the same file
+    // has replaced (reconnect overlap): move them there instead.
+    if (this.newerWindow(sess)) { this.adoptQueued(sess); return; }
     this.drain(sess, 'write');
     this.drain(sess, 'main');
+  }
+
+  // Pump this window and every other open window of the same file (a write
+  // held on one of them may wait for this window's write; see drain).
+  private pumpFile(s: Session): void {
+    this.pump(s.id);
+    const ident = fileIdentity(s);
+    if (!ident) return;
+    for (const x of [...this.sessions.values()]) {
+      if (x.id !== s.id && fileIdentity(x) === ident) this.pump(x.id);
+    }
+  }
+
+  // A newer live window of the same file as `s` (null when `s` is the newest,
+  // or has no stable identity).
+  private newerWindow(s: Session): Session | null {
+    const ident = fileIdentity(s);
+    if (!ident) return null;
+    return this.newestLive((x) => x.id !== s.id && fileIdentity(x) === ident && PluginBridge.isNewer(x, s));
+  }
+
+  // A write in flight on ANOTHER window of the same file as `s`. The plugin
+  // queues writes per window, so two windows of one file (reconnect overlap)
+  // would otherwise run two writes at once: the bridge's write lane is per
+  // file, and `s` holds its writes until that one settles or its window drops.
+  private writeHeldElsewhere(s: Session): Pending | undefined {
+    const ident = fileIdentity(s);
+    if (!ident) return undefined;
+    for (const p of this.pending.values()) {
+      if (p.lane === 'write' && p.sessionId !== s.id && fileIdentity(p.session) === ident) return p;
+    }
+    return undefined;
   }
 
   private drain(sess: Session, lane: Lane): void {
@@ -941,6 +1053,7 @@ export class PluginBridge extends EventEmitter {
     const L = this.laneState(lane);
     const pq = L.queues.get(sid);
     if (!pq || pq.total === 0) return;
+    if (lane === 'write' && this.writeHeldElsewhere(sess)) return;   // per-file write lane
     while (pq.total > 0 && (L.inflight.get(sid) ?? 0) < L.cap) {
       const first = pq.bySession.entries().next().value as [string, QueuedRequest[]] | undefined;
       if (!first) break;
@@ -980,15 +1093,18 @@ export class PluginBridge extends EventEmitter {
       }
     };
     if (!ident) { giveUp(); return; }
+    // The same file: its identity, or (a key-less file renamed while it
+    // reconnected, so its uid+name identity changed) where that rename led.
+    const find = () => this.newestLive((s) => fileIdentity(s) === ident) ?? this.followRename(ident);
     const go = (target: Session) => {
       process.stderr.write(`[grip] re-sending ${items.length} request(s) for "${old.fileName}" on ${target.id.slice(0, 8)}\n`);
       for (let i = items.length - 1; i >= 0; i--) this.enqueue(target.id, items[i].item, true);
       this.pump(target.id);
     };
-    const now = this.newestLive((s) => fileIdentity(s) === ident);
+    const now = find();
     if (now) { go(now); return; }
     const onChange = () => {
-      const s = this.newestLive((x) => fileIdentity(x) === ident);
+      const s = find();
       if (!s) return;
       cleanup();
       go(s);
@@ -1045,14 +1161,68 @@ export class PluginBridge extends EventEmitter {
     for (const s of this.sessions.values()) {
       if (!PluginBridge.isLive(s)) continue;
       if (!pred(s)) continue;
-      if (!best || s.helloAt > best.helloAt) best = s;
+      if (!best || PluginBridge.isNewer(s, best)) best = s;
     }
     return best;
   }
 
-  // A pin must still show the bound file (cheap guard; a name / sessionId
-  // bind trusts its pin while the window is open, so a file rename does not
-  // drop it).
+  // Is window `a` newer than window `b`? By FIRST hello (see firstHelloAt),
+  // never by the last one: hello is re-sent on every page switch.
+  private static isNewer(a: Session, b: Session): boolean {
+    if (a.firstHelloAt !== b.firstHelloAt) return a.firstHelloAt > b.firstHelloAt;
+    return a.helloSeq > b.helloSeq;
+  }
+
+  // The newest live window of the file that key-less identity `ident` was
+  // renamed to (following renames in order), or null.
+  private followRename(ident: string): Session | null {
+    const seen = new Set<string>([ident]);
+    let cur = ident;
+    for (let r = this.renamed.get(cur); r && !seen.has(r.to); r = this.renamed.get(cur)) {
+      cur = r.to;
+      seen.add(cur);
+      const s = this.newestLive((x) => fileIdentity(x) === cur);
+      if (s) return s;
+    }
+    return null;
+  }
+
+  private noteRename(from: string, to: string): void {
+    if (from === to) return;
+    this.renamed.delete(from);
+    this.renamed.set(from, { to, at: Date.now() });
+    process.stderr.write(`[grip] key-less file renamed: ${from} -> ${to}\n`);
+    PluginBridge.prune(this.renamed);
+  }
+
+  private static prune(m: Map<string, { at: number }>): void {
+    const now = Date.now();
+    for (const [k, v] of m) {
+      if (now - v.at > RENAME_MEMORY_MS || m.size > RENAME_MEMORY_MAX) m.delete(k);
+      else break;   // insertion order = age order
+    }
+  }
+
+  // Key-less uid identity of a window (`uid:<uid>:<name>`), else undefined.
+  private static keylessUidIdentity(s: Session): string | undefined {
+    return !isRealFileKey(s.fileKey) && s.fileUid ? fileIdentity(s) : undefined;
+  }
+
+  // Oldest first-hello among the open windows of identity `ident` (0 = none).
+  private firstSeen(ident: string): number {
+    let t = 0;
+    for (const x of this.sessions.values()) {
+      if (PluginBridge.isLive(x) && fileIdentity(x) === ident && (t === 0 || x.firstHelloAt < t)) t = x.firstHelloAt;
+    }
+    return t;
+  }
+
+  // A pin must still show the bound file (cheap guard). A name / uid /
+  // sessionId bind trusts its pin while the window is open, so a file rename
+  // does not drop it; and the bind's stored name is only a hint that follows
+  // the pinned window (refreshBindName on each hello and route), so after the
+  // window respawns the binding finds the renamed file (matchBind also falls
+  // back to the uid alone when exactly one open key-less file carries it).
   private static pinMatchesBind(s: Session, bind: FileBind | null): boolean {
     if (!bind) return true;
     if (bind.key) return s.fileKey === bind.key;
@@ -1077,9 +1247,9 @@ export class PluginBridge extends EventEmitter {
       const cur = m.get(id);
       if (!cur) { m.set(id, { id, identity, name: s.fileName, newest: s, sessions: [s] }); continue; }
       cur.sessions.push(s);
-      if (s.helloAt > cur.newest.helloAt) { cur.newest = s; cur.name = s.fileName; }
+      if (PluginBridge.isNewer(s, cur.newest)) { cur.newest = s; cur.name = s.fileName; }
     }
-    for (const e of m.values()) e.sessions.sort((a, b) => b.helloAt - a.helloAt);
+    for (const e of m.values()) e.sessions.sort((a, b) => (PluginBridge.isNewer(a, b) ? -1 : PluginBridge.isNewer(b, a) ? 1 : 0));
     return m;
   }
 
@@ -1110,6 +1280,15 @@ export class PluginBridge extends EventEmitter {
       const hits = this.uidEntries(bind.uid, bind.name);
       if (hits.length === 1) return { kind: 'one', session: hits[0].newest };
       if (hits.length > 1) return { kind: 'many', candidates: hits };
+      // No open file has both: the stored name may be stale (the file was
+      // renamed, and its window respawned before this agent's next call). The
+      // name is a hint, not a key: follow the rename the bridge saw (a window
+      // re-saying hello under the new name, or the respawn right after the
+      // rename). A copy that shares the uid is never taken for it.
+      if (bind.name !== undefined) {
+        const s = this.followRename(`uid:${bind.uid}:${bind.name}`);
+        if (s) return { kind: 'one', session: s };
+      }
       return { kind: 'none' };
     }
     if (bind.sessionId) {
@@ -1135,11 +1314,26 @@ export class PluginBridge extends EventEmitter {
     if (isRealFileKey(s.fileKey)) { bind.key = s.fileKey; delete bind.uid; delete bind.sessionId; return; }
     if (s.fileUid) {
       bind.uid = s.fileUid;
-      if (!bind.name) bind.name = s.fileName;   // a uid alone may also match a later duplicate
+      bind.name = s.fileName;   // a uid alone may also match a later duplicate; the name follows the file
       delete bind.sessionId;
       return;
     }
     if (bind.sessionId) bind.sessionId = s.id;
+  }
+
+  // A key-less bind's stored file name follows the window it is pinned to
+  // (the user may rename the file): it is a hint for finding the file again
+  // after the window respawns, never a key.
+  private static refreshBindName(bind: FileBind | null, s: Session): void {
+    if (!bind || bind.key || isRealFileKey(s.fileKey) || bind.name === undefined || bind.name === s.fileName) return;
+    if (bind.uid && s.fileUid !== bind.uid) return;
+    bind.name = s.fileName;
+  }
+
+  // Remember an MCP session (weakly) so hellos can refresh its binding.
+  private track(mcp: McpSession): void {
+    const ref = this.mcpRefs.get(mcp.id);
+    if (!ref || ref.deref() !== mcp) this.mcpRefs.set(mcp.id, new WeakRef(mcp));
   }
 
   // The single routing decision. Never guesses among multiple files: a
@@ -1154,6 +1348,7 @@ export class PluginBridge extends EventEmitter {
     if (mcp.activeFileId) {
       const s = this.sessions.get(mcp.activeFileId);
       if (s && PluginBridge.isLive(s) && PluginBridge.pinMatchesBind(s, mcp.bind)) {
+        PluginBridge.refreshBindName(mcp.bind, s);
         const ident = fileIdentity(s);
         if (ident) {
           const newest = this.newestLive((x) => fileIdentity(x) === ident && PluginBridge.pinMatchesBind(x, mcp.bind));
@@ -1245,6 +1440,7 @@ export class PluginBridge extends EventEmitter {
   bindFromLaunch(target: string, mcp: McpSession): void {
     try {
       const bind = this.resolveBind(target, true);
+      this.track(mcp);
       mcp.bind = bind;
       mcp.activeFileId = null;
       const r = this.route(mcp);
@@ -1376,6 +1572,7 @@ export class PluginBridge extends EventEmitter {
       // Any reply proves this plugin's thread is not frozen: clear its wedge
       // evidence (including a late reply to a call that already timed out).
       for (const [oid, o] of this.overdue) if (o.sessionId === sessionId) this.overdue.delete(oid);
+      this.lostWrites.delete(msg.id);   // the late reply: that write is done in the plugin
       const p = this.pending.get(msg.id);
       if (!p) return;
       this.pending.delete(msg.id);
@@ -1417,12 +1614,15 @@ export class PluginBridge extends EventEmitter {
   private applyHello(sessionId: string, hello: WSHello) {
     const sess = this.sessions.get(sessionId);
     if (!sess) return;
+    const prevIdent = sess.helloAt > 0 ? PluginBridge.keylessUidIdentity(sess) : undefined;
+    const prevUid = sess.fileUid;
     sess.fileKey = typeof hello.fileKey === 'string' ? hello.fileKey : '';
     sess.fileUid = typeof hello.fileUid === 'string' && hello.fileUid !== '' ? hello.fileUid : undefined;
     sess.fileName = hello.fileName;
     sess.currentPageId = hello.currentPageId;
     sess.currentPageName = hello.currentPageName;
     sess.helloAt = Date.now();
+    if (!sess.firstHelloAt) { sess.firstHelloAt = sess.helloAt; sess.helloSeq = ++PluginBridge.helloCounter; }
     sess.pluginVersion = hello.version ?? 'unknown';
     sess.minBridge = typeof hello.minBridge === 'string' ? hello.minBridge : undefined;
     sess.capabilities = hello.capabilities ?? [];
@@ -1442,6 +1642,8 @@ export class PluginBridge extends EventEmitter {
         `[grip] WARNING plugin ${sess.pluginVersion} in "${hello.fileName}" needs bridge >= ${sess.minBridge} but this is ${BRIDGE_VERSION}: the bridge is out of date, update it.\n`,
       );
     }
+    this.noteHelloRename(sess, prevIdent, prevUid);
+    this.refreshBindNames(sess);
     this.adoptQueued(sess);
     // Listeners (update signal) recompute against the new session list and
     // broadcast; then make sure THIS strip has the current state (deduped).
@@ -1449,27 +1651,66 @@ export class PluginBridge extends EventEmitter {
     this.pushUpdate(sessionId);
   }
 
-  // A newer window of the same file just said hello while older ones are still
-  // open (reconnect overlap): routing now goes to it, so calls still QUEUED on
-  // the older windows (never sent) move here instead of being sent to a window
-  // that is about to die. Calls already sent stay where they are (their reply
-  // or the disconnect handling settles them).
-  private adoptQueued(newer: Session): void {
-    const ident = fileIdentity(newer);
+  // Rename tracking on a hello (see RESPAWN_MATCH_MS): the same window under a
+  // new name, or the first window of a key-less file appearing right after the
+  // last window of another file with its fileUid closed.
+  private noteHelloRename(sess: Session, prevIdent: string | undefined, prevUid: string | undefined): void {
+    const ident = PluginBridge.keylessUidIdentity(sess);
     if (!ident) return;
+    if (prevIdent) {
+      if (prevIdent !== ident && prevUid === sess.fileUid) this.noteRename(prevIdent, ident);
+      return;
+    }
+    // first hello of this window: is it the first window of this file?
+    for (const x of this.sessions.values()) {
+      if (x !== sess && PluginBridge.isLive(x) && fileIdentity(x) === ident) return;
+    }
+    const now = Date.now();
+    const hits = [...this.closedFiles].filter(([id, c]) =>
+      c.uid === sess.fileUid && id !== ident && now - c.at <= RESPAWN_MATCH_MS && this.firstSeen(id) === 0);
+    if (hits.length === 1) this.noteRename(hits[0][0], ident);
+  }
+
+  // Every agent pinned to this window: its key-less binding's stored file name
+  // follows the window (a rename), so the binding still finds the file once
+  // Figma respawns the plugin iframe.
+  private refreshBindNames(sess: Session): void {
+    for (const [id, ref] of this.mcpRefs) {
+      const m = ref.deref();
+      if (!m) { this.mcpRefs.delete(id); continue; }
+      if (m.activeFileId === sess.id) PluginBridge.refreshBindName(m.bind, sess);
+    }
+  }
+
+  // A newer window of the same file said hello while older ones are still
+  // open (reconnect overlap), or an older window was pumped: routing goes to
+  // the newest window, so calls still QUEUED on older windows (never sent),
+  // reads and writes alike, move to it instead of being sent to a window that
+  // is about to die. Calls already sent stay where they are (their reply or the
+  // disconnect handling settles them); the per-file write lane keeps the
+  // newest window's writes waiting until an older window's write settles.
+  private adoptQueued(sess: Session): void {
+    const ident = fileIdentity(sess);
+    if (!ident) return;
+    const target = this.newestLive((s) => fileIdentity(s) === ident);
+    if (!target) return;
     const moved: QueuedRequest[] = [];
-    for (const [sid, pq] of this.queues) {
-      if (sid === newer.id) continue;
-      const old = this.sessions.get(sid);
-      if (!old || old.helloAt > newer.helloAt || fileIdentity(old) !== ident) continue;
-      for (const q of pq.bySession.values()) moved.push(...q);
-      this.queues.delete(sid);
+    for (const queues of [this.writeQueues, this.queues]) {
+      for (const [sid, pq] of [...queues]) {
+        if (sid === target.id) continue;
+        const old = this.sessions.get(sid);
+        if (!old || fileIdentity(old) !== ident) continue;
+        for (const q of pq.bySession.values()) moved.push(...q);
+        queues.delete(sid);
+      }
     }
     if (moved.length === 0) return;
     moved.sort((a, b) => a.enqueuedAt - b.enqueuedAt);
-    process.stderr.write(`[grip] moving ${moved.length} queued request(s) for "${newer.fileName}" to the newer window ${newer.id.slice(0, 8)}\n`);
-    for (let i = moved.length - 1; i >= 0; i--) this.enqueue(newer.id, moved[i], true);
-    this.pump(newer.id);
+    process.stderr.write(`[grip] moving ${moved.length} queued request(s) for "${target.fileName}" to the newer window ${target.id.slice(0, 8)}\n`);
+    // enqueue re-picks the lane on the target and re-arms a write's wait
+    // timer with the time it has LEFT (writeWaitSince is kept).
+    for (let i = moved.length - 1; i >= 0; i--) this.enqueue(target.id, moved[i], true);
+    this.pump(target.id);
   }
 
   // ---------- update notices ----------
@@ -1559,11 +1800,29 @@ export class PluginBridge extends EventEmitter {
     this.latency.delete(sessionId);
     this.recentCauses.delete(sessionId);
     for (const [oid, o] of this.overdue) if (o.sessionId === sessionId) this.overdue.delete(oid);
+    for (const [lid, l] of this.lostWrites) if (l.sessionId === sessionId) this.lostWrites.delete(lid);
+    this.noteClosed(sess);
 
     // Per-MCP-session pins clean themselves up lazily in resolveActiveId
     // when the pinned plugin is gone.
     this.emit('session-change');
     this.rehome(sess, again);
+  }
+
+  // The last window of a key-less file closed: remember when, and if a window
+  // of another key-less file with the same fileUid first appeared just before
+  // (Figma respawned the iframe after a rename), that is where it went.
+  private noteClosed(sess: Session): void {
+    const ident = PluginBridge.keylessUidIdentity(sess);
+    if (!ident || !sess.fileUid || this.firstSeen(ident) !== 0) return;
+    const now = Date.now();
+    this.closedFiles.delete(ident);
+    this.closedFiles.set(ident, { uid: sess.fileUid, name: sess.fileName, at: now });
+    PluginBridge.prune(this.closedFiles);
+    const hits = [...this.distinctOpenFiles().values()].filter((e) =>
+      e.identity !== undefined && e.identity !== ident && !isRealFileKey(e.newest.fileKey) &&
+      e.newest.fileUid === sess.fileUid && now - this.firstSeen(e.identity) <= RESPAWN_MATCH_MS);
+    if (hits.length === 1) this.noteRename(ident, hits[0].identity!);
   }
 
   close() {

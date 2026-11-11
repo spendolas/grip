@@ -219,6 +219,12 @@ const write = (agent, tag, extra = {}) => settle(bridge.request('set_node_proper
   const late = await write(B, 'late');   // sent now, waits in the plugin behind hog
   assert.ok(!late.ok, 'the late write fails on the bridge');
   assert.match(late.e.message, /^(request_timeout|plugin_queue_timeout): /);
+  // the bridge knows hog (timed out, no reply yet) still runs in the plugin, so
+  // it says 'late' was probably skipped instead of the plain maybe_applied
+  if (/^request_timeout/.test(late.e.message)) {
+    assert.match(late.e.message, /earlier change \('set_node_property', which had already timed out\)/, late.e.message);
+    assert.match(late.e.message, /probably never started.*plugin_queue_timeout.*re-read before retrying/, late.e.message);
+  }
   assert.ok(!(await hog).ok);
   await sleep(1200);                   // hog finishes; the plugin would run 'late' now if it ignored the frame budget
   assert.ok(P.applied.includes('hog'));
@@ -297,6 +303,125 @@ const write = (agent, tag, extra = {}) => settle(bridge.request('set_node_proper
   assert.ok(!r.ok && /^plugin_working: /.test(r.e.message), r.e?.message);
   assert.ok((await slow).ok);
   await P.close();
+}
+
+// ---------------------------------------------------------------- 9. reconnect overlap: the write lane is per FILE
+// Figma respawns the plugin iframe: a newer window of the same file says hello
+// while the old one still has a write in flight (W0) and one queued (W1). W1
+// must move to the new window, be sent only there, exactly once, never be
+// reported maybe_applied, and never run at the same time as W0; a new write W2
+// waits its turn too.
+async function win(fileKey, { answer = true, ms = 50 } = {}) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+  const w = { ws, sid: null, got: [], replied: [], answer, ms };
+  ws.on('message', (d) => {
+    const m = JSON.parse(d.toString());
+    if (m.kind === 'welcome') {
+      w.sid = m.sessionId;
+      ws.send(JSON.stringify({
+        kind: 'hello', version: '0.8.0', fileKey, fileName: fileKey, currentPageId: '0:1', currentPageName: 'P',
+        capabilities: ['nodeBudget', 'serialMutations'],
+      }));
+      return;
+    }
+    if (!m.id || !m.method) return;
+    w.got.push({ tag: m.params?.tag, at: Date.now() });
+    if (!w.answer) return;
+    setTimeout(() => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      w.replied.push({ tag: m.params?.tag, at: Date.now() });
+      ws.send(JSON.stringify({ id: m.id, result: { tag: m.params?.tag } }));
+    }, m.params?.ms ?? w.ms);
+  });
+  await new Promise((r) => ws.on('open', r));
+  await waitUntil(() => bridge.snapshot().plugins.some((x) => x.sessionId === w.sid && x.hello));
+  return w;
+}
+const lane = (w) => bridge.snapshot().plugins.find((x) => x.sessionId === w.sid)?.writeLane;
+const settledAt = (pr) => pr.then((r) => ({ ...r, at: Date.now() }));
+const tags = (w) => w.got.map((g) => g.tag);
+{
+  // (a) the old window is a zombie (never answers)
+  const S1 = await win('kOverlapA', { answer: false });
+  const [A, B, C] = ['kOverlapA', 'kOverlapA', 'kOverlapA'].map(mcp);
+  const w0 = settledAt(write(A, 'W0'));
+  await sleep(20);
+  const w1 = settledAt(write(B, 'W1'));
+  await sleep(20);
+  assert.deepStrictEqual(tags(S1), ['W0']);
+  assert.deepStrictEqual([lane(S1).inflight, lane(S1).queued], [1, 1]);
+  const S2 = await win('kOverlapA');
+  assert.deepStrictEqual([lane(S1).inflight, lane(S1).queued], [1, 0], 'W1 left the old window');
+  assert.deepStrictEqual([lane(S2).inflight, lane(S2).queued], [0, 1], 'W1 waits on the new window while W0 is in flight on the old one');
+  const w2 = settledAt(write(C, 'W2'));
+  await sleep(30);
+  assert.deepStrictEqual(tags(S2), [], 'nothing is sent on the new window while the old one runs a write');
+  const [r0, r1, r2] = await Promise.all([w0, w1, w2]);
+  assert.ok(!r0.ok && /^maybe_applied: .*reconnected/.test(r0.e.message), r0.e?.message);
+  assert.ok(r1.ok, `W1 succeeds on the new window: ${r1.e?.message}`);
+  assert.ok(r2.ok, `W2 succeeds: ${r2.e?.message}`);
+  assert.deepStrictEqual(tags(S1), ['W0'], 'W1 never went to the zombie');
+  assert.deepStrictEqual(tags(S2), ['W1', 'W2'], 'W1 sent once, on the new window, before W2');
+  assert.ok(S2.got[0].at >= r0.at, 'W1 was sent only after W0 settled');
+  S1.ws.close(); S2.ws.close();
+  await waitUntil(() => !bridge.snapshot().plugins.some((x) => x.fileKey === 'kOverlapA'));
+}
+{
+  // (b) the old window is alive and answers W0 late (inside its budget)
+  const S1 = await win('kOverlapB', { ms: 400 });
+  const [A, B] = ['kOverlapB', 'kOverlapB'].map(mcp);
+  const w0 = write(A, 'W0');
+  await sleep(20);
+  const w1 = write(B, 'W1');
+  await sleep(20);
+  const S2 = await win('kOverlapB');
+  const [r0, r1] = await Promise.all([w0, w1]);
+  assert.ok(r0.ok && r1.ok, `${r0.e?.message} | ${r1.e?.message}`);
+  assert.deepStrictEqual([tags(S1), tags(S2)], [['W0'], ['W1']]);
+  assert.ok(S2.got[0].at >= S1.replied[0].at, 'W1 went out only after the old window answered W0');
+  S1.ws.close(); S2.ws.close();
+  await waitUntil(() => !bridge.snapshot().plugins.some((x) => x.fileKey === 'kOverlapB'));
+}
+{
+  // (c) the old window drops while W0 is in flight
+  const S1 = await win('kOverlapC', { answer: false });
+  const [A, B] = ['kOverlapC', 'kOverlapC'].map(mcp);
+  const w0 = write(A, 'W0');
+  await sleep(20);
+  const w1 = write(B, 'W1');
+  await sleep(20);
+  const S2 = await win('kOverlapC');
+  await sleep(50);
+  assert.deepStrictEqual(tags(S2), []);
+  const closedAt = Date.now();
+  S1.ws.close();
+  const [r0, r1] = await Promise.all([w0, w1]);
+  assert.ok(!r0.ok && /^maybe_applied: .*disconnected/.test(r0.e.message), r0.e?.message);
+  assert.ok(r1.ok, r1.e?.message);
+  assert.deepStrictEqual(tags(S2), ['W1']);
+  assert.ok(S2.got[0].at >= closedAt && S2.got[0].at - closedAt < 400, 'W1 goes out as soon as the old window is gone');
+  S2.ws.close();
+  await waitUntil(() => !bridge.snapshot().plugins.some((x) => x.fileKey === 'kOverlapC'));
+}
+{
+  // (d) moving a queued write to the new window does not restart its 1.5s wait cap
+  const S1 = await win('kOverlapD');
+  const [A, B] = ['kOverlapD', 'kOverlapD'].map(mcp);
+  const long = settle(bridge.request('run_script', { code: 'x', timeoutMs: 3000, ms: 2500, tag: 'script' }, A));
+  await sleep(20);
+  const t1 = Date.now();
+  const w1 = write(B, 'W1');
+  await sleep(1000);
+  const S2 = await win('kOverlapD');
+  assert.deepStrictEqual([lane(S2).inflight, lane(S2).queued], [0, 1]);
+  const r1 = await w1;
+  const took = Date.now() - t1;
+  assert.ok(!r1.ok && /^plugin_working: 'set_node_property' waited 1\.\d+s .*behind 'run_script'.*NOT sent/.test(r1.e.message), r1.e?.message);
+  assert.ok(took >= 1400 && took < 2000, `rejected at the original cap, not restarted on the move (${took}ms)`);
+  assert.ok((await long).ok);
+  assert.deepStrictEqual([tags(S1), tags(S2)], [['script'], []]);
+  S1.ws.close(); S2.ws.close();
+  await waitUntil(() => !bridge.snapshot().plugins.some((x) => x.fileKey === 'kOverlapD'));
 }
 
 bridge.close();

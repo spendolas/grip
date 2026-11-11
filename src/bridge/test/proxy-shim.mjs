@@ -37,6 +37,12 @@ const cases = [
   ['group', {}, false],          // no op: refused by the bridge before the plugin
   ['upload_image_finish', {}, true],
   [undefined, {}, true],         // unknown: assume it may have changed something
+  // read-only for undo purposes but NOT safe to repeat: a lost trigger_undo
+  // retried blindly undoes twice, a toast or browser tab shows up twice
+  ['trigger_undo', {}, true],
+  ['notify', { message: 'x' }, true],
+  ['open_external_url', { url: 'https://example.com' }, true],
+  ['commit_undo', {}, false],    // committing an undo step twice changes nothing
 ];
 for (const [tool, args, want] of cases) {
   assert.strictEqual(toolMayChangeDocument(tool, args), want, `${tool} ${JSON.stringify(args)} -> ${want}`);
@@ -54,8 +60,9 @@ const requests = [
   { id: 6, name: 'set_node_property', arguments: { nodeId: '1:1', property: 'opacity', value: 1 } },
   { id: 7, name: 'run_script', arguments: { code: '1' } },
   { id: 8, name: 'group', arguments: { op: 'group', nodeIds: ['1:1'] } },
+  { id: 10, name: 'trigger_undo', arguments: {} },   // lost undo: never "safe to retry" (double undo)
 ];
-const expectMaybe = { 1: false, 2: false, 3: false, 4: false, 5: false, 6: true, 7: true, 8: true, 9: false };
+const expectMaybe = { 1: false, 2: false, 3: false, 4: false, 5: false, 6: true, 7: true, 8: true, 9: false, 10: true };
 
 let seen = 0;
 const server = createServer((sock) => {
