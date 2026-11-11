@@ -132,6 +132,13 @@ const CONNECTED_TITLE = 'Connected';
   h.fromMain({ kind: 'hello', version: '0.8.0', capabilities: ['fileUid'], fileKey: '0:0', fileUid: 'u-1', fileName: 'f', currentPageId: '0:1', currentPageName: 'P' });
   assert.deepStrictEqual(ws.sent.at(-1), { kind: 'hello', version: '0.8.0', capabilities: ['fileUid'], fileKey: '0:0', fileUid: 'u-1', fileName: 'f', currentPageId: '0:1', currentPageName: 'P' }, 'fileUid forwarded');
 
+  // request frames reach the plugin whole: the bridge's timeoutMs (and any later
+  // additive field) is not dropped by the relay
+  ws.deliver({ id: 'r1', method: 'set_node_property', params: { nodeId: '1:1' }, timeoutMs: 600, extra: 1 });
+  assert.deepStrictEqual(h.posted.at(-1), { pluginMessage: { id: 'r1', method: 'set_node_property', params: { nodeId: '1:1' }, timeoutMs: 600, extra: 1, kind: 'request' } });
+  ws.deliver({ id: 'r2', method: 'get_node' });
+  assert.deepStrictEqual(h.posted.at(-1), { pluginMessage: { id: 'r2', method: 'get_node', params: {}, kind: 'request' } }, 'params default to {}');
+
   // busy pulse (existing behaviour) while connected and nothing on offer
   h.fromMain({ kind: 'busy', busy: true });
   assert.ok(h.has('pulsing') && h.has('connected'));

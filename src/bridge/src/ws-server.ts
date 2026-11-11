@@ -7,7 +7,7 @@ import type {
 } from './types.js';
 import { BRIDGE_VERSION } from './types.js';
 import { compareSemver, isSemver } from './update.js';
-import { isRetrySafe, causesEvents } from './methods.js';
+import { isRetrySafe, causesEvents, serializedByPlugin } from './methods.js';
 
 interface Pending {
   // The caller's request; settled through item.resolve / item.reject. Kept so
@@ -24,7 +24,18 @@ interface Pending {
   budgetMs: number;
   // Free the in-flight slot (idempotent) and pump the queue.
   release: () => void;
+  // Which in-flight lane it occupies (see Lane).
+  lane: Lane;
 }
+
+// Flow-control lanes per plugin session. 'main': up to MAX_INFLIGHT_PER_PLUGIN
+// calls at once (every call of a plugin without `serialMutations`; reads of one
+// with it). 'write': a plugin advertising `serialMutations` runs mutating calls
+// one at a time in its own queue, so the bridge keeps at most ONE of them in
+// flight and holds the rest here, round-robin per MCP session. A write's budget
+// timer then starts when the plugin can actually run it (not while it waits
+// behind other writes inside the plugin), and writes never take read slots.
+type Lane = 'main' | 'write';
 
 // A request accepted by the bridge but not yet sent to the plugin. Held in a
 // per-plugin queue, one FIFO per MCP session, drained round-robin across
@@ -40,6 +51,9 @@ interface QueuedRequest {
   ctx?: CallContext;
   // Already re-routed once after a plugin drop: never again.
   retried?: boolean;
+  // Write lane only: fires if the call waits in the bridge queue longer than
+  // MAX_WRITE_QUEUE_WAIT_MS (it is then rejected, never sent).
+  waitTimer?: NodeJS.Timeout;
   resolve: (result: unknown) => void;
   reject: (err: Error) => void;
 }
@@ -258,6 +272,11 @@ const MAX_QUEUE_PER_PLUGIN = Number(process.env.GRIP_MAX_QUEUE ?? 500);
 // Per MCP session share of one plugin's queue, so a single flooding agent
 // cannot fill the global backstop and lock every other agent out.
 const MAX_QUEUE_PER_SESSION = Number(process.env.GRIP_MAX_QUEUE_PER_SESSION ?? 125);
+// Longest a mutating call may wait in the bridge's write lane (behind other
+// writes to the same file) before it is rejected with plugin_working, never
+// sent. Healthy writes take ms; this only bounds the wait behind a long write
+// (map_nodes, run_script with a large timeoutMs).
+const MAX_WRITE_QUEUE_WAIT_MS = Number(process.env.GRIP_MAX_WRITE_WAIT_MS ?? 60_000);
 // A tool call that waited at least this long in the queue reports it in the
 // tool result's _meta (grip/queuedMs). Every queued wait is logged.
 export const QUEUED_NOTE_MS = 2_000;
@@ -291,6 +310,9 @@ export class PluginBridge extends EventEmitter {
   // and the FIFO backlog of requests waiting for an in-flight slot.
   private inflight = new Map<string, number>();
   private queues = new Map<string, PluginQueue>();
+  // The same two, for the write lane of `serialMutations` plugins (see Lane).
+  private writeInflight = new Map<string, number>();
+  private writeQueues = new Map<string, PluginQueue>();
   // Busy guard: calls that ran past their budget without a reply (by request id).
   private overdue = new Map<string, Overdue>();
   // Recent reply latency per plugin session (EWMA, ms), for retryAfterMs.
@@ -613,9 +635,11 @@ export class PluginBridge extends EventEmitter {
         method, params, mcpId: mcp.id, enqueuedAt: Date.now(), ctx: callContext.getStore(), resolve, reject,
       };
       const sid = sess.id;
-      const pq = this.queues.get(sid);
-      if ((this.inflight.get(sid) ?? 0) < MAX_INFLIGHT_PER_PLUGIN && !(pq && pq.total > 0)) {
-        this.dispatch(sess, item);
+      const lane = this.laneOf(sess, method);
+      const L = this.laneState(lane);
+      const pq = L.queues.get(sid);
+      if ((L.inflight.get(sid) ?? 0) < L.cap && !(pq && pq.total > 0)) {
+        this.dispatch(sess, item, lane);
         return;
       }
       const shed = this.overloadCheck(sid, mcp.id, method);
@@ -627,6 +651,17 @@ export class PluginBridge extends EventEmitter {
       this.enqueue(sid, item);
       this.pump(sid);
     });
+  }
+
+  // Which lane a call to this plugin session takes (see Lane).
+  private laneOf(sess: Session | undefined, method: string): Lane {
+    return sess?.capabilities?.includes('serialMutations') && serializedByPlugin(method) ? 'write' : 'main';
+  }
+
+  private laneState(lane: Lane): { inflight: Map<string, number>; queues: Map<string, PluginQueue>; cap: number } {
+    return lane === 'write'
+      ? { inflight: this.writeInflight, queues: this.writeQueues, cap: 1 }
+      : { inflight: this.inflight, queues: this.queues, cap: MAX_INFLIGHT_PER_PLUGIN };
   }
 
   // This call's timeout budget. run_script may opt into a larger budget for a
@@ -674,10 +709,14 @@ export class PluginBridge extends EventEmitter {
       );
     }
     // 2. An ordinary (10s budget) call outstanding past the threshold: the
-    //    plugin is busy, not (yet) wedged. Name what is holding it.
+    //    plugin is busy, not (yet) wedged. Name what is holding it. Only calls
+    //    in the SAME lane count: on a `serialMutations` plugin reads never wait
+    //    behind a write (and a write never waits behind a read), so a long write
+    //    is not a reason to turn reads away, nor the other way round.
+    const lane = this.laneOf(this.sessions.get(sid), method);
     let stuck: Pending | undefined;
     for (const p of this.pending.values()) {
-      if (p.sessionId !== sid || p.budgetMs > REQUEST_TIMEOUT_MS || now - p.startedAt < BUSY_THRESHOLD_MS) continue;
+      if (p.sessionId !== sid || p.lane !== lane || p.budgetMs > REQUEST_TIMEOUT_MS || now - p.startedAt < BUSY_THRESHOLD_MS) continue;
       if (!stuck || p.startedAt < stuck.startedAt) stuck = p;
     }
     if (stuck) {
@@ -701,9 +740,12 @@ export class PluginBridge extends EventEmitter {
   }
 
   private overloadCheck(sid: string, mcpId: string, method: string): (Error & { retryAfterMs: number }) | null {
-    const pq = this.queues.get(sid);
-    const total = pq?.total ?? 0;
-    const mine = pq?.bySession.get(mcpId)?.length ?? 0;
+    // Both lanes share the backstops.
+    let total = 0, mine = 0;
+    for (const pq of [this.queues.get(sid), this.writeQueues.get(sid)]) {
+      total += pq?.total ?? 0;
+      mine += pq?.bySession.get(mcpId)?.length ?? 0;
+    }
     if (total >= MAX_QUEUE_PER_PLUGIN) {
       return retryError(
         `plugin_overloaded: ${total} requests already queued for this plugin (max ${MAX_QUEUE_PER_PLUGIN}); ` +
@@ -722,32 +764,69 @@ export class PluginBridge extends EventEmitter {
     return null;
   }
 
-  // Append (or, for re-homed requests, prepend) to the caller's FIFO.
+  // Append (or, for re-homed requests, prepend) to the caller's FIFO in the
+  // lane the call takes on that plugin session.
   private enqueue(sid: string, item: QueuedRequest, front = false): void {
-    let pq = this.queues.get(sid);
-    if (!pq) { pq = { bySession: new Map(), total: 0 }; this.queues.set(sid, pq); }
+    const lane = this.laneOf(this.sessions.get(sid), item.method);
+    const queues = this.laneState(lane).queues;
+    let pq = queues.get(sid);
+    if (!pq) { pq = { bySession: new Map(), total: 0 }; queues.set(sid, pq); }
     let q = pq.bySession.get(item.mcpId);
     if (!q) { q = []; pq.bySession.set(item.mcpId, q); }
     if (front) q.unshift(item); else q.push(item);
     pq.total++;
+    if (lane === 'write') {
+      if (item.waitTimer) clearTimeout(item.waitTimer);
+      item.waitTimer = setTimeout(() => this.onWriteWaitTimeout(sid, item), MAX_WRITE_QUEUE_WAIT_MS);
+      item.waitTimer.unref?.();
+    }
+  }
+
+  // A write waited in the bridge's write lane past MAX_WRITE_QUEUE_WAIT_MS:
+  // take it out and reject it. It was never sent, so nothing changed.
+  private onWriteWaitTimeout(sid: string, item: QueuedRequest): void {
+    item.waitTimer = undefined;
+    const pq = this.writeQueues.get(sid);
+    const q = pq?.bySession.get(item.mcpId);
+    const i = q ? q.indexOf(item) : -1;
+    if (!pq || !q || i < 0) return;
+    q.splice(i, 1);
+    pq.total--;
+    if (!q.length) pq.bySession.delete(item.mcpId);
+    if (pq.total === 0) this.writeQueues.delete(sid);
+    const now = Date.now();
+    let holder: Pending | undefined;
+    for (const p of this.pending.values()) if (p.sessionId === sid && p.lane === 'write') holder = p;
+    const what = holder
+      ? `'${holder.method}' (running ${((now - holder.startedAt) / 1000).toFixed(1)}s of its ${holder.budgetMs / 1000}s budget)`
+      : 'earlier changes';
+    const retryAfterMs = holder ? clamp(holder.startedAt + holder.budgetMs - now, 500, 10_000) : 1_000;
+    if (item.ctx) item.ctx.retryAfterMs = Math.round(retryAfterMs);
+    item.reject(retryError(
+      `plugin_working: '${item.method}' waited ${((now - item.enqueuedAt) / 1000).toFixed(1)}s for its turn behind ` +
+        `${what} on this file and was NOT sent, so nothing was changed. Retry after retryAfterMs.`,
+      retryAfterMs,
+    ));
   }
 
   // Send one request to the plugin now, tracking it as in-flight; on settle
   // (response / timeout / disconnect) free the slot and pump the queue.
-  private dispatch(session: Session, item: QueuedRequest): void {
+  private dispatch(session: Session, item: QueuedRequest, lane: Lane): void {
     const sid = session.id;
     const id = uuid();
     const { method, params } = item;
+    if (item.waitTimer) { clearTimeout(item.waitTimer); item.waitTimer = undefined; }
     const timeoutMs = this.budgetFor(method, params);
     const now = Date.now();
     const queuedMs = now - item.enqueuedAt;
     if (queuedMs > 0 && item.ctx) item.ctx.queuedMs = Math.max(item.ctx.queuedMs ?? 0, queuedMs);
-    this.inflight.set(sid, (this.inflight.get(sid) ?? 0) + 1);
+    const inflight = this.laneState(lane).inflight;
+    inflight.set(sid, (inflight.get(sid) ?? 0) + 1);
     let released = false;
     const release = () => {
       if (released) return;
       released = true;
-      this.inflight.set(sid, Math.max(0, (this.inflight.get(sid) ?? 1) - 1));
+      inflight.set(sid, Math.max(0, (inflight.get(sid) ?? 1) - 1));
       this.scriptLogs.delete(id);   // clear buffered logs on any settle
       if (causesEvents(method)) {
         const list = (this.recentCauses.get(sid) ?? []).filter((r) => Date.now() - r.at <= CAUSE_ECHO_MS);
@@ -758,9 +837,11 @@ export class PluginBridge extends EventEmitter {
     };
     const timeout = setTimeout(() => this.onTimeout(id), timeoutMs);
     this.pending.set(id, {
-      item, timeout, sessionId: sid, session, startedAt: now, method, mcpId: item.mcpId, budgetMs: timeoutMs, release,
+      item, timeout, sessionId: sid, session, startedAt: now, method, mcpId: item.mcpId, budgetMs: timeoutMs, release, lane,
     });
-    session.ws.send(JSON.stringify({ id, method, params }));
+    // timeoutMs: this call's budget, counted from now. The plugin uses it to skip
+    // a write that would only start after the bridge has already given up on it.
+    session.ws.send(JSON.stringify({ id, method, params, timeoutMs }));
   }
 
   private onTimeout(id: string): void {
@@ -829,7 +910,7 @@ export class PluginBridge extends EventEmitter {
     const partial = method === 'run_script'
       ? ` A run_script may have PARTIALLY changed the document before timing out: re-read state before retrying (a blind retry can double-apply). For a known-heavy script pass a larger timeoutMs (max 120s).`
       : mutating
-        ? ` The plugin may still apply it after the timeout: re-read before retrying.`
+        ? ` Treat it as maybe_applied: the plugin may have started it before the deadline and cannot abort it, so it may still be applied after this error. Re-read before retrying (a blind retry can apply it twice).`
         : '';
     item.reject(new Error(`request_timeout: '${method}' exceeded ${budgetMs / 1000}s.${partial}${partialLogs}`));
   }
@@ -845,12 +926,22 @@ export class PluginBridge extends EventEmitter {
   // Dispatch queued requests for a plugin while it has free in-flight slots,
   // round-robin across MCP sessions (one call from each waiting agent per
   // turn). A plugin that is closing keeps its queue; dropSession re-homes it.
+  // Both lanes are drained this way. Each call runs the busy guard first, so on
+  // a wedged or busy plugin queued calls fail fast (plugin_busy /
+  // plugin_working, never sent) instead of going out and each burning a timeout.
   private pump(sid: string): void {
-    const pq = this.queues.get(sid);
-    if (!pq || pq.total === 0) return;
     const sess = this.sessions.get(sid);
     if (!sess || sess.ws.readyState !== WebSocket.OPEN) return;
-    while (pq.total > 0 && (this.inflight.get(sid) ?? 0) < MAX_INFLIGHT_PER_PLUGIN) {
+    this.drain(sess, 'write');
+    this.drain(sess, 'main');
+  }
+
+  private drain(sess: Session, lane: Lane): void {
+    const sid = sess.id;
+    const L = this.laneState(lane);
+    const pq = L.queues.get(sid);
+    if (!pq || pq.total === 0) return;
+    while (pq.total > 0 && (L.inflight.get(sid) ?? 0) < L.cap) {
       const first = pq.bySession.entries().next().value as [string, QueuedRequest[]] | undefined;
       if (!first) break;
       const [mcpId, q] = first;
@@ -859,9 +950,16 @@ export class PluginBridge extends EventEmitter {
       if (q.length) pq.bySession.set(mcpId, q);   // to the back of the ring
       if (!item) continue;
       pq.total--;
-      this.dispatch(sess, item);
+      const busy = this.busyCheck(sid, item.method);
+      if (busy) {
+        if (item.waitTimer) { clearTimeout(item.waitTimer); item.waitTimer = undefined; }
+        if (item.ctx) item.ctx.retryAfterMs = busy.retryAfterMs;
+        item.reject(busy);
+        continue;
+      }
+      this.dispatch(sess, item, lane);
     }
-    if (pq.total === 0) this.queues.delete(sid);
+    if (pq.total === 0 && L.queues.get(sid) === pq) L.queues.delete(sid);
   }
 
   // After a plugin session dropped: put requests that may be re-sent onto the
@@ -1423,8 +1521,9 @@ export class PluginBridge extends EventEmitter {
 
     // In-flight and queued requests for that plugin. Take the queue first so
     // releasing the in-flight slots below does not pump it into a dead socket.
-    const pq = this.queues.get(sessionId);
+    const pqs = [this.writeQueues.get(sessionId), this.queues.get(sessionId)];
     this.queues.delete(sessionId);
+    this.writeQueues.delete(sessionId);
     const again: Array<{ item: QueuedRequest; sent: boolean }> = [];
     for (const [reqId, p] of this.pending) {
       if (p.sessionId !== sessionId) continue;
@@ -1445,15 +1544,18 @@ export class PluginBridge extends EventEmitter {
       }
     }
     // Queued requests were never sent, so even a change is safe to re-send.
-    if (pq) {
+    for (const pq of pqs) {
+      if (!pq) continue;
       for (const q of pq.bySession.values()) {
         for (const item of q) {
+          if (item.waitTimer) { clearTimeout(item.waitTimer); item.waitTimer = undefined; }
           if (!item.retried) { item.retried = true; again.push({ item, sent: false }); }
           else item.reject(new Error(`plugin_disconnected: the Figma plugin disconnected again while '${item.method}' was waiting to be sent. It was never sent, so nothing was changed and it is safe to retry.`));
         }
       }
     }
     this.inflight.delete(sessionId);
+    this.writeInflight.delete(sessionId);
     this.latency.delete(sessionId);
     this.recentCauses.delete(sessionId);
     for (const [oid, o] of this.overdue) if (o.sessionId === sessionId) this.overdue.delete(oid);
@@ -1474,13 +1576,18 @@ export class PluginBridge extends EventEmitter {
       ));
     }
     this.pending.clear();
-    for (const pq of this.queues.values()) {
+    for (const pq of [...this.queues.values(), ...this.writeQueues.values()]) {
       for (const q of pq.bySession.values()) {
-        for (const item of q) item.reject(new Error('leader_shutdown: Bridge shutting down (the call was never sent)'));
+        for (const item of q) {
+          if (item.waitTimer) clearTimeout(item.waitTimer);
+          item.reject(new Error('leader_shutdown: Bridge shutting down (the call was never sent)'));
+        }
       }
     }
     this.queues.clear();
+    this.writeQueues.clear();
     this.inflight.clear();
+    this.writeInflight.clear();
     this.wss.close();
   }
 
@@ -1507,10 +1614,19 @@ export class PluginBridge extends EventEmitter {
         // Flow control: requests currently sent-and-awaiting vs. metered-behind
         // in the queue. queued > 0 means the plugin is being throttled to keep
         // it responsive under a command burst.
-        inflight: this.inflight.get(s.id) ?? 0,
-        queued: this.queues.get(s.id)?.total ?? 0,
+        // (Both lanes; writeLane = the `serialMutations` write lane alone.)
+        inflight: (this.inflight.get(s.id) ?? 0) + (this.writeInflight.get(s.id) ?? 0),
+        queued: (this.queues.get(s.id)?.total ?? 0) + (this.writeQueues.get(s.id)?.total ?? 0),
         // How many MCP sessions have calls waiting (served round-robin).
-        queuedSessions: this.queues.get(s.id)?.bySession.size ?? 0,
+        queuedSessions: new Set([
+          ...(this.queues.get(s.id)?.bySession.keys() ?? []),
+          ...(this.writeQueues.get(s.id)?.bySession.keys() ?? []),
+        ]).size,
+        writeLane: {
+          serial: (s.capabilities ?? []).includes('serialMutations'),
+          inflight: this.writeInflight.get(s.id) ?? 0,
+          queued: this.writeQueues.get(s.id)?.total ?? 0,
+        },
       })),
     };
   }

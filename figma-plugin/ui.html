@@ -195,8 +195,11 @@
           if (msg && msg.type === 'update') { onUpdateNotice(msg); return; }
           if (msg && msg.type === 'update_result') { onUpdateResult(msg); return; }
           if (msg && msg.id && msg.method) {
+            // Forward the whole frame (timeoutMs and any later additive field),
+            // not an allow-list: dropping fields here once hid the bridge's
+            // budget from the plugin.
             parent.postMessage(
-              { pluginMessage: { kind: 'request', id: msg.id, method: msg.method, params: msg.params || {} } },
+              { pluginMessage: Object.assign({}, msg, { kind: 'request', params: msg.params || {} }) },
               '*'
             );
           }

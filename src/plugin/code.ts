@@ -5025,15 +5025,24 @@ const READ_ONLY_METHODS = new Set<string>([
 //
 // Liveness:
 //  - a call that throws releases the queue (try/finally);
-//  - a call that waited in the queue longer than its bridge-side budget is NOT
-//    run (the bridge already reported it as timed out; running it late would
-//    change the document behind the agent's back) and fails with
-//    plugin_queue_timeout instead;
+//  - a call whose bridge-side budget ran out (less a small transport margin)
+//    while it waited in this queue is NOT started (the bridge has already
+//    reported it as timed out; starting it late would change the document behind
+//    the agent's back) and fails with plugin_queue_timeout instead. The budget is
+//    the request frame's `timeoutMs` (the bridge's own clock for this call,
+//    including env overrides), else requestBudgetMs's table. What this does NOT
+//    cover: a call that STARTED inside its budget and is still running when the
+//    bridge gives up cannot be aborted; it may complete after the agent got
+//    request_timeout, which the bridge reports as maybe_applied. A bridge that
+//    understands `serialMutations` sends one write at a time, so writes normally
+//    never wait here at all;
 //  - a call that never settles releases the queue after its own budget plus a
 //    small margin (max 125s), with a console warning. Its late completion can
 //    then overlap the next call (logged trade-off: liveness over ordering). A
 //    truly synchronous freeze cannot be released by any timer; see plugin_busy
 //    on the bridge.
+// maxWaitMs: the call is skipped if it could only start this late (its remaining
+// budget is used up). holdMs: liveness release for a call that never settles.
 interface MutationQueueOpts { holdMs: number; maxWaitMs?: number }
 interface MutationQueue {
   run<T>(label: string, opts: MutationQueueOpts, task: () => Promise<T>): Promise<T>;
@@ -5056,11 +5065,13 @@ function createMutationQueue(onStuck: (label: string, heldMs: number) => void): 
         let released = false;
         const release = () => { if (!released) { released = true; depth--; open(); } };
         const waited = Date.now() - enqueuedAt;
-        if (typeof opts.maxWaitMs === 'number' && waited > opts.maxWaitMs) {
+        // Remaining budget = maxWaitMs - waited. None left: the bridge has (or is
+        // about to have) reported this call as failed, so never start it.
+        if (typeof opts.maxWaitMs === 'number' && waited >= opts.maxWaitMs) {
           release();
           throw new Error(
             `plugin_queue_timeout: '${label}' waited ${(waited / 1000).toFixed(1)}s behind other mutating calls on this file ` +
-              `(budget ${(opts.maxWaitMs / 1000).toFixed(1)}s) and was NOT run, so nothing changed. Retry it.`,
+              `(no time left of its ${(opts.maxWaitMs / 1000).toFixed(1)}s budget) and was NOT run, so nothing changed. Retry it.`,
           );
         }
         const startedAt = Date.now();
@@ -5081,13 +5092,21 @@ function createMutationQueue(onStuck: (label: string, heldMs: number) => void): 
 }
 // ---- grip:mutation-queue end ----
 
-const MAX_MUTATION_HOLD_MS = 125_000;
 // commit_undo / trigger_undo: no undo bracket (they ARE the undo controls), but
-// they queue behind in-progress writes.
+// they queue behind in-progress writes. Mirrored by UNDO_CONTROL_METHODS in
+// src/bridge/src/methods.ts (the bridge's write lane); keep both in step.
 const UNDO_CONTROL_METHODS = new Set<string>(['commit_undo', 'trigger_undo']);
 
-// How long the bridge waits for this call (mirrors ws-server.ts defaults). A
-// bridge may send `timeoutMs` on the request frame itself; that wins.
+// ---- grip:request-budget begin (self-contained: src/bridge/test/serial-writes.mjs evaluates this block from code.js) ----
+const MAX_MUTATION_HOLD_MS = 125_000;
+// Transport allowance between the bridge starting a call's timer and the frame
+// reaching this handler.
+const QUEUE_DEADLINE_MARGIN_MS = 250;
+
+// How long the bridge waits for this call, counted from when it sent it. The
+// bridge puts it on the request frame as `timeoutMs` (ui.html forwards it); that
+// wins, so env overrides on the bridge apply here too. The table below mirrors
+// ws-server.ts defaults for a bridge that does not send it.
 function requestBudgetMs(msg: any): number {
   if (typeof msg?.timeoutMs === 'number' && msg.timeoutMs > 0) return msg.timeoutMs;
   const p = msg?.params ?? {};
@@ -5097,6 +5116,18 @@ function requestBudgetMs(msg: any): number {
   if (msg?.method === 'map_nodes') return 60_000;
   return 10_000;
 }
+
+// Mutation-queue options for one request: skip it once its budget is used up
+// (less the transport margin, so it is never started just after the bridge gave
+// up); release a call that never settles after budget + 5s.
+function mutationQueueOpts(msg: any): MutationQueueOpts {
+  const budget = requestBudgetMs(msg);
+  return {
+    maxWaitMs: budget - Math.min(QUEUE_DEADLINE_MARGIN_MS, budget / 10),
+    holdMs: Math.min(budget + 5_000, MAX_MUTATION_HOLD_MS),
+  };
+}
+// ---- grip:request-budget end ----
 
 const mutationQueue = createMutationQueue((label, heldMs) => {
   console.warn(
@@ -5147,12 +5178,7 @@ figma.ui.onmessage = async (msg: ToolRequest | any) => {
   try {
     let result: unknown;
     if (serialize) {
-      const budget = requestBudgetMs(msg);
-      result = await mutationQueue.run(
-        String(msg.method),
-        { maxWaitMs: budget, holdMs: Math.min(budget + 5_000, MAX_MUTATION_HOLD_MS) },
-        run,
-      );
+      result = await mutationQueue.run(String(msg.method), mutationQueueOpts(msg), run);
     } else {
       result = await run();
     }
