@@ -4880,7 +4880,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.9.2';
+const PLUGIN_VERSION = '0.9.3';
 
 // The oldest bridge this plugin works with. Sent in `hello` (ui.html forwards the
 // full hello). Informational for now: a bridge that sees minBridge > its own

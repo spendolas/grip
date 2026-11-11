@@ -20,7 +20,7 @@ import { BRIDGE_VERSION } from './types.js';
 import {
   getUpdateState, updatesDisabled, checkForUpdate, installAndScheduleRestart, updateNoticeText,
   updateInstructionsParagraph, updateSignal, pluginInfos, claimNotice, bridgeStaleReason, UpdateError,
-  helpNotices, pluginsBehind, findPluginCopies,
+  helpNotices, pluginsBehind, findPluginCopies, copyNeedsWork,
   type UpdateState, type PluginInfo,
 } from './update.js';
 
@@ -790,7 +790,7 @@ function updateSummary(s: UpdateState | null = getUpdateState(), plugins: Plugin
   const bridgeNotice = notices.find((n) => n.kind === 'bridge');
   const found = behind.length ? findPluginCopies().copies : [];
   const refreshable = found.filter((c) => !c.skip && c.behind).map((c) => c.dir);
-  const needsYou = found.filter((c) => c.skip).map((c) => ({ dir: c.dir, reason: c.skip }));
+  const needsYou = found.filter((c) => c.skip && copyNeedsWork(c)).map((c) => ({ dir: c.dir, reason: c.skip }));
   const copyFacts = refreshable.length || needsYou.length ? { refreshable, needsYou } : null;
   return {
     current: BRIDGE_VERSION,

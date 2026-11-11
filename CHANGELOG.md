@@ -2,6 +2,12 @@
 
 Newest first. Each `## <version>` heading is the exact version number; the GitHub Release for that version uses its section as the release notes. The history starts at 0.6.0.
 
+## 0.9.3
+
+**Fixes a wrong hint when your imported plugin is already up to date.**
+
+- If the Grip plugin you imported (even a git clone of yours) is already current but another Figma window still runs an older plugin, Grip no longer tells your agent to "git pull and rebuild" a folder that is already up to date. It now shows that window the "Reopen the plugin" message, which is what is actually left to do. Right after Grip refreshes an imported plugin it stays quiet for a minute, because that plugin reloads itself.
+
 ## 0.9.2
 
 **Grip now tells you inside Figma when it has updated, and what to do next.**

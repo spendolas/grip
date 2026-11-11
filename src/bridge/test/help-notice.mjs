@@ -109,20 +109,29 @@ const health = (c) => c.client.callTool({ name: 'grip_health', arguments: {} });
   // refreshable copy: the strip handles it, no agent notice
   let w = world(); let picked = join(w.root, 'picked'); mkPlugin(picked, '0.8.0'); w.write([picked]);
   assert.deepStrictEqual(U.helpNotices(behind), [], 'a refreshable copy needs no agent');
-  // after the refresh the window is still behind until the dev plugin reloads itself: still nothing to ask
+  // right after the refresh the dev window is about to hot-swap itself: nothing to say for a minute
   U.syncPluginCopies();
-  assert.deepStrictEqual(U.helpNotices(behind), [], 'dev plugins hot swap: nothing to do');
+  assert.deepStrictEqual(U.helpNotices(behind), [], 'dev plugins hot swap: nothing to do right after a refresh');
+  U.resetUpdateState();   // (clears the grace) a window that STILL runs the old code later: reopening is what is left
+  assert.match(U.helpNotices(behind)[0].text, /most likely runs the Figma Community plugin \(or has not been reloaded\)/);
   // Figma's list is readable and has no copy of Grip: a Community plugin, Figma updates it
   w = world([]);
   const [cn] = U.helpNotices(behind);
   assert.strictEqual(cn.kind, 'plugin', 'Community plugin: only reopening helps, so the agent can say so');
-  assert.match(cn.text, /most likely came from Figma Community/);
+  assert.match(cn.text, /most likely runs the Figma Community plugin/);
   assert.match(cn.text, /close the Grip plugin and open it again/);
   assert.match(cn.text, /not published the newer version yet/, 'hedged: the review may not be done');
-  assert.match(cn.text, /Grip already showed a notice inside Figma/);
-  // only a git checkout: the bridge will not write there
+  assert.match(cn.text, /Grip also shows a notice inside Figma/);
+  assert.ok(!/git pull/.test(cn.text), 'nothing to pull');
+  // a git checkout that is ALREADY current (your own clone): nothing to pull, reopening is what is left
+  let n;
+  w = world(); const cur = join(w.root, 'cur'); mkPlugin(cur, '0.9.0'); mkdirSync(join(cur, '.git')); w.write([cur]);
+  [n] = U.helpNotices(behind);
+  assert.match(n.text, /most likely runs the Figma Community plugin \(or has not been reloaded\)/);
+  assert.ok(!/git pull/.test(n.text) && !n.text.includes(cur), 'a current checkout is not blamed');
+  // only a git checkout that is BEHIND: the bridge will not write there
   w = world(); const clone = join(w.root, 'clone'); mkPlugin(clone, '0.8.0'); mkdirSync(join(clone, '.git')); w.write([clone]);
-  let [n] = U.helpNotices(behind);
+  [n] = U.helpNotices(behind);
   assert.strictEqual(n.kind, 'plugin');
   assert.match(n.text, /"Sombra" runs 0\.8\.0/);
   assert.ok(n.text.includes(clone) && /git pull and npm run build/.test(n.text));
@@ -161,11 +170,17 @@ const health = (c) => c.client.callTool({ name: 'grip_health', arguments: {} });
   off = U.wireUpdateToBridge(b);
   assert.strictEqual(toasts.length, 0, 'throttled across restarts');
   off();
-  // an imported dev copy exists (even a git checkout): a dev plugin hot-swaps, no toast
+  // a git checkout that is already CURRENT (your own clone) and a window still on the old plugin: reopening is what is left, so it gets the toast
+  const wc = world(); const curDir = join(wc.root, 'cur'); mkPlugin(curDir, '0.9.0'); mkdirSync(join(curDir, '.git')); wc.write([curDir]);
+  ({ b, toasts } = mkBridge(plugins));
+  off = U.wireUpdateToBridge(b);
+  assert.deepStrictEqual(toasts.map((t) => t[0]), ['old'], 'a current checkout does not hold the toast back');
+  off();
+  // an imported copy that is still BEHIND (a refresh or a git pull comes first): no toast
   const w = world(); const clone = join(w.root, 'clone'); mkPlugin(clone, '0.8.0'); mkdirSync(join(clone, '.git')); w.write([clone]);
   ({ b, toasts } = mkBridge(plugins));
   off = U.wireUpdateToBridge(b);
-  assert.strictEqual(toasts.length, 0, 'dev copy: no toast');
+  assert.strictEqual(toasts.length, 0, 'a copy still behind: no toast');
   off();
   // checks off: silent
   world([]); process.env.GRIP_NO_UPDATE_CHECK = '1';

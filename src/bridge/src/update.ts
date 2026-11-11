@@ -559,6 +559,11 @@ function scanPluginCopies(settingsPath: string | null, home: string): PluginCopi
   return { known: true, copies };
 }
 
+// Right after a refresh, a dev window that still runs the old code is about to hot-swap: no notice meanwhile.
+let lastSyncAt = 0;
+const SYNC_GRACE_MS = 60_000;
+function recentlySynced(): boolean { return lastSyncAt > 0 && Date.now() - lastSyncAt < SYNC_GRACE_MS; }
+
 export interface CopySyncResult { updated: string[]; skipped: Array<{ dir: string; reason: CopySkip }> }
 
 // Refresh every imported copy that is behind, from the verified files in
@@ -579,6 +584,7 @@ export function syncPluginCopies(): CopySyncResult {
       // manifest last: a half-written folder keeps its old, matching manifest
       for (const [name, buf] of [...bufs].sort((a, b) => (a[0] === 'manifest.json' ? 1 : 0) - (b[0] === 'manifest.json' ? 1 : 0))) atomicWrite(join(c.dir, name), buf);
       out.updated.push(c.dir);
+      lastSyncAt = Date.now();
       logErr(`update: refreshed the Grip plugin copy in ${c.dir} (${c.version} -> ${installed})`);
     } catch (err) {
       out.skipped.push({ dir: c.dir, reason: 'write_failed' });
@@ -638,6 +644,10 @@ export function pluginsBehind(plugins: PluginInfo[] | null | undefined): PluginB
   return out;
 }
 
+// An imported copy that is still behind (or whose version cannot be read): somebody has to update it.
+// A copy that is already current needs nothing, whatever it is.
+export function copyNeedsWork(c: PluginCopy): boolean { return c.behind || (c.skip !== undefined && c.version === null); }
+
 export interface HelpNotice { kind: 'plugin' | 'bridge'; key: string; text: string }
 
 const SKIP_WHY: Record<CopySkip, string> = {
@@ -650,14 +660,14 @@ const SKIP_WHY: Record<CopySkip, string> = {
 function pluginFolder(): string { return join(gripHome(), 'figma-plugin'); }
 
 // A plugin window is behind and the bridge cannot refresh it: tell the agent what is left.
-export function pluginHelpText(behind: PluginBehind[], blocked: PluginCopy[], community = false): string {
+export function pluginHelpText(behind: PluginBehind[], blocked: PluginCopy[], known = false): string {
   const manifest = join(pluginFolder(), 'manifest.json');
   const list = behind.map((b) => `"${b.window}" runs ${b.running}`).join('; ');
   const head = `The Grip plugin in Figma is behind the copy installed next to this bridge (${behind[0].installed}): ${list}. It works, but it is missing fixes. ` +
     `Mention it to the user once and offer to help; do not change anything on your own. `;
-  if (community) {
-    return head + `Figma lists no imported copy of Grip, so this one most likely came from Figma Community: Figma loads the newest published version ` +
-      `the next time the plugin is opened, and a running plugin can never swap its own code. Grip already showed a notice inside Figma. ` +
+  if (known && !blocked.length) {
+    return head + `No imported copy of Grip that Figma lists is behind, so this window most likely runs the Figma Community plugin (or has not been reloaded): ` +
+      `Figma loads the newest published version the next time the plugin is opened, and a running plugin can never swap its own code. Grip also shows a notice inside Figma. ` +
       `If the user asks: close the Grip plugin and open it again; if Figma has not published the newer version yet (it reviews updates), there is nothing to do.`;
   }
   if (blocked.length) {
@@ -686,12 +696,11 @@ export function helpNotices(plugins: PluginInfo[] | null | undefined): HelpNotic
   if (behind.length) {
     const c = findPluginCopies();
     const refreshable = c.copies.some((x) => !x.skip && x.behind);   // the strip offers it: the user clicks, no agent
-    const blocked = c.copies.filter((x) => !!x.skip);
-    // Figma's list readable + no imported copy = most likely a Community plugin: only reopening loads the newer
-    // version Figma has published. Copies all current = a dev plugin, which hot-swaps: nothing to say.
-    const community = c.known && c.copies.length === 0;
-    if (!refreshable && (blocked.length || !c.known || community)) {
-      out.push({ kind: 'plugin', key: `plugin-behind:${behind[0].installed}`, text: pluginHelpText(behind, blocked, community) });
+    const blocked = c.copies.filter((x) => !!x.skip && copyNeedsWork(x));   // a copy the bridge will not write AND that is still behind
+    // Nothing to refresh and nothing blocked: reopening is what is left (a Community plugin, or a window not yet reloaded).
+    // Right after a refresh a dev window is about to hot-swap, so say nothing for a minute.
+    if (!refreshable && !recentlySynced()) {
+      out.push({ kind: 'plugin', key: `plugin-behind:${behind[0].installed}`, text: pluginHelpText(behind, blocked, c.known) });
     }
   }
   const stale = bridgeStaleReason(plugins);
@@ -758,7 +767,7 @@ export function onUpdateState(fn: (s: UpdateState) => void): () => void {
   listeners.add(fn);
   return () => { listeners.delete(fn); };
 }
-export function resetUpdateState(): void { state = null; noticeMemo.clear(); }
+export function resetUpdateState(): void { state = null; noticeMemo.clear(); lastSyncAt = 0; }
 
 function setState(next: UpdateState) {
   const changed = !state || state.available !== next.available || state.latest !== next.latest
@@ -1321,7 +1330,8 @@ export function wireUpdateToBridge(bridge: PluginBridge): () => void {
     if (!live.length) return;
     const marker = readUpdateMarker();
     const installed = updatesDisabled() ? null : installedPluginVersion();
-    const dev = installed ? (() => { const c = findPluginCopies(); return c.known && c.copies.length > 0; })() : true;
+    // No reopen nudge while an imported copy still needs updating (refresh / git pull come first) or was just refreshed (its window hot-swaps).
+    const hold = installed ? findPluginCopies().copies.some(copyNeedsWork) || recentlySynced() : true;
     for (const p of live) {
       const parts: string[] = [];
       const fileKey = `${p.fileKey ?? ''}|${p.fileName ?? ''}`;
@@ -1329,7 +1339,7 @@ export function wireUpdateToBridge(bridge: PluginBridge): () => void {
         confirmed.add(fileKey);
         parts.push(`Grip updated to ${marker.version}.`);
       }
-      if (installed && !dev && isSemver(p.pluginVersion) && compareSemver(p.pluginVersion, installed) < 0) {
+      if (installed && !hold && isSemver(p.pluginVersion) && compareSemver(p.pluginVersion, installed) < 0) {
         const id = `${p.fileName ?? ''}|${p.pluginVersion}|${installed}`;
         if (!toasted.has(id)) {
           toasted.add(id);
