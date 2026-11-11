@@ -23,7 +23,7 @@ const MUST_FLAG = {
   'github-token': ['token=gh' + 'p_' + A(36), 'gh' + 'o_' + A(30, 'B'), 'gh' + 's_' + A(24, '1')],
   'github-pat': ['github' + '_pat_' + A(30, 'Z') + '_' + A(20)],
   'aws-access-key': ['AK' + 'IA' + 'ABCDEFGHIJKLMNOP'],
-  'pem-block': ['-----BE' + 'GIN RSA PRIVATE KEY-----', '-----BE' + 'GIN OPENSSH PRIVATE KEY-----', '-----BE' + 'GIN CERTIFICATE-----'],
+  'pem-block': ['-----BE' + 'GIN RSA PRIVATE KEY-----', '-----BE' + 'GIN OPENSSH PRIVATE KEY-----', '-----BE' + 'GIN CERTIFICATE-----', '-----BE' + 'GIN PRIVATE KEY-----', '-----BE' + 'GIN EC PRIVATE KEY-----'],
   'anthropic-key': ['sk-' + 'ant-api03-' + A(40)],
   'openai-key': ['sk-' + A(48, 'x')],
   'npm-token': ['npm' + '_' + A(36, 'q')],
@@ -63,7 +63,7 @@ test('does not flag innocuous text', () => {
 });
 
 test('the allowlist is empty by default, and an entry skips only its own line', () => {
-  assert.deepEqual(ALLOWLIST, [], 'document each entry in bundle-hygiene.mjs if one is ever added');
+  assert.deepEqual(ALLOWLIST, ['-----BEGIN PUBLIC KEY-----'], 'document each entry in bundle-hygiene.mjs if one is ever added');
   const text = 'a /Users/example/docs sample\nb /Users/jane/x';
   assert.equal(findProblems(text, ['/Users/example/docs']).length, 1);
   assert.equal(findProblems(text, ['/Users/example/docs'])[0].line, 2);
@@ -89,4 +89,12 @@ test('the real built bundles and notices are clean (run `npm run build` first; `
   const r = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /4 file\(s\) clean/);
+});
+
+test('the pinned release PUBLIC key passes, every private key block still fails', () => {
+  const pub = '-----BEGIN PUBLIC KEY-----\\nMCowBQYDK2VwAyEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\\n-----END PUBLIC KEY-----\\n';
+  assert.deepEqual(ids(`export const KEYS = [\`${pub}\`];`), [], 'a public key is not a secret');
+  for (const kind of ['PRIVATE KEY', 'EC PRIVATE KEY', 'RSA PRIVATE KEY', 'ENCRYPTED PRIVATE KEY']) {
+    assert.deepEqual(ids(`x = "-----BE${'GIN'} ${kind}-----"`), ['pem-block'], `${kind} flagged`);
+  }
 });

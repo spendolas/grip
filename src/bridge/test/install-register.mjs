@@ -2,7 +2,7 @@
 // files but writes NO agent config, and --print-config prints details and installs nothing.
 import assert from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,5 +35,13 @@ const fresh = () => ({ home: mkdtempSync(join(tmpdir(), 'grip-reg-home-')), gh: 
   assert.ok(!existsSync(join(home, '.claude.json')), 'no ~/.claude.json written');
   assert.match(r.stdout, /Not registering \(--no-register\)/);
   assert.match(r.stdout, /Register Grip in your MCP client/);
+  // a fresh install makes pairing required and opens the installer window
+  assert.match(r.stdout, /pairing: required, window open for 5 minutes/);
+  const pj = JSON.parse(readFileSync(join(gh, 'pairing.json'), 'utf8'));
+  assert.strictEqual(pj.required, true); assert.deepStrictEqual(pj.tokens, []);
+  assert.ok(JSON.parse(readFileSync(join(gh, 'pairing-window.json'), 'utf8')).until > Date.now() + 250_000, 'window is open for ~5 minutes');
+  // running the installer again leaves an existing pairing setup alone
+  const again = run(['--no-register'], home, gh);
+  assert.match(again.stdout, /pairing: already set up/);
 }
 console.log('install-register.mjs OK');

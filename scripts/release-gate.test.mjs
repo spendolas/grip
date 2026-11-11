@@ -46,8 +46,8 @@ test('parseVersion / compareVersions', () => {
 });
 
 test('required assets match what the packager and updater use', () => {
-  assert.equal(REQUIRED_ASSETS.length, 8);
-  for (const n of ['grip-bridge.mjs', 'grip-plugin-code.js', 'grip-plugin-ui.html', 'grip-plugin-manifest.json', 'grip-install.zip', 'compat.json', 'THIRD-PARTY-NOTICES.txt', 'SHA256SUMS.txt']) {
+  assert.equal(REQUIRED_ASSETS.length, 9);
+  for (const n of ['grip-bridge.mjs', 'grip-plugin-code.js', 'grip-plugin-ui.html', 'grip-plugin-manifest.json', 'grip-install.zip', 'compat.json', 'THIRD-PARTY-NOTICES.txt', 'SHA256SUMS.txt', 'SHA256SUMS.txt.sig']) {
     assert.ok(REQUIRED_ASSETS.includes(n), n);
   }
 });
@@ -63,6 +63,15 @@ test('extractNotes returns the exact-version section only', () => {
   assert.equal(extractNotes('## 0.8.0\r\n\r\n**A.**\r\n\r\n- b\r\n', '0.8.0'), '**A.**\n\n- b\n', 'CRLF');
   assert.equal(extractNotes('## 1.0.0\n### Sub\n- x\n## 0.9.0\n', '1.0.0'), '### Sub\n- x\n', 'sub-headings stay inside');
   assert.equal(extractNotes('## 0.1.0\n', '0.1.0'), '\n', 'empty section yields blank');
+});
+
+test('a release without its signature (SHA256SUMS.txt.sig) is not complete: recover, like any missing asset', () => {
+  const unsigned = full();
+  unsigned.assets = unsigned.assets.filter((a) => a.name !== 'SHA256SUMS.txt.sig');
+  assert.equal(isCompleteRelease(unsigned), false);
+  assert.equal(decide({ version: '0.8.0', tags: ['v0.8.0'], release: unsigned, changelog: CHANGELOG }).action, 'recover');
+  assert.equal(decide({ version: '0.8.0', tags: [], release: full(true), changelog: CHANGELOG }).action, 'recover');
+  assert.equal(decide({ version: '0.8.0', tags: ['v0.8.0'], release: full(), changelog: CHANGELOG }).action, 'skip');
 });
 
 test('a release without compat.json is not complete (it would never be offered)', () => {
@@ -92,7 +101,7 @@ test('isCompleteRelease', () => {
   assert.equal(isCompleteRelease(full()), true);
   const missing = full();
   missing.assets.pop();
-  assert.equal(isCompleteRelease(missing), false, 'missing SHA256SUMS.txt');
+  assert.equal(isCompleteRelease(missing), false, 'missing the last required asset');
   assert.equal(isCompleteRelease({ isDraft: false }), false, 'no assets');
 });
 

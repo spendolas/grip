@@ -2,7 +2,7 @@ import { createServer, type Server as HttpNetServer, type IncomingMessage, type 
 import { randomUUID as uuid } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createSession, destroySession, type LiveSession } from './mcp-server.js';
-import type { PluginBridge } from './ws-server.js';
+import { clip, type PluginBridge } from './ws-server.js';
 
 // Direct HTTP MCP transport for the daemon. Clients (Claude Code, desktop
 // agent apps, any MCP client) connect to http://127.0.0.1:<port>/mcp by URL — NO per-process shim,
@@ -44,6 +44,10 @@ interface PendingSession {
 // web origin. Native MCP clients send no Origin.
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 
+// Env overrides exist for tests.
+const MAX_HTTP_SESSIONS = Number(process.env.GRIP_MAX_HTTP_SESSIONS ?? 64);
+const MAX_HTTP_PENDING = Number(process.env.GRIP_MAX_HTTP_PENDING ?? 16);
+
 export function hostAllowed(host: string | undefined): boolean {
   if (typeof host !== 'string' || host === '') return false;
   try { return LOOPBACK_HOSTS.has(new URL(`http://${host}`).hostname); } catch { return false; }
@@ -62,6 +66,7 @@ export class HttpServer {
   private sessions = new Map<string, HttpSession>();
   private pending = new Set<PendingSession>();
   private sweepTimer?: NodeJS.Timeout;
+  private refusedAt = 0;
 
   constructor(private port: number, private bridge: PluginBridge) {
     this.server = createServer((req, res) => this.onRequest(req, res));
@@ -72,7 +77,11 @@ export class HttpServer {
 
   private onRequest(req: IncomingMessage, res: ServerResponse) {
     if (!hostAllowed(req.headers.host) || !originAllowed(req.headers.origin)) {
-      process.stderr.write(`[grip] http request refused (host ${req.headers.host}, origin ${req.headers.origin})\n`);
+      const now = Date.now();
+      if (now - this.refusedAt >= 1000) {
+        this.refusedAt = now;
+        process.stderr.write(`[grip] http request refused (host ${clip(req.headers.host, 80)}, origin ${clip(req.headers.origin, 100)})\n`);
+      }
       res.writeHead(403, { 'content-type': 'text/plain' }).end('forbidden\n');
       return;
     }
@@ -105,6 +114,13 @@ export class HttpServer {
       if (!entry) { res.writeHead(404).end('unknown mcp-session-id'); return; }
       entry.lastActivity = Date.now();
       return entry.transport.handleRequest(req, res);
+    }
+    // Bound what an unauthenticated client can make the daemon hold: every initialize
+    // creates a LiveSession, and nothing here can tell a real agent from a loop.
+    if (this.sessions.size >= MAX_HTTP_SESSIONS || this.pending.size >= MAX_HTTP_PENDING) {
+      process.stderr.write(`[grip] http session refused: ${this.sessions.size} sessions, ${this.pending.size} pending\n`);
+      res.writeHead(503, { 'content-type': 'text/plain', 'retry-after': '10' }).end('too many sessions\n');
+      return;
     }
     // New session. createSession is transport-agnostic — identical to the
     // IPC/stdio path. The transport clobbers Transport.onclose in

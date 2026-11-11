@@ -24,6 +24,7 @@ import { homedir, platform, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detectInstallSource, gripHome, stopRunningDaemon, writeInstallRecord } from './update.js';
+import { INSTALL_WINDOW_MS, prepareInstall } from './pairing.js';
 import { BRIDGE_VERSION } from './types.js';
 
 const args = new Set(process.argv.slice(2));
@@ -120,6 +121,17 @@ function installPlugin(): boolean {
 function replaceRunningDaemon() {
   const r = stopRunningDaemon();
   if (r.stopped) ok(r.note); else log(`  · ${r.note}`);
+}
+
+// A fresh install is set up with pairing REQUIRED and a window open for the next few minutes
+// (pairing.ts): no open-ended trust on first use. An existing pairing setup is left alone.
+function preparePairing() {
+  try {
+    const r = prepareInstall(GRIP_HOME);
+    if (r === 'prepared') ok(`pairing: required, window open for ${Math.round(INSTALL_WINDOW_MS / 60000)} minutes. Open the Grip plugin in Figma now; it pairs itself.`);
+    else if (r === 'kept') log('  · pairing: already set up, left as it was');
+    else log('  · pairing: switched off (GRIP_PAIRING=off)');
+  } catch (err) { warn(`could not set up pairing (${(err as Error).message}); run \`node ${ENTRY} pair\` before opening the plugin`); }
 }
 
 function hasClaudeCli(): boolean {
@@ -311,6 +323,7 @@ log();
 installBridge();
 const pluginInstalled = installPlugin();
 registerMcp();
+preparePairing();
 replaceRunningDaemon();
 if (wantHttp) installPersistentDaemon();
 log();
@@ -328,8 +341,9 @@ if (pluginInstalled) {
   log('  2. In Figma: Plugins → Development → Import plugin from manifest…');
   log('     and choose the \x1b[1mfigma-plugin\x1b[0m folder of your Grip checkout (after `npm run build` there).');
 }
-log('  3. Run the plugin. Ask your agent to read your selection —');
-log('     the strip turns \x1b[32mgreen\x1b[0m.');
+log(`  3. Run the plugin within ${Math.round(INSTALL_WINDOW_MS / 60000)} minutes: it pairs itself with the bridge on first contact.`);
+log('     Ask your agent to read your selection; the strip turns \x1b[32mgreen\x1b[0m.');
+log(`     Later (another Figma profile, or the window closed): node ${ENTRY} pair`);
 log();
 if (INSTALL_TYPE === 'clone') {
   log('Updating later: this is a developer install. Run `git pull && npm run build && node bridge/install.mjs`');

@@ -1151,6 +1151,11 @@ function inspectScript(code: string): string | null {
       "Use the injected `findNodes({types:[...], scope, name})` (backed by findAllWithCriteria — typed and far faster), or `await forEachNode({types:[...]}, fn)` to iterate in yielding chunks. Pass a `scope` nodeId to bound the search to a subtree."
     );
   }
+  // The pairing secret (see PAIR_STORAGE_KEY) is not for scripts. A nudge like the others, not a
+  // boundary: a script can still build the key name at runtime.
+  if (/grip\.pairing/.test(code)) {
+    return "the plugin's pairing secret in clientStorage is reserved for the plugin itself and is not readable from scripts.";
+  }
   return null;
 }
 
@@ -2358,6 +2363,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       return { id: v.id, name: v.name, resolvedType: v.resolvedType, key: v.key };
     }
     case 'create_image_from_url': {
+      assertWebUrl(params.url, 'create_image_from_url');
       const img = await figma.createImageAsync(String(params.url));
       return { imageHash: img.hash };
     }
@@ -2743,18 +2749,22 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       return { success: true };
     }
     case 'open_external_url': {
+      assertWebUrl(params.url, 'open_external_url');
       figma.openExternal(String(params.url));
       return { success: true };
     }
     case 'client_storage_get': {
+      if (String(params.key).startsWith('grip.')) throw new Error("client_storage: keys starting with 'grip.' are reserved for the plugin itself");
       const v = await figma.clientStorage.getAsync(String(params.key));
       return { key: params.key, value: v ?? null };
     }
     case 'client_storage_set': {
+      if (String(params.key).startsWith('grip.')) throw new Error("client_storage: keys starting with 'grip.' are reserved for the plugin itself");
       await figma.clientStorage.setAsync(String(params.key), params.value);
       return { success: true };
     }
     case 'client_storage_delete': {
+      if (String(params.key).startsWith('grip.')) throw new Error("client_storage: keys starting with 'grip.' are reserved for the plugin itself");
       await figma.clientStorage.deleteAsync(String(params.key));
       return { success: true };
     }
@@ -2821,6 +2831,7 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       return { id: v.id, type: v.type };
     }
     case 'create_link_preview': {
+      assertWebUrl(params.url, 'create_link_preview');
       const lp = await (figma as any).createLinkPreviewAsync(String(params.url));
       let parent: BaseNode & ChildrenMixin = figma.currentPage;
       if (params.parentId) {
@@ -5046,7 +5057,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.9.5';
+const PLUGIN_VERSION = '0.9.6';
 
 // The oldest bridge this plugin works with. Sent in `hello` (ui.html forwards the
 // full hello). Informational for now: a bridge that sees minBridge > its own
@@ -5064,7 +5075,7 @@ const MIN_BRIDGE_VERSION = '0.8.0';
 // the mutation queue below). 'keepPage' = set_selection/scroll_to accept
 // keepPage and get_selection/find_with_criteria/create_node accept pageId.
 // 'docChangeOrigins' = documentchange events carry origins {LOCAL, REMOTE}.
-const PLUGIN_CAPABILITIES = ['nodeBudget', 'deepLink', 'fileUid', 'serialMutations', 'keepPage', 'docChangeOrigins'];
+const PLUGIN_CAPABILITIES = ['nodeBudget', 'deepLink', 'fileUid', 'serialMutations', 'keepPage', 'docChangeOrigins', 'pairing'];
 
 // Per-file identity. figma.fileKey is null for local/unpublished files (and in
 // some editors), and the fallback figma.root.id is the constant "0:0" in EVERY
@@ -5112,6 +5123,15 @@ function fileUid(): string | null {
     _fileUid = null;
   }
   return _fileUid;
+}
+
+const PAIR_STORAGE_KEY = 'grip.pairing';
+
+// Only http(s) URLs may be opened or fetched on an agent's say-so. The bridge judges the HOST
+// (local and private addresses, IPv6 forms) before it forwards the call: the plugin sandbox has
+// no URL parser, and a hand-rolled host check here would only look stronger than it is.
+function assertWebUrl(raw: unknown, what: string): void {
+  if (!/^https?:\/\/[^\s/?#@]+(?:[/?#]|$)/i.test(String(raw ?? ''))) throw new Error(`${what}: only http(s) URLs without credentials are allowed`);
 }
 
 function sendHello() {
@@ -5305,6 +5325,25 @@ const mutationQueue = createMutationQueue((label, heldMs) => {
 figma.ui.onmessage = async (msg: ToolRequest | any) => {
   if (msg && msg.kind === 'welcome') {
     sendHello();
+    return;
+  }
+  // Pairing token (bridge/src/pairing.ts): the UI keeps no storage of its own, so the shared
+  // secret lives in clientStorage. The `grip.` prefix is refused by the client_storage tool.
+  if (msg && msg.kind === 'pairGet') {
+    let token: unknown = null;
+    try { token = (await figma.clientStorage.getAsync(PAIR_STORAGE_KEY)) ?? null; } catch { token = null; }
+    figma.ui.postMessage({ kind: 'pairToken', token });
+    return;
+  }
+  if (msg && msg.kind === 'pairSet') {
+    const t = msg.token;
+    if (t && typeof t.id === 'string' && typeof t.secret === 'string') {
+      try { await figma.clientStorage.setAsync(PAIR_STORAGE_KEY, { id: t.id, secret: t.secret }); } catch { /* retried on the next connect */ }
+    }
+    return;
+  }
+  if (msg && msg.kind === 'pairClear') {
+    try { await figma.clientStorage.deleteAsync(PAIR_STORAGE_KEY); } catch { /* none */ }
     return;
   }
   // The strip is clickable while disconnected. The plugin alone cannot start

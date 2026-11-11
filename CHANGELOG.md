@@ -2,6 +2,17 @@
 
 Newest first. Each `## <version>` heading is the exact version number; the GitHub Release for that version uses its section as the release notes. The history starts at 0.6.0.
 
+## 0.9.6
+
+**Only your Figma plugin can talk to the bridge, and files an agent reads or writes are kept to safe places. Update the plugin too.**
+
+- **Pairing.** The plugin and the bridge pair once and share a secret. A fresh install sets pairing to required and opens a 5 minute window, so you open the Grip plugin in Figma straight after installing and it pairs itself; nobody else can pair, not even a web page that connects first. An install that predates this keeps working as before: the first updated plugin that connects pairs itself, until you run `node ~/.grip/grip-bridge.mjs pair --require`. From then on the bridge refuses any connection that cannot prove it has the secret, and the plugin refuses a bridge that cannot prove it. Another plugin install (another Figma profile) is paired with `node ~/.grip/grip-bridge.mjs pair`, which opens a two minute window. `pair --status`, `--reset`, `--close`, `--require` and `--auto` are there too. If the plugin is refused right after another client paired, its tooltip says so and how to start over, and `grip_health` shows when and from where the last pairing happened. `GRIP_PAIRING=off` keeps the old open behaviour. On a fresh install, a plugin that has not paired (or is too old to pair) is turned away until it does; on an older install nothing changes until the first plugin pairs, and after that windows still running an older plugin are turned away and told to update it.
+- **Signed releases.** Updates are now checked against a signature that is made when a release is built, not only against the checksums that sit next to the files. A release without a valid signature is not offered and cannot be installed, not even with `--force`. The setting that swaps in another signing key exists for tests only and is ignored unless `GRIP_TEST=1` is set.
+- **More robust against bad input.** Unexpected data sent to the bridge is now ignored instead of being able to stop it, and the bridge carries on after unexpected errors.
+- **Limits.** The plugin port and the local MCP address cap how many connections and sessions they hold, drop a connection that never says hello, cut over-long or odd file and page names (which also stops forged log lines), and the log is now owner-only and rotates at 10 MB. The plugin connection is also harder to crowd out or overload, and refused connections are logged briefly and at most once a second.
+- **Safer file and web tools.** `upload_image_from_path` only reads real image files inside your home or temp folder, never through hidden folders such as `~/.ssh` or `~/Library`. `export_node` with a `path` writes only inside those folders, only with the format's own extension, and replaces an existing file only with `overwrite: true`. `open_external_url`, `create_image_from_url` and `create_link_preview` take only public http(s) URLs (local, private and IPv6-mapped addresses are refused). `GRIP_ALLOWED_DIRS` and `GRIP_ALLOW_LOCAL_URLS` widen these if you need to. The agent is also told that text inside a Figma file is data, not instructions.
+- The plugin changes in this version (pairing), so re-import or update it too.
+
 ## 0.9.5
 
 **Security fix: Grip's plugin socket is no longer reachable from the network. Update now.**

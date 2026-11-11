@@ -8,6 +8,7 @@ import type {
 } from './types.js';
 import { BRIDGE_VERSION } from './types.js';
 import { compareSemver, isSemver } from './update.js';
+import { authProof, newNonce, type PairingStore } from './pairing.js';
 import { isRetrySafe, causesEvents, serializedByPlugin } from './methods.js';
 
 interface Pending {
@@ -132,7 +133,35 @@ interface Session {
   // Key of the last `update` frame sent to this session ('off' until the
   // strip has been told something). Lets us skip duplicate frames.
   updateSent?: string;
+  // Pairing (pairing.ts). `authed`: this socket may say hello and be routed to. It is true
+  // from the start while the bridge does not enforce pairing, else only after a verified
+  // proof or a fresh pairing. `authNonce` is this connection's challenge (empty = the
+  // bridge sent none).
+  authed: boolean;
+  authNonce: string;
+  // The connect URL carried the id of a stored pairing token: this socket queues in the reserved
+  // pool. A claim only picks the pool; trust still comes from the proof.
+  reserved?: boolean;
+  tokenId?: string;
+  connectedAt: number;
 }
+
+// Remote-supplied text (file and page names, versions) ends up in logs and tool results:
+// strip control characters (a newline would forge log lines) and bound the length.
+export function clip(v: unknown, max: number): string {
+  return typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').slice(0, max) : '';
+}
+
+// Unauthenticated-peer limits: a page that opens sockets in a loop must not be able to
+// grow memory without bound. Env overrides exist for tests.
+const MAX_SOCKETS = Number(process.env.GRIP_MAX_SOCKETS ?? 64);
+const MAX_UNHELLOED = Number(process.env.GRIP_MAX_UNHELLOED ?? 16);
+// A real plugin says hello within milliseconds of the welcome (plus one proof round trip).
+const HELLO_DEADLINE_MS = Number(process.env.GRIP_HELLO_DEADLINE_MS ?? 5_000);
+const LEGACY_TOAST_EVERY_MS = 5 * 60_000;
+// A paired plugin announces its token id in the connect URL (?t=<id>, not the secret) and queues in
+// its own pool: a page cannot learn the id, so its socket churn can only exhaust the anonymous pool.
+const MAX_RESERVED = Number(process.env.GRIP_MAX_RESERVED ?? 8);
 
 // Update state pushed to plugin strips (see update.ts / wireUpdateToBridge).
 // `available` is the SIGNAL (update available AND compatible with every
@@ -340,6 +369,9 @@ export class PluginBridge extends EventEmitter {
   // Second listener on the IPv6 loopback (best effort), see the constructor.
   private wss6?: WebSocketServer;
   private sessions = new Map<string, Session>();
+  private pairing?: PairingStore;
+  private refusedLog = { at: 0, suppressed: 0 };
+  private lastLegacyToast = 0;
   private pending = new Map<string, Pending>();
   // Flow control (per plugin sessionId): count of requests sent-and-awaiting,
   // and the FIFO backlog of requests waiting for an in-flight slot.
@@ -373,8 +405,9 @@ export class PluginBridge extends EventEmitter {
   private closedFiles = new Map<string, { uid: string; name: string; at: number }>();
   private static helloCounter = 0;
 
-  constructor(port: number) {
+  constructor(port: number, opts: { pairing?: PairingStore } = {}) {
     super();
+    this.pairing = opts.pairing;
     // 10 MB cap — accommodates large export payloads but bounds OOM risk
     // from a misbehaving peer / runaway run_script result.
     // Loopback only. The plugin has no authentication, so the socket must not be reachable
@@ -384,12 +417,45 @@ export class PluginBridge extends EventEmitter {
     // sends "null" or a figma.com origin; a native client sends none).
     const verifyClient = (info: { origin?: string }, cb: (ok: boolean, code?: number, message?: string) => void): void => {
       if (originAllowedForUpdate(info.origin)) { cb(true); return; }
-      process.stderr.write(`[grip] websocket from origin ${info.origin} refused\n`);
+      this.logRefused(`websocket from origin ${clip(info.origin, 100)} refused`);
       cb(false, 403, 'Forbidden');
     };
     this.wss = new WebSocketServer({ port, host: WS_HOST, maxPayload: 10 * 1024 * 1024, verifyClient });
 
     const onConnection = (ws: WebSocket, req: IncomingMessage): void => {
+      // Bound what an unauthenticated peer can hold open. When the limits are reached the
+      // OLDEST socket that never said hello makes room (a page that opens idle sockets in a
+      // loop must not be able to lock the real plugin out by being first); only when every
+      // socket has said hello is the newcomer refused.
+      //
+      // Two pools. A paired plugin carries the id of its stored token in the connect URL
+      // (?t=<id>); only a client that knows that id (a page cannot) is RESERVED, with its own
+      // small pool, so churn from anonymous sockets can never push it out. Everything else
+      // shares the anonymous pool, where a socket that has proven itself (tokenId) is never a
+      // victim. No rule can tell two anonymous pre-auth sockets apart: whatever is favoured
+      // there, a flooder can game, so the anonymous pool stays an availability residual.
+      const ticket = (() => {
+        try {
+          const t = new URL(req?.url ?? '/', 'http://localhost').searchParams.get('t');
+          return t && /^[0-9a-f]{16}$/.test(t) && this.pairing?.find(t) ? t : null;
+        } catch { return null; }
+      })();
+      const all = [...this.sessions.values()];
+      const silentOf = (reserved: boolean) => all.filter((s) => !!s.reserved === reserved && s.helloAt === 0 && !s.tokenId).sort((a, b) => a.connectedAt - b.connectedAt);
+      const pool = silentOf(!!ticket);
+      const anon = all.filter((s) => !s.reserved).length;
+      const full = ticket ? pool.length >= MAX_RESERVED : pool.length >= MAX_UNHELLOED || anon >= MAX_SOCKETS;
+      if (full) {
+        const victim = pool[0];
+        if (!victim) {
+          this.logRefused(`websocket refused: ${all.length} sockets, all with hello`);
+          try { ws.close(1013, 'too many connections'); } catch {}
+          return;
+        }
+        this.logRefused(`websocket: evicting the oldest ${ticket ? 'reserved ' : ''}socket without hello (${pool.length} waiting, ${all.length} total)`);
+        try { victim.ws.close(1013, 'evicted'); } catch {}
+        this.dropSession(victim.id);
+      }
       const id = uuid();
       const session: Session = {
         id,
@@ -403,11 +469,29 @@ export class PluginBridge extends EventEmitter {
         firstHelloAt: 0,
         helloSeq: 0,
         origin: typeof req?.headers?.origin === 'string' ? req.headers.origin : undefined,
+        authed: !this.pairing?.enforced(),
+        authNonce: this.pairing?.active() ? newNonce() : '',
+        connectedAt: Date.now(),
+        reserved: !!ticket,
       };
       this.sessions.set(id, session);
       // Hand the plugin its session id; plugin replies with a hello
-      // carrying file metadata.
-      ws.send(JSON.stringify({ kind: 'welcome', sessionId: id, bridgeVersion: BRIDGE_VERSION }));
+      // carrying file metadata. With pairing on, the welcome also carries the
+      // challenge (see pairing.ts).
+      ws.send(JSON.stringify({
+        kind: 'welcome', sessionId: id, bridgeVersion: BRIDGE_VERSION,
+        ...(session.authNonce ? { nonce: session.authNonce, pairing: this.pairing?.enforced() ? 'enforced' : 'open' } : {}),
+      }));
+      // A peer that never says hello is not a plugin: do not keep its socket.
+      const helloTimer = setTimeout(() => {
+        const s = this.sessions.get(id);
+        if (s && s.helloAt === 0) {
+          process.stderr.write(`[grip] session ${id.slice(0, 8)} never said hello, closing\n`);
+          try { s.ws.close(4408, 'no hello'); } catch {}
+        }
+      }, HELLO_DEADLINE_MS);
+      helloTimer.unref();
+      ws.once('close', () => clearTimeout(helloTimer));
       process.stderr.write(`[grip] session ${id.slice(0, 8)} opened (${this.sessions.size} total)\n`);
 
       // Heartbeat. Figma Desktop terminates plugin iframes every ~1–3min
@@ -437,7 +521,9 @@ export class PluginBridge extends EventEmitter {
       ws.on('message', (raw) => {
         const s = this.sessions.get(id);
         if (s) s.lastPong = Date.now();
-        this.handleMessage(id, raw.toString());
+        // A malformed frame must never take the daemon down.
+        try { this.handleMessage(id, raw.toString()); }
+        catch (err) { process.stderr.write(`[grip] dropped a frame that failed to handle: ${(err as Error).message}\n`); }
       });
       ws.on('close', () => this.dropSession(id));
       ws.on('error', (err) => {
@@ -1562,6 +1648,22 @@ export class PluginBridge extends EventEmitter {
       return;
     }
 
+    // JSON.parse also yields null, numbers, strings and arrays: only an object is a frame.
+    if (typeof msg !== 'object' || msg === null || Array.isArray(msg)) {
+      process.stderr.write('[grip] dropped a frame that is not a JSON object\n');
+      return;
+    }
+
+    // Pairing handshake and gate (pairing.ts). Nothing but these two frames is looked at
+    // until the connection has proven itself, so an unpaired peer can neither say hello
+    // (be routed to), answer a request, nor inject an event.
+    const frameType = (msg as { type?: unknown }).type;
+    if (frameType === 'pair_request') { this.onPairRequest(sessionId); return; }
+    if (frameType === 'auth') { this.onAuth(sessionId, msg as unknown as Record<string, unknown>); return; }
+    const gate = this.sessions.get(sessionId);
+    if (!gate) return;
+    if (!gate.authed) { this.refuseUnauthed(gate, msg as unknown as Record<string, unknown>); return; }
+
     if ('kind' in msg && msg.kind === 'hello') {
       this.applyHello(sessionId, msg);
       return;
@@ -1647,35 +1749,121 @@ export class PluginBridge extends EventEmitter {
     }
   }
 
+  // Lines about refused or evicted peers are attacker-triggerable, so they are clipped by the
+  // caller and rate-limited here (one per second, with a count of what was skipped): a flood
+  // must not push the real forensic history out of the rotating log.
+  private logRefused(line: string): void {
+    const now = Date.now();
+    if (now - this.refusedLog.at < 1000) { this.refusedLog.suppressed++; return; }
+    const extra = this.refusedLog.suppressed ? ` (+${this.refusedLog.suppressed} similar in the last second)` : '';
+    this.refusedLog = { at: now, suppressed: 0 };
+    process.stderr.write(`[grip] ${line}${extra}\n`);
+  }
+
+  // ---------- pairing (see pairing.ts) ----------
+
+  private onPairRequest(sessionId: string): void {
+    const sess = this.sessions.get(sessionId);
+    const pairing = this.pairing;
+    if (!sess || !pairing?.active() || sess.tokenId) return;
+    if (!pairing.mayGrant()) {
+      const recent = pairing.recentGrant();
+      process.stderr.write(`[grip] pairing: ${sessionId.slice(0, 8)} asked to pair, refused (no pairing window open${recent ? '; another client paired in the last 15 minutes' : ''})\n`);
+      // recentGrant: a plugin that pairs right after install and is refused may have lost a race
+      // with another client; the plugin says so and how to recover.
+      this.sendTo(sessionId, { type: 'pair_denied', reason: 'pairing_required', recentGrant: recent });
+      return;
+    }
+    const tok = pairing.grant(sess.origin);
+    if (!tok) { this.sendTo(sessionId, { type: 'pair_denied', reason: 'save_failed' }); return; }
+    sess.authed = true;
+    sess.tokenId = tok.id;
+    process.stderr.write(`[grip] pairing: ${sessionId.slice(0, 8)} paired (token ${tok.id}, origin ${sess.origin ?? 'none'})\n`);
+    this.sendTo(sessionId, { type: 'paired', tokenId: tok.id, secret: tok.secret });
+    this.dropUnpaired(sessionId);
+  }
+
+  private onAuth(sessionId: string, msg: Record<string, unknown>): void {
+    const sess = this.sessions.get(sessionId);
+    const pairing = this.pairing;
+    if (!sess || !pairing?.active() || sess.authNonce === '') return;
+    const t = pairing.verify(msg.tokenId, sess.authNonce, msg.nonce, msg.proof);
+    if (!t) {
+      process.stderr.write(`[grip] pairing: ${sessionId.slice(0, 8)} failed to prove itself (origin ${sess.origin ?? 'none'})\n`);
+      this.sendTo(sessionId, { type: 'auth_failed' });
+      setTimeout(() => { try { sess.ws.close(4401, 'auth failed'); } catch {} }, 200).unref();
+      return;
+    }
+    sess.authed = true;
+    sess.tokenId = t.id;
+    this.sendTo(sessionId, { type: 'auth_ok', proof: authProof(t.secret, 'bridge', sess.authNonce, msg.nonce as string) });
+  }
+
+  // A frame from a socket that has not proven itself. A plugin that predates pairing says
+  // hello straight away: tell its user once in a while why nothing happens.
+  private refuseUnauthed(sess: Session, msg: Record<string, unknown>): void {
+    if (msg.kind !== 'hello') return;
+    process.stderr.write(`[grip] pairing: ${sess.id.slice(0, 8)} said hello without pairing (origin ${sess.origin ?? 'none'}), closing\n`);
+    const now = Date.now();
+    if (now - this.lastLegacyToast > LEGACY_TOAST_EVERY_MS) {
+      this.lastLegacyToast = now;
+      this.sendTo(sess.id, { id: `toast-${uuid()}`, method: 'notify', params: { message: 'Grip: this plugin version cannot pair with the bridge. Update the Grip plugin.', timeout: 8000 }, timeoutMs: 5000 });
+    }
+    setTimeout(() => { try { sess.ws.close(4403, 'pairing required'); } catch {} }, 250).unref();
+  }
+
+  // Once a pairing exists the bridge enforces: sockets that were let in before and never
+  // proved themselves (old plugins, or a peer that connected first) are closed.
+  private dropUnpaired(exceptId: string): void {
+    for (const s of this.sessions.values()) {
+      if (s.id === exceptId || s.tokenId) continue;
+      process.stderr.write(`[grip] pairing: closing unpaired session ${s.id.slice(0, 8)}\n`);
+      try { s.ws.close(4403, 'pairing required'); } catch {}
+    }
+  }
+
+  pairingStatus(): { mode: string; enforced: boolean; paired: number; windowOpen: boolean; unpairedSessions: number; lastPairedAt?: string; lastPairedOrigin?: string } | null {
+    if (!this.pairing) return null;
+    let unpaired = 0;
+    for (const s of this.sessions.values()) if (!s.tokenId) unpaired++;
+    return { ...this.pairing.status(), unpairedSessions: unpaired };
+  }
+
   private applyHello(sessionId: string, hello: WSHello) {
     const sess = this.sessions.get(sessionId);
     if (!sess) return;
     const prevIdent = sess.helloAt > 0 ? PluginBridge.keylessUidIdentity(sess) : undefined;
     const prevUid = sess.fileUid;
-    sess.fileKey = typeof hello.fileKey === 'string' ? hello.fileKey : '';
-    sess.fileUid = typeof hello.fileUid === 'string' && hello.fileUid !== '' ? hello.fileUid : undefined;
-    sess.fileName = hello.fileName;
-    sess.currentPageId = hello.currentPageId;
-    sess.currentPageName = hello.currentPageName;
+    // Every field below came from the peer: type-check and bound it.
+    sess.fileKey = clip(hello.fileKey, 128);
+    const uid = clip(hello.fileUid, 128);
+    sess.fileUid = uid !== '' ? uid : undefined;
+    sess.fileName = clip(hello.fileName, 256);
+    sess.currentPageId = clip(hello.currentPageId, 64);
+    sess.currentPageName = clip(hello.currentPageName, 256);
     sess.helloAt = Date.now();
     if (!sess.firstHelloAt) { sess.firstHelloAt = sess.helloAt; sess.helloSeq = ++PluginBridge.helloCounter; }
-    sess.pluginVersion = hello.version ?? 'unknown';
-    sess.minBridge = typeof hello.minBridge === 'string' ? hello.minBridge : undefined;
-    sess.capabilities = hello.capabilities ?? [];
-    if (hello.version && hello.version !== BRIDGE_VERSION) {
+    const ver = clip(hello.version, 32);
+    sess.pluginVersion = ver || 'unknown';
+    const minB = clip(hello.minBridge, 32);
+    sess.minBridge = minB !== '' ? minB : undefined;
+    sess.capabilities = Array.isArray(hello.capabilities)
+      ? hello.capabilities.slice(0, 200).map((c) => clip(c, 64)).filter((c) => c !== '')
+      : [];
+    if (ver && ver !== BRIDGE_VERSION) {
       process.stderr.write(
-        `[grip] WARNING plugin version ${hello.version} != bridge ${BRIDGE_VERSION}. ` +
+        `[grip] WARNING plugin version ${ver} != bridge ${BRIDGE_VERSION}. ` +
         `Reload the plugin (Figma may be serving stale cached code).\n`,
       );
     }
     process.stderr.write(
-      `[grip] hello ${sessionId.slice(0, 8)} v${sess.pluginVersion} → ${hello.fileName} / ${hello.currentPageName}\n`,
+      `[grip] hello ${sessionId.slice(0, 8)} v${sess.pluginVersion} → ${sess.fileName} / ${sess.currentPageName}\n`,
     );
     // The plugin needs a NEWER bridge than this one: the bridge is the stale side.
     // Informational (grip_health shows it; it counts as "update recommended").
     if (sess.minBridge && isSemver(sess.minBridge) && compareSemver(sess.minBridge, BRIDGE_VERSION) > 0) {
       process.stderr.write(
-        `[grip] WARNING plugin ${sess.pluginVersion} in "${hello.fileName}" needs bridge >= ${sess.minBridge} but this is ${BRIDGE_VERSION}: the bridge is out of date, update it.\n`,
+        `[grip] WARNING plugin ${sess.pluginVersion} in "${sess.fileName}" needs bridge >= ${sess.minBridge} but this is ${BRIDGE_VERSION}: the bridge is out of date, update it.\n`,
       );
     }
     this.noteHelloRename(sess, prevIdent, prevUid);
@@ -1916,6 +2104,9 @@ export class PluginBridge extends EventEmitter {
         minBridge: s.minBridge ?? null,
         // false until the plugin's hello arrives (version/file not known yet)
         hello: s.helloAt > 0,
+        // pairing: this socket proved itself / queued in the reserved pool (its connect URL carried a valid ticket)
+        paired: !!s.tokenId,
+        reserved: !!s.reserved,
         capabilities: s.capabilities ?? [],
         wsReady: s.ws.readyState === WebSocket.OPEN,
         lastPongMsAgo: s.lastPong ? Date.now() - s.lastPong : null,

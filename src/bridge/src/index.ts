@@ -9,7 +9,7 @@ import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { openSync, writeSync, closeSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
+import { openSync, writeSync, closeSync, writeFileSync, unlinkSync, existsSync, statSync, renameSync, chmodSync } from 'node:fs';
 import { connect } from 'node:net';
 import { PluginBridge } from './ws-server.js';
 import { BRIDGE_VERSION } from './types.js';
@@ -18,6 +18,8 @@ import { IpcServer } from './ipc-server.js';
 import { HttpServer } from './http-server.js';
 import { runProxy } from './proxy.js';
 import { isUpdateCli, runUpdateCli } from './update-cli.js';
+import { isPairCli, runPairCli } from './pair-cli.js';
+import { PairingStore } from './pairing.js';
 import { startUpdateChecks, setRestartHook, isManagedInstall, wireUpdateToBridge } from './update.js';
 
 // `--selftest`: the self-updater runs a freshly downloaded bridge once with this
@@ -44,6 +46,8 @@ const IS_DAEMON = process.argv.includes('--daemon');
 // `update` / `--update` runs the self-update CLI instead of the shim/daemon:
 // no log mirroring, no daemon spawn, no MCP on stdout (see update-cli.ts).
 const IS_UPDATE_CLI = !IS_DAEMON && isUpdateCli(process.argv);
+// `pair` configures plugin pairing through files only (pair-cli.ts): same rules as `update`.
+const IS_PAIR_CLI = !IS_DAEMON && isPairCli(process.argv);
 // Set by the launchd LaunchAgent. Disables idle-exit + lifetime ceiling so
 // launchd owns the lifecycle (its KeepAlive would just fight self-exit).
 const PERSISTENT = process.env.GRIP_PERSISTENT === '1' || process.argv.includes('--persistent');
@@ -53,14 +57,34 @@ const MAX_LIFETIME_MS = 6 * 60 * 60 * 1000;
 // Mirror stderr to ~/.grip-bridge.log (or GRIP_LOG_PATH) so forensics
 // survive across crashes. Done in-process — no bash wrap, no PATH issue.
 // Goes to both real stderr (so MCP clients can read it) AND the file.
-if (!IS_UPDATE_CLI) (() => {
+if (!IS_UPDATE_CLI && !IS_PAIR_CLI) (() => {
   try {
     const path = process.env.GRIP_LOG_PATH ?? join(homedir(), '.grip-bridge.log');
-    const fd = openSync(path, 'a');
-    writeSync(fd, `\n=== started pid=${process.pid} role=${IS_DAEMON ? 'daemon' : 'shim'} at ${new Date().toISOString()} ===\n`);
+    // The log holds the full code of every run_script and file names: owner-only, and
+    // size-capped (one previous generation kept as <log>.1) so a chatty or hostile peer
+    // cannot fill the disk.
+    const LOG_MAX = Number(process.env.GRIP_LOG_MAX_BYTES ?? 10 * 1024 * 1024);
+    let size = 0;
+    try { size = statSync(path).size; } catch { /* new file */ }
+    let fd = openSync(path, 'a', 0o600);
+    try { chmodSync(path, 0o600); } catch { /* non-fatal (Windows) */ }
+    const banner = `\n=== started pid=${process.pid} role=${IS_DAEMON ? 'daemon' : 'shim'} at ${new Date().toISOString()} ===\n`;
+    writeSync(fd, banner);
+    size += banner.length;
     const origWrite = process.stderr.write.bind(process.stderr);
     (process.stderr as any).write = (chunk: any, ...rest: any[]) => {
-      try { writeSync(fd, typeof chunk === 'string' ? chunk : chunk.toString()); } catch {}
+      try {
+        const text = typeof chunk === 'string' ? chunk : chunk.toString();
+        if (size + text.length > LOG_MAX) {
+          try {
+            closeSync(fd);
+            renameSync(path, `${path}.1`);
+            fd = openSync(path, 'a', 0o600);
+            size = 0;
+          } catch { /* keep logging into whatever fd we have */ }
+        }
+        size += writeSync(fd, text);
+      } catch {}
       return origWrite(chunk, ...rest);
     };
     process.on('exit', () => { try { closeSync(fd); } catch {} });
@@ -82,7 +106,7 @@ process.on('SIGHUP', () => {
 // port bind is the atomic single-instance lock.
 function tryBindWs(): Promise<PluginBridge | null> {
   return new Promise((resolve) => {
-    const bridge = new PluginBridge(WS_PORT);
+    const bridge = new PluginBridge(WS_PORT, { pairing: new PairingStore() });
     bridge.once('listening', () => resolve(bridge));
     bridge.once('bind-error', () => resolve(null));
   });
@@ -113,7 +137,7 @@ function dumpForensics(reason: string, extra: Record<string, unknown>, bridge?: 
       extra,
       timestamp: new Date().toISOString(),
     };
-    writeFileSync(path, JSON.stringify(body, null, 2));
+    writeFileSync(path, JSON.stringify(body, null, 2), { mode: 0o600 });
     process.stderr.write(`[grip] forensic dump written to ${path}\n`);
   } catch (err) {
     process.stderr.write(`[grip] dump failed: ${(err as Error).message}\n`);
@@ -221,7 +245,7 @@ async function runDaemon(bridge: PluginBridge) {
           pluginVersion: p.pluginVersion, fileName: p.fileName, wsReady: p.wsReady, hello: p.hello, minBridge: p.minBridge,
         })),
         pendingCount: snap.pendingCount,
-      }, null, 2));
+      }, null, 2), { mode: 0o600 });
     } catch {
       // best-effort; never crash on a status write
     }
@@ -397,7 +421,23 @@ async function main() {
   if (IS_UPDATE_CLI) {
     process.exit(await runUpdateCli(process.argv));
   }
+  if (IS_PAIR_CLI) {
+    process.exit(runPairCli(process.argv));
+  }
   if (IS_DAEMON) {
+    // One bad frame, one throwing timer or one rejected promise must not take down the
+    // daemon every agent shares: log the message (never the stack, see stackTraceLimit) and
+    // carry on. A real crash loop still ends: more than 20 in a minute exits for a clean respawn.
+    const faults: number[] = [];
+    const survive = (what: string) => (err: unknown) => {
+      process.stderr.write(`[grip] ${what}: ${(err as Error)?.message ?? String(err)}\n`);
+      const now = Date.now();
+      faults.push(now);
+      while (faults.length && now - faults[0] > 60_000) faults.shift();
+      if (faults.length > 20) { process.stderr.write('[grip] too many faults in a minute, exiting for a clean respawn\n'); process.exit(1); }
+    };
+    process.on('uncaughtException', survive('uncaught exception'));
+    process.on('unhandledRejection', survive('unhandled rejection'));
     let bridge = await tryBindWs();
     // A replacement daemon spawned by restartDaemon() races the old one
     // releasing :7777, so retry for a few seconds before conceding the lock.

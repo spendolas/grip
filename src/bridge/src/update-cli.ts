@@ -10,6 +10,8 @@
 // connected. A KNOWN-incompatible plugin always refuses. When no plugin can be
 // checked it says so and needs an explicit --yes (or --force, or a typed "y").
 // A release without a verifiable compat.json is not installed unless --force.
+// A release whose signature (SHA256SUMS.txt.sig) is missing or invalid is never
+// installed: --force does not override that.
 
 import { createInterface } from 'node:readline';
 import { BRIDGE_VERSION } from './types.js';
@@ -74,6 +76,11 @@ export async function runUpdateCli(argv: string[]): Promise<number> {
   // 1. compatibility with the Figma plugin(s)
   const plugins = readDaemonPlugins();
   let unverifiable = false;
+  if (s.signatureError) {
+    out(`Not installing: ${s.signatureError}`);
+    out(force ? '--force does not override a signature failure.' : 'Nothing overrides a signature failure: do not install this release, and report it.');
+    return checkOnly ? 0 : 1;
+  }
   if (s.minPlugin) {
     out(`Grip ${s.latest} needs a Figma plugin >= ${s.minPlugin}.`);
     const v = checkPluginCompat(s.minPlugin, s.latest!, plugins);

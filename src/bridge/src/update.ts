@@ -5,13 +5,14 @@
 //      (api.github.com/repos/spendolas/grip/releases/latest), compare its tag to
 //      BRIDGE_VERSION, remember the answer plus the release notes and the
 //      release's compat.json (the oldest Figma plugin it works with, verified
-//      against SHA256SUMS.txt). The daemon does this ~30s after startup and
+//      against a SIGNED SHA256SUMS.txt). The daemon does this ~30s after startup and
 //      every 24h. Pure information: it never installs anything, and every
 //      failure is silent.
 //   2. INSTALL — only when a human said yes (the user's click on the purple
 //      plugin strip, an agent after the user agrees, or the CLI). Downloads the
 //      release's bridge + plugin assets and SHA256SUMS.txt, verifies every file
-//      against SHA256SUMS.txt and a size cap, runs the new bridge once with
+//      against SHA256SUMS.txt (whose Ed25519 signature, SHA256SUMS.txt.sig, must
+//      verify against a key pinned in this file) and a size cap, runs the new bridge once with
 //      --selftest, and only THEN writes (tmp file + rename) into ~/.grip. A
 //      developer (git clone) install is never overwritten.
 //
@@ -21,6 +22,15 @@
 // enough for it (compat.json minPlugin); a release without a verifiable
 // compat.json is neither signalled nor installable (the CLI's --force excepted).
 //
+// SIGNATURE comes before everything else. SHA256SUMS.txt comes from the same
+// release as the files it lists, so on its own it only catches corruption.
+// Releases therefore carry SHA256SUMS.txt.sig, an Ed25519 signature over the
+// exact bytes of SHA256SUMS.txt, made in CI with a key that lives only in a
+// repository secret. The bridge trusts the sums (and so every file and
+// compat.json they vouch for) only when that signature verifies against
+// RELEASE_PUBLIC_KEYS, which are pinned in this file. A missing or invalid
+// signature fails closed and NOTHING, not even --force, bypasses it.
+//
 // The Figma plugin's networkAccess is localhost-only, so the plugin never
 // touches the internet: this module (in the bridge) is the only code that does.
 //
@@ -29,7 +39,7 @@
 //
 // ALL logging goes to stderr — stdout is the MCP transport.
 
-import { createHash } from 'node:crypto';
+import { createHash, createPublicKey, verify as cryptoVerify, type KeyObject } from 'node:crypto';
 import { execFile, execFileSync } from 'node:child_process';
 import {
   chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync,
@@ -48,6 +58,7 @@ export const DEFAULT_RELEASES_API = 'https://api.github.com/repos/spendolas/grip
 // scripts/release-gate.mjs requires them; a test keeps all three in step.
 export const ASSET_BRIDGE = 'grip-bridge.mjs';
 export const ASSET_SUMS = 'SHA256SUMS.txt';
+export const ASSET_SUMS_SIG = 'SHA256SUMS.txt.sig';   // base64 of the raw 64-byte Ed25519 signature over SHA256SUMS.txt
 export const ASSET_COMPAT = 'compat.json';   // { version, minPlugin }
 // release asset name -> file name inside ~/.grip/figma-plugin
 export const PLUGIN_ASSETS: Record<string, string> = {
@@ -55,7 +66,7 @@ export const PLUGIN_ASSETS: Record<string, string> = {
   'grip-plugin-ui.html': 'ui.html',
   'grip-plugin-manifest.json': 'manifest.json',
 };
-export const UPDATE_ASSET_NAMES = [ASSET_BRIDGE, ...Object.keys(PLUGIN_ASSETS), ASSET_SUMS, ASSET_COMPAT];
+export const UPDATE_ASSET_NAMES = [ASSET_BRIDGE, ...Object.keys(PLUGIN_ASSETS), ASSET_SUMS, ASSET_SUMS_SIG, ASSET_COMPAT];
 // release-page footer marker: everything from this line on is for GitHub
 // readers (install pointer), never part of an update notice. Appended by
 // scripts/release-gate.mjs (INSTALL_MARKER there).
@@ -64,6 +75,7 @@ export const INSTALL_MARKER = '<!-- grip-install -->';
 const RELEASE_MAX_BYTES = 256 * 1024;
 const SUMS_MAX_BYTES = 64 * 1024;
 const COMPAT_MAX_BYTES = 4 * 1024;
+const SIG_MAX_BYTES = 1024;   // a base64 Ed25519 signature is 88 bytes
 const NOTICE_INTERVAL_MS = 3 * 24 * 60 * 60 * 1000;   // agent notice: once per version per 3 days
 const SELFTEST_TIMEOUT_MS = 10_000;
 // GRIP_SELFTEST_TIMEOUT_MS can only LOWER the 10s ceiling (tests).
@@ -142,6 +154,62 @@ export function hostAllowed(u: URL): boolean {
   return ALLOWED_HOSTS.includes(h) || h.endsWith('.githubusercontent.com');
 }
 
+// ---------- release signature ----------
+
+// The Ed25519 public keys (SPKI PEM) whose signature over SHA256SUMS.txt makes a
+// release trustworthy. An ARRAY so a key can be rotated: ship a bridge that
+// trusts the old and the new key, then sign with the new one. The matching
+// private key lives only in the GRIP_RELEASE_SIGNING_KEY repository secret
+// (see .github/workflows/release.yml, scripts/sign-release.mjs). Public keys are
+// not secrets, so scripts/bundle-hygiene.mjs lets this one through.
+export const RELEASE_PUBLIC_KEYS: readonly string[] = [
+  `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEASF7Su4ZqXdmFbDJvwm56w5wBAqqhQ8BcLDwJlGjTneo=
+-----END PUBLIC KEY-----
+`,
+];
+
+// GRIP_RELEASE_PUBKEY (PEM text) REPLACES the pinned list, but ONLY in a test run
+// (GRIP_TEST=1): tests sign fake releases with their own key. Without the flag it is
+// ignored (with one notice), so that setting an environment variable on the daemon can
+// never point it at someone else's key. It can only substitute a key, never switch
+// verification off: a value that is not a usable Ed25519 public key leaves NO trusted
+// key, so every release then fails closed.
+let pubkeyNoticeShown = false;
+export function trustedReleaseKeys(): KeyObject[] {
+  const override = process.env.GRIP_RELEASE_PUBKEY;
+  const overrideSet = override !== undefined && override.trim() !== '';
+  const testRun = process.env.GRIP_TEST === '1';
+  if (overrideSet && !testRun && !pubkeyNoticeShown) {
+    pubkeyNoticeShown = true;
+    process.stderr.write('[grip] GRIP_RELEASE_PUBKEY ignored (not a test run: it only works with GRIP_TEST=1)\n');
+  }
+  const pems = overrideSet && testRun ? [override!] : RELEASE_PUBLIC_KEYS;
+  const keys: KeyObject[] = [];
+  for (const pem of pems) {
+    try {
+      const k = createPublicKey(pem);
+      if (k.asymmetricKeyType === 'ed25519') keys.push(k);
+    } catch { /* an unusable key trusts nothing */ }
+  }
+  return keys;
+}
+
+// True only when `sigText` is the base64 of a 64-byte Ed25519 signature that
+// verifies over exactly `sums` against one of `keys`.
+export function verifySumsSignature(sums: Buffer, sigText: Buffer | string, keys: KeyObject[] = trustedReleaseKeys()): boolean {
+  const text = (typeof sigText === 'string' ? sigText : sigText.toString('utf8')).trim();
+  if (!/^[A-Za-z0-9+/]{86}==$/.test(text)) return false;   // exactly 64 bytes of base64
+  const sig = Buffer.from(text, 'base64');
+  if (sig.length !== 64) return false;
+  for (const k of keys) {
+    try { if (cryptoVerify(null, sums, k, sig)) return true; } catch { /* try the next key */ }
+  }
+  return false;
+}
+
+const isSignatureCode = (code?: string) => code === 'signature_missing' || code === 'signature_invalid';
+
 // ---------- semver ----------
 
 const SEMVER_RE = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?:-([0-9A-Za-z.-]{1,32}))?$/;
@@ -170,6 +238,8 @@ export function isSemver(v: unknown): v is string {
 
 // `code` lets callers (tool, WS, CLI) tell failure kinds apart:
 //   compat_unverified  the release has no compat.json, or it does not verify
+//   signature_missing  the release has no SHA256SUMS.txt.sig (never bypassed, not even by --force)
+//   signature_invalid  SHA256SUMS.txt.sig does not verify against a pinned release key (same)
 export class UpdateError extends Error {
   constructor(message: string, readonly code?: string) { super(message); }
 }
@@ -439,11 +509,14 @@ export interface UpdateSignal { signal: boolean; blockedReason?: string; staleWi
 // THE single decision for every signalling surface (the purple strip, the agent
 // notices, grip_health.update): signal only when an update is available AND at
 // least one plugin is connected AND every connected plugin is compatible. A
-// release whose compat.json is missing/unverifiable is never signalled (fail
-// closed). `blockedReason` explains a withheld signal (only set when an update
+// release whose signature is missing/invalid, or whose compat.json is
+// missing/unverifiable, is never signalled (fail closed). `blockedReason` explains a withheld signal (only set when an update
 // is available).
 export function updateSignal(state: UpdateState | null | undefined, plugins: PluginInfo[] | null | undefined): UpdateSignal {
   if (!state || !state.available || !state.latest) return { signal: false };
+  if (state.signatureError) {
+    return { signal: false, blockedReason: `Grip ${state.latest} is not offered: ${state.signatureError}` };
+  }
   if (!state.minPlugin) {
     return { signal: false, blockedReason: `Grip ${state.latest} has no verified compatibility info (compat.json)${state.compatError ? ': ' + state.compatError : ''}, so it is not offered` };
   }
@@ -737,8 +810,26 @@ async function fetchCompat(rel: Release, sums: Map<string, string>): Promise<{ m
   return { minPlugin: j.minPlugin };
 }
 
+// SHA256SUMS.txt, trusted only after its signature verified: not one line of it
+// is parsed before that. Throws UpdateError code signature_missing /
+// signature_invalid; callers turn those into state.signatureError (no CLI flag
+// overrides them).
 async function fetchSums(rel: Release): Promise<Map<string, string>> {
-  return parseSums((await downloadAsset(rel, ASSET_SUMS, SUMS_MAX_BYTES)).toString('utf8'));
+  const sums = await downloadAsset(rel, ASSET_SUMS, SUMS_MAX_BYTES);
+  if (!rel.assets[ASSET_SUMS_SIG]) {
+    throw new UpdateError(
+      `release ${rel.version} is unsigned: it has no ${ASSET_SUMS_SIG} asset (it may still be uploading, or it was not made by the Grip release process). Nothing was changed.`,
+      'signature_missing',
+    );
+  }
+  const sig = await downloadAsset(rel, ASSET_SUMS_SIG, SIG_MAX_BYTES);
+  if (!verifySumsSignature(sums, sig)) {
+    throw new UpdateError(
+      `the signature of release ${rel.version} (${ASSET_SUMS_SIG}) does not verify against the Grip release key built into this bridge. The release was not made by the Grip release process, or it was altered. Do not install it. Nothing was changed.`,
+      'signature_invalid',
+    );
+  }
+  return parseSums(sums.toString('utf8'));
 }
 
 // ---------- check + state ----------
@@ -755,6 +846,10 @@ export interface UpdateState {
   // verifiable compat.json, so it is neither signalled nor installable.
   minPlugin?: string | null;
   compatError?: string | null;
+  // Set when the latest release's SHA256SUMS.txt.sig is missing or does not verify
+  // against the pinned release key: the release is then neither signalled nor
+  // installable, and no flag overrides that. Implies minPlugin null.
+  signatureError?: string | null;
   error?: string;             // set when the latest attempt failed (state is carried over)
 }
 
@@ -771,7 +866,8 @@ export function resetUpdateState(): void { state = null; noticeMemo.clear(); las
 
 function setState(next: UpdateState) {
   const changed = !state || state.available !== next.available || state.latest !== next.latest
-    || (state.minPlugin ?? null) !== (next.minPlugin ?? null);
+    || (state.minPlugin ?? null) !== (next.minPlugin ?? null)
+    || (state.signatureError ?? null) !== (next.signatureError ?? null);
   state = next;
   if (changed) {
     for (const fn of listeners) {
@@ -793,6 +889,8 @@ function writeCache(s: UpdateState) {
     writeFileSync(cachePath(), JSON.stringify({
       current: s.current, latest: s.latest, available: s.available, checkedAt: s.checkedAt,
       headline: s.headline ?? null, notes: s.notes ?? null, minPlugin: s.minPlugin ?? null,
+      // minPlugin is only ever set after a verified signature; an older bridge's cache lacks this flag and is not believed
+      signed: !!s.minPlugin,
       // the notice throttle lives in the same file: carry it over
       notifiedAt: readCacheFile()?.notifiedAt ?? {},
     }, null, 2));
@@ -811,7 +909,7 @@ export function readCache(): UpdateState | null {
     checkedAt: typeof j.checkedAt === 'string' ? j.checkedAt : null,
     headline: typeof j.headline === 'string' ? j.headline : null,
     notes: typeof j.notes === 'string' ? j.notes : null,
-    minPlugin: isSemver(j.minPlugin) ? j.minPlugin : null,
+    minPlugin: isSemver(j.minPlugin) && j.signed === true ? j.minPlugin : null,
   };
 }
 
@@ -838,16 +936,22 @@ export function claimNotice(version: string, now: number = Date.now()): boolean 
 }
 
 // Release -> state, including the compat.json gate (only fetched when the
-// release is newer than this bridge). A missing/unverifiable compat.json does
-// not throw: the state says available:true, minPlugin:null, compatError — which
-// updateSignal() turns into "not offered".
+// release is newer than this bridge). A missing/invalid signature or a
+// missing/unverifiable compat.json does not throw: the state says available:true,
+// minPlugin:null and signatureError / compatError, which updateSignal() turns
+// into "not offered".
 async function stateFromRelease(r: Release): Promise<UpdateState> {
   const available = compareSemver(r.version, BRIDGE_VERSION) > 0;
   let minPlugin: string | null = null;
   let compatError: string | null = null;
+  let signatureError: string | null = null;
   if (available) {
     try { minPlugin = (await fetchCompat(r, await fetchSums(r))).minPlugin; }
-    catch (err) { compatError = (err as Error).message; logErr(`update: ${r.version} will not be offered: ${compatError}`); }
+    catch (err) {
+      const msg = (err as Error).message;
+      if (err instanceof UpdateError && isSignatureCode(err.code)) signatureError = msg; else compatError = msg;
+      logErr(`update: ${r.version} will not be offered: ${msg}`);
+    }
   }
   return {
     current: BRIDGE_VERSION,
@@ -858,6 +962,7 @@ async function stateFromRelease(r: Release): Promise<UpdateState> {
     notes: r.notes || null,
     minPlugin,
     compatError,
+    signatureError,
   };
 }
 
@@ -884,6 +989,7 @@ export async function checkForUpdate(api: string = releasesApi()): Promise<Updat
       notes: state?.notes ?? null,
       minPlugin: state?.minPlugin ?? null,
       compatError: state?.compatError ?? null,
+      signatureError: state?.signatureError ?? null,
       error: msg,
     };
   }
@@ -1051,7 +1157,7 @@ export async function installUpdate(o: InstallOptions): Promise<InstallResult> {
       // Keep the shared state honest even though this wasn't a scheduled check.
       setState({
         current: BRIDGE_VERSION, latest: rel.version, available, checkedAt: new Date().toISOString(),
-        headline: rel.headline || null, notes: rel.notes || null, minPlugin: null, compatError: null,
+        headline: rel.headline || null, notes: rel.notes || null, minPlugin: null, compatError: null, signatureError: null,
       });
       return { status: 'up_to_date', from: BRIDGE_VERSION, to: rel.version };
     }
@@ -1061,7 +1167,19 @@ export async function installUpdate(o: InstallOptions): Promise<InstallResult> {
       return { status: 'clone_install', from: BRIDGE_VERSION, to: rel.version, next: CLONE_NEXT_STEPS };
     }
 
-    const sums = await fetchSums(rel);
+    // The signature first: an unsigned or wrongly signed release is refused before
+    // anything else about it is believed, and --force does not change that.
+    let sums: Map<string, string>;
+    try { sums = await fetchSums(rel); }
+    catch (err) {
+      if (err instanceof UpdateError && isSignatureCode(err.code)) {
+        setState({
+          current: BRIDGE_VERSION, latest: rel.version, available, checkedAt: new Date().toISOString(),
+          headline: rel.headline || null, notes: rel.notes || null, minPlugin: null, compatError: null, signatureError: err.message,
+        });
+      }
+      throw err;
+    }
 
     // compat.json: verified, or the release is not installable (CLI --force excepted).
     let minPlugin: string | null = null;
@@ -1071,7 +1189,7 @@ export async function installUpdate(o: InstallOptions): Promise<InstallResult> {
     // Keep the shared state (and with it the strip / notices) honest.
     setState({
       current: BRIDGE_VERSION, latest: rel.version, available, checkedAt: new Date().toISOString(),
-      headline: rel.headline || null, notes: rel.notes || null, minPlugin, compatError,
+      headline: rel.headline || null, notes: rel.notes || null, minPlugin, compatError, signatureError: null,
     });
 
     if (o.version !== rel.version) {
@@ -1270,7 +1388,7 @@ export function stopRunningDaemon(): { stopped: boolean; note: string } {
 //   {type:'update_result', status, from?, to?, restart?, next?, code?, message?, latest?}
 // (status 'updated' | 'up_to_date' | 'already_installing' | 'clone_install' |
 // 'error'; on 'error' `code` is version_changed | incompatible_plugin |
-// plugins_unverifiable | compat_unverified | selftest_failed | version_required |
+// plugins_unverifiable | compat_unverified | signature_missing | signature_invalid | selftest_failed | version_required |
 // origin | install_failed). Older plugins ignore all of this.
 // The click is for the plugin-copy refresh when its version is the installed plugin's, no bridge
 // update has that version, and an imported copy really is behind.

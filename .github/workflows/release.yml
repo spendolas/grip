@@ -1,6 +1,7 @@
 name: Release
 
-# Publishes a GitHub Release (9 assets, notes from CHANGELOG.md plus an install
+# Publishes a GitHub Release (9 assets, including the Ed25519 signature of
+# SHA256SUMS.txt; notes from CHANGELOG.md plus an install
 # footer) when a push to main touches source, scripts, the changelog, the
 # plugin's hand-written files or this workflow. Nothing generated is committed:
 # the bridge, installer and plugin bundles are built HERE, from source, and only
@@ -11,7 +12,7 @@ name: Release
 # artifact named grip-release.
 #
 # Jobs: build (npm ci, build + license allowlist + THIRD-PARTY-NOTICES.txt,
-# hygiene, npm audit, tests, gate, package, smoke) -> publish (only on
+# hygiene, npm audit, tests, gate, package, sign, smoke) -> publish (only on
 # create / recover; the only job with contents: write).
 #
 # To release: bump the version in the four lockstep places, add a
@@ -159,6 +160,24 @@ jobs:
           node -e "const j=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')); if(j.source!=='release'||j.version!==process.argv[2]) { console.error('bad install.json', j); process.exit(1); }" "$S/home/.grip/install.json" "$V"
           cmp "$S/home/.grip/grip-bridge.mjs" dist/grip-bridge.mjs
 
+      # Ed25519 signature over SHA256SUMS.txt (dist/SHA256SUMS.txt.sig). The
+      # bridge only trusts a release whose signature verifies against the public
+      # key pinned in src/bridge/src/update.ts, so a compromised repo or release
+      # alone cannot make anyone install code. The private key (PKCS8 PEM) is the
+      # repository secret GRIP_RELEASE_SIGNING_KEY; the script also checks the
+      # signature against the pinned key, so a wrong secret fails here. A real
+      # release with the secret missing FAILS this job. Dry runs (manual run with
+      # dry_run checked) skip signing: there is no throwaway key worth the
+      # complexity, and nothing from a dry run is ever published.
+      - name: Sign SHA256SUMS.txt
+        if: steps.package.outputs.built == 'true' && env.DRY_RUN != 'true'
+        env:
+          GRIP_RELEASE_SIGNING_KEY: ${{ secrets.GRIP_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          node scripts/sign-release.mjs --dir dist
+          test -s dist/SHA256SUMS.txt.sig
+
       - name: Upload release artifact
         if: steps.package.outputs.built == 'true'
         uses: actions/upload-artifact@v4
@@ -220,6 +239,9 @@ jobs:
       - name: Publish
         env:
           ACTION: ${{ steps.gate.outputs.action }}
+          # Only read by scripts/sign-release.mjs, in the one case where the
+          # sums are recomputed here (recover of a published release).
+          GRIP_RELEASE_SIGNING_KEY: ${{ secrets.GRIP_RELEASE_SIGNING_KEY }}
         run: |
           set -euo pipefail
           ls -l artifact/dist
@@ -228,7 +250,9 @@ jobs:
           # bridge works with: a release without it is never offered);
           # a release missing any of them would break installs or updates.
           ASSETS="grip-bridge.mjs grip-plugin-code.js grip-plugin-ui.html grip-plugin-manifest.json grip-install.zip compat.json THIRD-PARTY-NOTICES.txt"
-          for asset in $ASSETS SHA256SUMS.txt; do
+          # SHA256SUMS.txt.sig is the Ed25519 signature over SHA256SUMS.txt; the
+          # bridge refuses a release without a valid one (see update.ts).
+          for asset in $ASSETS SHA256SUMS.txt SHA256SUMS.txt.sig; do
             if [ ! -f "artifact/dist/$asset" ]; then
               echo "Required release asset missing from the build artifact: $asset"
               exit 1
@@ -265,7 +289,10 @@ jobs:
               mkdir -p "$FINAL"
               for n in $ASSETS; do gh release download "v$V" --dir "$FINAL" -p "$n"; done
               (cd "$FINAL" && for n in $(printf '%s\n' $ASSETS | LC_ALL=C sort); do sha256sum "$n"; done > SHA256SUMS.txt)
-              gh release upload "v$V" "$FINAL/SHA256SUMS.txt" --clobber
+              # The recomputed sums need a fresh signature (the old one covers
+              # the old bytes); this step has the signing key.
+              node scripts/sign-release.mjs --dir "$FINAL"
+              gh release upload "v$V" "$FINAL/SHA256SUMS.txt" "$FINAL/SHA256SUMS.txt.sig" --clobber
             fi
           else
             echo "Nothing to publish (action=$ACTION)."

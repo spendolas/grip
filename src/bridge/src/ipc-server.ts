@@ -70,6 +70,9 @@ export class IpcServer {
       );
     });
 
+    // Every shim is one connection; a same-user process opening hundreds must not be able to
+    // make the daemon hold hundreds of sessions. Excess connections are dropped by the kernel.
+    this.server.maxConnections = Number(process.env.GRIP_MAX_IPC ?? 128);
     this.server.on('error', (err: Error & { code?: string }) => {
       process.stderr.write(`[grip] ipc server error: ${err.code ?? err.message}\n`);
     });

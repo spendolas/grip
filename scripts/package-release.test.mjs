@@ -14,6 +14,7 @@ import { packageRelease, buildZip, crc32, checkLockstep, readLockstepVersions, r
 import { REQUIRED_ASSETS, INSTALL_MARKER } from './release-gate.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const SIG_ASSET = 'SHA256SUMS.txt.sig';   // made by scripts/sign-release.mjs, not by the packager
 const sha = (b) => createHash('sha256').update(b).digest('hex');
 const tmp = (p) => mkdtempSync(join(tmpdir(), p));
 
@@ -65,8 +66,11 @@ test('packages every release asset with correct names and sums', () => {
   const out = tmp('grip-pkg-');
   const r = packageRelease({ root: ROOT, out });
   assert.equal(r.version, checkLockstep(ROOT));
-  assert.deepEqual(readdirSync(out).sort(), [...REQUIRED_ASSETS].sort(), 'exactly the gate\'s required assets');
-  assert.deepEqual([...r.files].sort(), [...REQUIRED_ASSETS].sort());
+  // every required asset except the signature, which scripts/sign-release.mjs adds after packaging
+  const packaged = REQUIRED_ASSETS.filter((n) => n !== SIG_ASSET);
+  assert.deepEqual(readdirSync(out).sort(), [...packaged].sort(), 'exactly the gate\'s required assets, minus the signature');
+  assert.ok(!existsSync(join(out, SIG_ASSET)), 'the packager does not sign');
+  assert.deepEqual([...r.files].sort(), [...packaged].sort());
 
   // copies are byte-identical to the build output
   const same = {
@@ -84,7 +88,7 @@ test('packages every release asset with correct names and sums', () => {
   const text = readFileSync(join(out, 'SHA256SUMS.txt'), 'utf8');
   assert.ok(text.endsWith('\n'));
   const lines = text.trim().split('\n');
-  const expected = REQUIRED_ASSETS.filter((n) => n !== 'SHA256SUMS.txt').sort();
+  const expected = REQUIRED_ASSETS.filter((n) => n !== 'SHA256SUMS.txt' && n !== SIG_ASSET).sort();
   assert.deepEqual(lines.map((l) => l.split('  ')[1]), expected, 'sorted, every asset incl. the zip, not itself');
   for (const l of lines) {
     assert.match(l, /^[0-9a-f]{64}  \S+$/, 'sha256sum format (two spaces)');
@@ -170,7 +174,7 @@ test('the zip is deterministic', () => {
   const a = tmp('grip-pkg-'), b = tmp('grip-pkg-');
   packageRelease({ root: ROOT, out: a });
   packageRelease({ root: ROOT, out: b });
-  for (const n of REQUIRED_ASSETS) assert.ok(readFileSync(join(a, n)).equals(readFileSync(join(b, n))), `${n} identical across runs`);
+  for (const n of REQUIRED_ASSETS.filter((x) => x !== SIG_ASSET)) assert.ok(readFileSync(join(a, n)).equals(readFileSync(join(b, n))), `${n} identical across runs`);
 });
 
 test('an extracted zip is what the installer expects (release layout)', () => {
@@ -196,12 +200,15 @@ test('asset names agree with the updater (src/bridge/dist/update.js)', async (t)
   assert.equal(U.ASSET_BRIDGE, 'grip-bridge.mjs');
   assert.equal(U.ASSET_SUMS, 'SHA256SUMS.txt');
   assert.equal(U.ASSET_COMPAT, 'compat.json');
+  assert.equal(U.ASSET_SUMS_SIG, SIG_ASSET);
   // the updater and the gate must cut the same footer marker
   assert.equal(U.INSTALL_MARKER, INSTALL_MARKER);
-  // eight release assets in all; the updater downloads six of them (not the zip / the notices).
+  // nine release assets in all; the updater downloads seven of them (not the zip / the notices).
   // The installer is not among them: it ships only inside grip-install.zip.
-  assert.equal(REQUIRED_ASSETS.length, 8);
-  assert.deepEqual([...U.UPDATE_ASSET_NAMES].sort(), ['SHA256SUMS.txt', 'compat.json', 'grip-bridge.mjs', 'grip-plugin-code.js', 'grip-plugin-manifest.json', 'grip-plugin-ui.html']);
+  assert.equal(REQUIRED_ASSETS.length, 9);
+  assert.deepEqual([...U.UPDATE_ASSET_NAMES].sort(), ['SHA256SUMS.txt', 'SHA256SUMS.txt.sig', 'compat.json', 'grip-bridge.mjs', 'grip-plugin-code.js', 'grip-plugin-manifest.json', 'grip-plugin-ui.html']);
+  // the bridge pins at least one release public key (scripts/sign-release.mjs reads the same constant from source)
+  assert.ok(U.RELEASE_PUBLIC_KEYS.length >= 1);
   // ...and those figma-plugin files all exist
   for (const local of Object.values(U.PLUGIN_ASSETS)) assert.ok(existsSync(join(ROOT, 'figma-plugin', local)), local);
 });

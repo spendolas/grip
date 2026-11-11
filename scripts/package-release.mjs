@@ -32,6 +32,10 @@
 //                                                       whose compat.json verifies against SHA256SUMS.txt.
 //   SHA256SUMS.txt                                      `<sha256>  <name>` for every asset above (incl. compat.json)
 //
+// SHA256SUMS.txt.sig (the Ed25519 signature over SHA256SUMS.txt, the 9th release
+// asset) is NOT made here: scripts/sign-release.mjs adds it after packaging, in CI,
+// because only CI holds the private key. The bridge refuses a release without it.
+//
 // No dependencies, no `zip` binary: the zip is written by a ~40-line writer below,
 // byte-for-byte deterministic (fixed timestamps, sorted entries, fixed permissions).
 // Asset names are shared with scripts/release-gate.mjs (REQUIRED_ASSETS) and

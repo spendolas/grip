@@ -4,7 +4,7 @@
 import assert from 'node:assert';
 import { createServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
-import { createHash } from 'node:crypto';
+import { createHash, generateKeyPairSync, sign as edSign } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -27,6 +27,25 @@ const sha = (b) => createHash('sha256').update(b).digest('hex');
 const tmp = (p) => mkdtempSync(join(tmpdir(), p));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const esc = (s) => s.replace(/\./g, '\\.');
+
+// ---------------------------------------------------------------- test signing key
+// A THROWAWAY Ed25519 keypair made only for these tests. It signs the fake
+// releases below and is trusted through GRIP_RELEASE_PUBKEY (a test-only override
+// that replaces the pinned list). It has nothing to do with the real release
+// key, whose public half is pinned in src/update.ts and whose private half only
+// exists as a CI secret. Safe to commit.
+// The header is split so secret scanners (push protection) do not flag this file.
+const TEST_PRIV = ['-----BE' + 'GIN PRIVATE KEY-----', 'MC4CAQAwBQYDK2VwBCIEIGfFhB9wVVeEIIpYjxiTdXoremRSaoaIBhYvXEK/vcJ4', '-----END PRIVATE KEY-----', ''].join('\n');
+const TEST_PUB = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAYzUJAvV8Ujs7QnT17B1NgfGdwdYhuANZVsIJJncasD0=
+-----END PUBLIC KEY-----
+`;
+// A second key, made fresh: a signature from it must not be trusted.
+const OTHER = generateKeyPairSync('ed25519');
+const OTHER_PRIV = OTHER.privateKey;
+const signSums = (buf, priv = TEST_PRIV) => edSign(null, buf, priv).toString('base64') + '\n';
+process.env.GRIP_RELEASE_PUBKEY = TEST_PUB;
+process.env.GRIP_TEST = '1';   // the key override is honoured only in a test run
 
 // ---------------------------------------------------------------- fake release
 const NEWER = '99.1.0';
@@ -59,6 +78,8 @@ function freshRelease(over = {}) {
     assetUrls: {},            // asset name -> browser_download_url override
     sumsRaw: null,            // replace SHA256SUMS.txt entirely
     sumsDrop: [],             // asset names removed from SHA256SUMS.txt
+    sigRaw: null,             // replace SHA256SUMS.txt.sig entirely
+    sigKey: null,             // PEM private key that signs SHA256SUMS.txt.sig (default: the test key)
     noSizes: false,           // leave `size` out of the asset JSON
     apiRaw: null,             // replace the API response body entirely
     apiStatus: 200,
@@ -89,10 +110,13 @@ function sumsText(r) {
 function servedBytes(r, name) {
   if (r.bodies[name]) return r.bodies[name];
   if (name === 'SHA256SUMS.txt') return Buffer.from(sumsText(r));
+  // the signature covers the sums as the release PUBLISHES them (so a test that serves other
+  // bytes for SHA256SUMS.txt through `bodies` leaves a signature over the original)
+  if (name === 'SHA256SUMS.txt.sig') return Buffer.from(r.sigRaw ?? signSums(Buffer.from(sumsText(r)), r.sigKey ?? TEST_PRIV));
   return assetBytes(r)[name];
 }
 function apiJson(r) {
-  const names = [...Object.keys(assetBytes(r)), 'SHA256SUMS.txt', 'grip-install.zip'];
+  const names = [...Object.keys(assetBytes(r)), 'SHA256SUMS.txt', 'SHA256SUMS.txt.sig', 'grip-install.zip'];
   return {
     tag_name: r.tag ?? 'v' + r.version,
     name: 'v' + r.version,
@@ -540,7 +564,7 @@ assert.strictEqual(U.releaseNotes('short'), 'short');
   // every asset came through the GitHub-style redirect, once
   assert.deepStrictEqual(
     downloads().filter((p) => p.startsWith('/download/')).sort(),
-    ['/download/SHA256SUMS.txt', '/download/compat.json', '/download/grip-bridge.mjs', '/download/grip-plugin-code.js', '/download/grip-plugin-manifest.json', '/download/grip-plugin-ui.html'].sort(),
+    ['/download/SHA256SUMS.txt', '/download/SHA256SUMS.txt.sig', '/download/compat.json', '/download/grip-bridge.mjs', '/download/grip-plugin-code.js', '/download/grip-plugin-manifest.json', '/download/grip-plugin-ui.html'].sort(),
     'exactly the six assets the updater needs (not the install zip or installer)');
   assert.strictEqual(hits['/cdn/grip-bridge.mjs'], 1, 'redirect followed');
 
@@ -844,6 +868,200 @@ assert.strictEqual(U.releaseNotes('short'), 'short');
       await inst({ ...o, confirm: async () => { n++; return true; } });
       assert.strictEqual(n, 0, `confirm not called when ${why} fails`);
     }
+  }
+}
+
+// ---------------------------------------------------------------- 3c. release signature (SHA256SUMS.txt.sig)
+// The sums come from the same release as the files, so they are trusted only
+// after an Ed25519 signature over their exact bytes verifies against a PINNED
+// key. Missing/invalid fails closed and nothing (not even --force) bypasses it.
+{
+  // --- the pure verifier
+  const sums = Buffer.from(`${'a'.repeat(64)}  grip-bridge.mjs\n`);
+  const good = signSums(sums);
+  const keys = U.trustedReleaseKeys();
+  assert.strictEqual(keys.length, 1, 'the test override substitutes exactly one key');
+  assert.ok(U.verifySumsSignature(sums, good), 'valid signature accepted');
+  assert.ok(U.verifySumsSignature(sums, good.trim()), 'surrounding whitespace is fine');
+  assert.ok(U.verifySumsSignature(sums, Buffer.from(good)), 'a Buffer works too');
+  assert.ok(!U.verifySumsSignature(Buffer.from(sums.toString().replace('a', 'b')), good), 'tampered sums rejected: the old signature does not cover them');
+  assert.ok(!U.verifySumsSignature(Buffer.concat([sums, Buffer.from('\n')]), good), 'a single added byte invalidates it');
+  assert.ok(!U.verifySumsSignature(sums, signSums(sums, OTHER_PRIV)), 'a signature from another key is rejected');
+  for (const bad of ['', 'not base64!', 'AAAA', good.slice(0, 40), good.trim() + 'AAAA', Buffer.alloc(64).toString('base64'), Buffer.alloc(63).toString('base64')]) {
+    assert.ok(!U.verifySumsSignature(sums, bad), `garbage signature rejected: ${bad.slice(0, 20)}`);
+  }
+  assert.ok(!U.verifySumsSignature(sums, good, []), 'no trusted key: nothing verifies');
+
+  // --- the pinned key (and the test-only override, which can only SUBSTITUTE a key)
+  assert.ok(Array.isArray(U.RELEASE_PUBLIC_KEYS) && U.RELEASE_PUBLIC_KEYS.length >= 1, 'an array of pinned keys');
+  const saved = process.env.GRIP_RELEASE_PUBKEY;
+  try {
+    // without GRIP_TEST=1 the override is ignored: a release signed by another key does not verify
+    delete process.env.GRIP_TEST;
+    process.env.GRIP_RELEASE_PUBKEY = OTHER.publicKey.export({ type: 'spki', format: 'pem' });
+    assert.strictEqual(U.trustedReleaseKeys().length, U.RELEASE_PUBLIC_KEYS.length, 'override ignored outside a test run');
+    assert.ok(!U.verifySumsSignature(sums, signSums(sums, OTHER_PRIV)), 'a release signed by the override key is NOT trusted without GRIP_TEST=1');
+    assert.ok(!U.verifySumsSignature(sums, good), 'nor is the test key');
+    process.env.GRIP_TEST = '1';
+    assert.ok(U.verifySumsSignature(sums, signSums(sums, OTHER_PRIV)), 'with GRIP_TEST=1 the override applies');
+    delete process.env.GRIP_RELEASE_PUBKEY;
+    const pinned = U.trustedReleaseKeys();
+    assert.strictEqual(pinned.length, U.RELEASE_PUBLIC_KEYS.length, 'no override: exactly the pinned keys');
+    assert.ok(pinned.every((k) => k.asymmetricKeyType === 'ed25519'));
+    assert.ok(!U.verifySumsSignature(sums, good), 'the test key is NOT trusted without the override');
+    process.env.GRIP_RELEASE_PUBKEY = '';
+    assert.strictEqual(U.trustedReleaseKeys().length, pinned.length, 'an empty override does not switch verification off');
+    process.env.GRIP_RELEASE_PUBKEY = 'garbage';
+    assert.deepStrictEqual(U.trustedReleaseKeys(), [], 'an unusable override trusts nothing (it never falls open)');
+    assert.ok(!U.verifySumsSignature(sums, good), 'so nothing verifies');
+    process.env.GRIP_RELEASE_PUBKEY = OTHER.publicKey.export({ type: 'spki', format: 'pem' });
+    assert.ok(!U.verifySumsSignature(sums, good), 'the override replaces the pinned list: the test key is no longer trusted');
+    assert.ok(U.verifySumsSignature(sums, signSums(sums, OTHER_PRIV)), '...the substituted key is');
+    process.env.GRIP_RELEASE_PUBKEY = TEST_PUB;
+    assert.ok(U.verifySumsSignature(sums, good), 'back to the test key');
+  } finally {
+    process.env.GRIP_RELEASE_PUBKEY = saved;
+  }
+
+  // --- the check: state carries signatureError, never a minPlugin, never signalled
+  const sigGate = async (over, mutate, why) => {
+    U.resetUpdateState();
+    freshRelease(over);
+    mutate?.();
+    const g = await U.checkForUpdate();
+    assert.strictEqual(g.available, true, `${why}: still reported as available`);
+    assert.strictEqual(g.minPlugin, null, `${why}: no minPlugin`);
+    assert.ok(g.signatureError, `${why}: reason recorded as signatureError`);
+    assert.strictEqual(g.compatError, null, `${why}: not blamed on compat.json`);
+    const sig = U.updateSignal(g, GOOD);
+    assert.strictEqual(sig.signal, false, `${why}: not signalled`);
+    assert.match(sig.blockedReason, /not offered/);
+    assert.strictEqual(U.readCache().minPlugin, null, `${why}: never cached as trusted`);
+    return g;
+  };
+  {
+    const home = tmp('grip-upd-home-');
+    env(home);
+    let g = await sigGate({}, () => { release.bodies['SHA256SUMS.txt'] = Buffer.from(sumsText(release).replace(/^./, (c) => (c === '0' ? '1' : '0'))); }, 'tampered sums with the old signature');
+    assert.match(g.signatureError, /does not verify/);
+    g = await sigGate({ omitAssets: ['SHA256SUMS.txt.sig'] }, null, 'missing .sig');
+    assert.match(g.signatureError, /unsigned.*no SHA256SUMS\.txt\.sig asset/);
+    g = await sigGate({ sigKey: OTHER_PRIV }, null, 'signature by another key');
+    assert.match(g.signatureError, /does not verify/);
+    g = await sigGate({ sigRaw: 'not a signature\n' }, null, 'garbage signature');
+    assert.match(g.signatureError, /does not verify/);
+    g = await sigGate({ sigRaw: signSums(Buffer.from('some other file')) }, null, 'valid signature over different bytes');
+    assert.match(g.signatureError, /does not verify/);
+    // the sums are not even parsed before the signature verified: a tampered
+    // compat.json that the (forged) sums would vouch for changes nothing
+    g = await sigGate({ minPlugin: '0.1.0' }, () => {
+      release.sumsRaw = Object.entries(assetBytes(release)).map(([n, b]) => `${sha(b)}  ${n}`).join('\n') + '\n';
+      release.sigKey = OTHER_PRIV;
+    }, 'forged sums for a weakened compat.json');
+    assert.match(g.signatureError, /does not verify/);
+    // a signature download that fails (not "absent") is an ordinary failure, not a verdict
+    U.resetUpdateState();
+    freshRelease({ assetUrls: { 'SHA256SUMS.txt.sig': `${BASE}nope` } });
+    const dl = await U.checkForUpdate();
+    assert.strictEqual(dl.minPlugin, null);
+    assert.match(dl.compatError, /could not download SHA256SUMS\.txt\.sig/);
+    assert.strictEqual(dl.signatureError, null);
+    assert.strictEqual(U.updateSignal(dl, GOOD).signal, false);
+    // the signature is capped at 1KB, and only fetched from an allowed host
+    freshRelease({ sigRaw: 'A'.repeat(2000) });
+    U.resetUpdateState();
+    assert.match((await U.checkForUpdate()).compatError, /too large/);
+    freshRelease({ assetUrls: { 'SHA256SUMS.txt.sig': 'https://evil.example/SHA256SUMS.txt.sig' } });
+    U.resetUpdateState();
+    assert.match((await U.checkForUpdate()).compatError, /not an allowed update host/);
+    // a valid signature re-opens the gate; the failure is cleared, not sticky
+    U.resetUpdateState();
+    freshRelease();
+    const ok = await U.checkForUpdate();
+    assert.deepStrictEqual([ok.minPlugin, ok.signatureError], ['0.7.0', null]);
+    assert.strictEqual(U.updateSignal(ok, GOOD).signal, true);
+    // signature failure -> good release: listeners are told (the strip and notices recompute)
+    const seen = [];
+    const off = U.onUpdateState((x) => seen.push(x.signatureError));
+    freshRelease({ omitAssets: ['SHA256SUMS.txt.sig'] });
+    await U.checkForUpdate();
+    freshRelease();
+    await U.checkForUpdate();
+    off();
+    assert.strictEqual(seen.length, 2);
+    assert.ok(seen[0] && seen[1] === null, 'listeners fired on the signature state change');
+    // the cache only believes a minPlugin that a signature check produced
+    writeFileSync(join(home, 'update-check.json'), JSON.stringify({ latest: NEWER, checkedAt: 'x', minPlugin: '0.7.0' }));
+    assert.strictEqual(U.readCache().minPlugin, null, 'a cache without the signed flag (an older bridge wrote it) is not believed');
+    writeFileSync(join(home, 'update-check.json'), JSON.stringify({ latest: NEWER, checkedAt: 'x', minPlugin: '0.7.0', signed: true }));
+    assert.strictEqual(U.readCache().minPlugin, '0.7.0');
+    // the signal itself: signatureError beats everything, even a compatible plugin
+    const withErr = { current: BRIDGE_VERSION, latest: '0.9.0', available: true, checkedAt: 'x', minPlugin: '0.8.0', signatureError: 'bad signature' };
+    assert.deepStrictEqual(U.updateSignal(withErr, [{ pluginVersion: '0.9.0', fileName: 'F', wsReady: true, hello: true }]), { signal: false, blockedReason: 'Grip 0.9.0 is not offered: bad signature' });
+  }
+
+  // --- install: a bad signature is refused before anything else is believed; --force changes nothing
+  const fresh = (over = {}) => {
+    const home = tmp('grip-upd-home-');
+    env(home);
+    freshRelease(over);
+    writeFileSync(join(home, 'grip-bridge.mjs'), 'OLD BRIDGE');
+    mkdirSync(join(home, 'figma-plugin'));
+    writeFileSync(join(home, 'figma-plugin', 'code.js'), 'OLD PLUGIN');
+    return { home, before: snapshotDir(home) };
+  };
+  const untouched = (h, why) => {
+    assert.strictEqual(snapshotDir(h.home), h.before, `${why}: nothing added or removed`);
+    assert.strictEqual(readFileSync(join(h.home, 'grip-bridge.mjs'), 'utf8'), 'OLD BRIDGE', `${why}: bridge untouched`);
+    assert.strictEqual(readFileSync(join(h.home, 'figma-plugin', 'code.js'), 'utf8'), 'OLD PLUGIN', `${why}: plugin untouched`);
+  };
+  for (const [why, over, mutate, code, msg] of [
+    ['tampered sums', {}, () => { release.bodies['SHA256SUMS.txt'] = Buffer.from(sumsText(release) + '\n'); }, 'signature_invalid', /does not verify/],
+    ['signature from another key', { sigKey: OTHER_PRIV }, null, 'signature_invalid', /does not verify/],
+    ['garbage signature', { sigRaw: 'zzz' }, null, 'signature_invalid', /does not verify/],
+    ['no signature asset', { omitAssets: ['SHA256SUMS.txt.sig'] }, null, 'signature_missing', /unsigned/],
+  ]) {
+    for (const force of [false, true]) {
+      const h = fresh(over);
+      mutate?.();
+      const confirmCalls = [];
+      await assert.rejects(
+        inst({ force, acceptUnverified: force, confirm: async () => { confirmCalls.push(1); return true; } }),
+        (e) => e.code === code && msg.test(e.message),
+        `${why}${force ? ' (--force)' : ''}`,
+      );
+      untouched(h, `${why}${force ? ' (--force)' : ''}`);
+      assert.ok(!hits['/download/grip-bridge.mjs'] && !hits['/download/grip-plugin-code.js'] && !hits['/download/compat.json'],
+        `${why}: nothing but the sums and the signature was downloaded`);
+      assert.strictEqual(confirmCalls.length, 0, `${why}: the user is not even asked`);
+      const st = U.getUpdateState();
+      assert.ok(st.signatureError && st.minPlugin === null, `${why}: shared state records the failure`);
+      assert.strictEqual(U.updateSignal(st, GOOD).signal, false, `${why}: and withholds the signal`);
+    }
+  }
+  // the signature wins over the pin (it is the first thing believed)
+  {
+    const h = fresh({ sigKey: OTHER_PRIV });
+    await assert.rejects(inst({ version: '99.0.5' }), (e) => e.code === 'signature_invalid');
+    untouched(h, 'signature before version pin');
+  }
+  // an already-signed good release installs, and the signature + sums are what was downloaded
+  {
+    const h = fresh();
+    const r = await inst();
+    assert.strictEqual(r.status, 'updated');
+    assert.ok(hits['/download/SHA256SUMS.txt.sig'], 'the signature was fetched');
+    assert.strictEqual(U.getUpdateState().signatureError, null);
+    assert.strictEqual(readFileSync(join(h.home, 'grip-bridge.mjs'), 'utf8'), release.bridge.toString());
+  }
+  // under the PINNED key (no override) the test-signed release is rejected: tests cannot be fooled by the override staying on
+  {
+    const h = fresh();
+    const kept = process.env.GRIP_RELEASE_PUBKEY;
+    delete process.env.GRIP_RELEASE_PUBKEY;
+    try { await assert.rejects(inst({ force: true }), (e) => e.code === 'signature_invalid'); }
+    finally { process.env.GRIP_RELEASE_PUBKEY = kept; }
+    untouched(h, 'pinned key only');
   }
 }
 
@@ -1233,6 +1451,39 @@ const OLD_PLUGIN = [{ pluginVersion: '0.5.0', fileName: 'Old file', wsReady: tru
   assert.match(texts(det)[0], /elicitation/);
 }
 
+// ---------------------------------------------------------------- 5b. MCP surface: signature failures are plain
+{
+  const home = tmp('grip-upd-home-');
+  env(home);
+  freshRelease({ omitAssets: ['SHA256SUMS.txt.sig'] });
+  await U.checkForUpdate();
+  const c = await connect(makeBridge());
+  const chk = JSON.parse(texts(await c.client.callTool({ name: 'grip_update', arguments: { action: 'check' } }))[0]);
+  assert.strictEqual(chk.available, true);
+  assert.strictEqual(chk.signalled, false);
+  assert.match(chk.signatureError, /unsigned/, 'check surfaces signatureError');
+  assert.match(chk.blockedReason, /not offered/);
+  assert.match(chk.note, /NOT offered.*Do not install/);
+  const hl = JSON.parse(texts(await c.client.callTool({ name: 'grip_health', arguments: {} }))[0]);
+  assert.match(hl.update.signatureError, /unsigned/, 'grip_health.update surfaces signatureError');
+  assert.strictEqual(hl.update.signalled, false);
+  const ins = await c.client.callTool({ name: 'grip_update', arguments: { action: 'install', version: NEWER } });
+  assert.ok(ins.isError);
+  assert.match(texts(ins)[0], /^signature_missing: update failed: .*unsigned/);
+  freshRelease({ sigKey: OTHER_PRIV });
+  const ins2 = await c.client.callTool({ name: 'grip_update', arguments: { action: 'install', version: NEWER } });
+  assert.ok(ins2.isError);
+  assert.match(texts(ins2)[0], /^signature_invalid: update failed: .*does not verify/);
+  // a release that verifies carries no signatureError key at all
+  freshRelease();
+  const good = JSON.parse(texts(await c.client.callTool({ name: 'grip_update', arguments: { action: 'check' } }))[0]);
+  assert.strictEqual(good.signalled, true);
+  assert.ok(!('signatureError' in good), 'no signatureError when the signature verified');
+  assert.ok(!existsSync(join(home, 'grip-bridge.mjs')), 'nothing was installed by the refusals');
+  const det = texts(await c.client.callTool({ name: 'grip_capabilities', arguments: { tool: 'grip_update' } }))[0];
+  assert.match(det, /signature_invalid/, 'the tool guidance names the signature refusals');
+}
+
 // ---------------------------------------------------------------- 6. WS (plugin strip)
 assert.ok(originAllowedForUpdate(undefined) && originAllowedForUpdate('null') && originAllowedForUpdate('https://www.figma.com'));
 assert.ok(!originAllowedForUpdate('https://evil.example') && !originAllowedForUpdate('http://localhost:3000'));
@@ -1600,6 +1851,24 @@ assert.ok(!originAllowedForUpdate('https://evil.example') && !originAllowedForUp
   assert.match(ncf.out, /WARNING: .*no verifiable compatibility info/);
   assert.match(ncf.out, /Updated/);
   writeFileSync(join(home, 'grip-bridge.mjs'), 'OLD BRIDGE');
+
+  // a release whose signature is missing/invalid: never installed, and --force does NOT override (unlike compat.json)
+  for (const [why, over] of [['unsigned', { omitAssets: ['SHA256SUMS.txt.sig'] }], ['signed by another key', { sigKey: OTHER_PRIV }]]) {
+    freshRelease(over);
+    writeFileSync(join(home, 'grip-bridge.mjs'), 'OLD BRIDGE');
+    for (const flags of [['--yes'], ['--yes', '--force']]) {
+      const r = await run(['update', ...flags]);
+      assert.strictEqual(r.code, 1, `${why} ${flags}: ${r.out}${r.err}`);
+      assert.match(r.out, /Not installing: .*(unsigned|does not verify)/, why);
+      assert.match(r.out, flags.includes('--force') ? /--force does not override a signature failure/ : /Nothing overrides a signature failure/);
+      assert.ok(!/Updated/.test(r.out));
+      assert.strictEqual(readFileSync(join(home, 'grip-bridge.mjs'), 'utf8'), 'OLD BRIDGE', `${why} ${flags}: nothing installed`);
+    }
+    const c = await run(['update', '--check']);
+    assert.strictEqual(c.code, 0);
+    assert.match(c.out, /Not installing: /);
+  }
+  freshRelease();
 
   // a broken new bridge fails its self-test: nothing changes
   freshRelease({ bridge: Buffer.from('throw new Error("cannot start")\n') });

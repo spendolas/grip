@@ -7,6 +7,7 @@
 import assert from 'node:assert';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
+import { webcrypto } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -61,19 +62,31 @@ function harness() {
     constructor(url) { this.url = url; this.readyState = 0; this.sent = []; instances.push(this); }
     send(d) { this.sent.push(JSON.parse(d)); }
     open() { this.readyState = 1; this.onopen?.(); }
+    // a real bridge always welcomes first; this is the plain, pairing-less welcome
+    openWelcomed() { this.open(); this.deliver({ kind: 'welcome', sessionId: 's0' }); }
     deliver(o) { this.onmessage?.({ data: JSON.stringify(o) }); }
+    close(code = 1000, reason = '') { this.drop(code, reason); }
     drop(code = 1006, reason = '') { this.readyState = 3; this.onclose?.({ code, reason }); }
   }
   const posted = [];
   const win = {};
+  // What the plugin main thread keeps in clientStorage (grip.pairing). Replies are synchronous.
+  const store = { token: null };
+  const mainThread = (m) => {
+    if (m.kind === 'pairGet') win.onmessage({ data: { pluginMessage: { kind: 'pairToken', token: store.token } } });
+    else if (m.kind === 'pairSet') store.token = m.token;
+    else if (m.kind === 'pairClear') store.token = null;
+  };
   const ctx = vm.createContext({
     document: { getElementById: (id) => { requested.push(id); return strip; } },
     WebSocket: FakeWS,
-    parent: { postMessage: (m) => posted.push(JSON.parse(JSON.stringify(m))) },   // plain host-realm copy
+    parent: { postMessage: (m) => { const c = JSON.parse(JSON.stringify(m)); posted.push(c); mainThread(c.pluginMessage); } },   // plain host-realm copy
     window: win,
     setTimeout: (fn, ms) => { const id = ++seq; timers.set(id, { fn, at: now + (ms || 0) }); return id; },
     clearTimeout: (id) => { timers.delete(id); },
     JSON,
+    TextEncoder,
+    crypto: webcrypto,
   });
   vm.runInContext(script, ctx);
   const h = {
@@ -82,8 +95,10 @@ function harness() {
     title: () => strip.title,
     click: () => (listeners.click ?? []).forEach((f) => f()),
     ws: () => instances.at(-1),
+    store,
     instances,
     posted,
+    ctx,
     requested,
     // fromMain: what the plugin main thread posts to the iframe
     fromMain: (pluginMessage) => win.onmessage({ data: { pluginMessage } }),
@@ -120,7 +135,7 @@ const CONNECTED_TITLE = 'Connected';
 
   // connected: green; the tooltip names the plugin version once its hello is known
   const ws = h.ws();
-  ws.open();
+  ws.openWelcomed();
   assert.ok(h.has('connected') && !purple(h) && !h.has('actionable'));
   assert.strictEqual(h.title(), 'Connected');
   ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.8.0' });
@@ -196,7 +211,7 @@ const CONNECTED_TITLE = 'Connected';
   assert.ok(Math.min(...h.pendingTimers()) <= 300, `reconnect is scheduled fast: ${h.pendingTimers()}`);
   h.advance(300);
   assert.strictEqual(h.instances.length, n + 1, 'reconnected within 300ms');
-  h.ws().open();
+  h.ws().openWelcomed();
   assert.ok(h.has('connected') && !purple(h), 'back to green on the new bridge (nothing pending)');
   assert.strictEqual(h.title(), CONNECTED_TITLE);
 }
@@ -205,7 +220,7 @@ const CONNECTED_TITLE = 'Connected';
 {
   const h = harness();
   const ws = h.ws();
-  ws.open();
+  ws.openWelcomed();
   h.fromMain({ kind: 'hello', version: '0.8.0' });
   ws.deliver({ type: 'update', available: true, latest: '0.9.0', current: '0.8.0', headline: '' });
   h.click();
@@ -252,7 +267,7 @@ const CONNECTED_TITLE = 'Connected';
 {
   const h = harness();
   const ws = h.ws();
-  ws.open();
+  ws.openWelcomed();
   h.fromMain({ kind: 'hello', version: '0.8.0' });
   ws.deliver({ type: 'update', available: true, latest: '0.9.0', current: '0.8.0' });
   h.click();
@@ -271,7 +286,7 @@ const CONNECTED_TITLE = 'Connected';
 {
   const h = harness();
   const ws = h.ws();
-  ws.open();
+  ws.openWelcomed();
   ws.deliver({ type: 'update', available: true, latest: '0.9.0', current: '0.8.0' });
   assert.ok(h.has('update'));
   ws.drop(1006);
@@ -280,7 +295,7 @@ const CONNECTED_TITLE = 'Connected';
   assert.strictEqual(h.title(), 'Bridge not running. Click for setup');
   h.advance(2000);
   const ws2 = h.ws();
-  ws2.open();
+  ws2.openWelcomed();
   assert.ok(h.has('connected') && !purple(h), 'a fresh connection starts without an offer until the bridge announces one');
   ws2.deliver({ type: 'update', available: true, latest: '0.9.0', current: '0.8.0' });
   assert.ok(h.has('update'), 'the bridge re-announces on hello');
@@ -296,7 +311,7 @@ const CONNECTED_TITLE = 'Connected';
   {
     const h = harness();
     const ws = h.ws();
-    ws.open();
+    ws.openWelcomed();
     ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.7.0' });
     hello(h, '0.8.0');
     assert.ok(h.has('update') && h.has('actionable') && h.has('connected'), `purple: ${h.classes()}`);
@@ -309,7 +324,7 @@ const CONNECTED_TITLE = 'Connected';
   {
     const h = harness();
     const ws = h.ws();
-    ws.open();
+    ws.openWelcomed();
     ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.8.0' });
     hello(h, '0.8.0');
     assert.ok(h.has('connected') && !purple(h));
@@ -318,7 +333,7 @@ const CONNECTED_TITLE = 'Connected';
   {
     const h = harness();
     const ws = h.ws();
-    ws.open();
+    ws.openWelcomed();
     ws.deliver({ kind: 'welcome', sessionId: 's1' });
     hello(h, '0.8.0');
     assert.ok(h.has('connected') && !purple(h));
@@ -327,7 +342,7 @@ const CONNECTED_TITLE = 'Connected';
   {
     const h = harness();
     const ws = h.ws();
-    ws.open();
+    ws.openWelcomed();
     ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.8.0' });
     hello(h, '0.9.0');
     assert.ok(purple(h) && h.has('clickable') && !h.has('actionable'), 'a bridge that can update itself: the click is an update request, not the page');
@@ -343,7 +358,7 @@ const CONNECTED_TITLE = 'Connected';
 {
   const hello = (h, minBridge) => h.fromMain({ kind: 'hello', version: '0.9.0', minBridge, capabilities: [], fileKey: 'k', fileName: 'f', currentPageId: '0:1', currentPageName: 'P' });
   const setup = (bridgeVersion, minBridge = '0.9.0') => {
-    const h = harness(); const ws = h.ws(); ws.open();
+    const h = harness(); const ws = h.ws(); ws.openWelcomed();
     ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion });
     hello(h, minBridge);
     return { h, ws };
@@ -394,6 +409,150 @@ const CONNECTED_TITLE = 'Connected';
     assert.ok(h.has('connected') && !purple(h));
     h.click();
     assert.ok(!ws.sent.some((m) => m.type === 'update_request'));
+  }
+}
+
+// ------------------------------------------------------------ pairing (bridge/src/pairing.ts)
+{
+  const { createHmac } = await import('node:crypto');
+  const proof = (secret, role, nb, np) => createHmac('sha256', secret).update(`grip-auth|${role}|${nb}|${np}`).digest('hex');
+  const SECRET = 'ab'.repeat(32), NB = 'cd'.repeat(16);
+  const fresh = (token) => { const h = harness(); h.store.token = token ?? null; h.fromMain({ kind: 'pairToken', token: token ?? null }); return h; };
+  const requestFrame = { id: 'q1', method: 'get_node', params: { nodeId: '1:1' } };
+  const forwarded = (h) => h.posted.some((m) => m.pluginMessage.kind === 'request');
+  const helloAsked = (h) => h.posted.some((m) => m.pluginMessage.kind === 'welcome');
+
+  // first use: no token stored -> ask to pair; the grant is saved and the plugin goes on
+  {
+    const h = fresh(); const ws = h.ws(); ws.open();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.9.6', nonce: NB, pairing: 'open' });
+    assert.deepStrictEqual(ws.sent.at(-1), { type: 'pair_request' });
+    assert.ok(!helloAsked(h), 'no hello before the bridge answered');
+    ws.deliver(requestFrame);
+    assert.ok(!forwarded(h), 'a request on an untrusted socket is not obeyed');
+    ws.deliver({ type: 'paired', tokenId: 't1', secret: SECRET });
+    assert.deepStrictEqual(h.store.token, { id: 't1', secret: SECRET }, 'the token reaches clientStorage');
+    assert.ok(helloAsked(h), 'hello follows the pairing');
+    ws.deliver(requestFrame);
+    assert.ok(forwarded(h), 'requests flow once trusted');
+  }
+  // a stored token: prove ourselves, verify the bridge, only then hello and obey
+  {
+    const h = fresh({ id: 't1', secret: SECRET }); const ws = h.ws(); ws.open();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.9.6', nonce: NB, pairing: 'enforced' });
+    const auth = ws.sent.at(-1);
+    assert.strictEqual(auth.type, 'auth'); assert.strictEqual(auth.tokenId, 't1');
+    assert.strictEqual(auth.proof, proof(SECRET, 'plugin', NB, auth.nonce), 'plugin proof matches node:crypto HMAC');
+    assert.ok(!JSON.stringify(ws.sent).includes(SECRET), 'the secret never goes on the wire');
+    assert.ok(!helloAsked(h));
+    ws.deliver({ type: 'auth_ok', proof: proof(SECRET, 'bridge', NB, auth.nonce) });
+    assert.ok(helloAsked(h)); ws.deliver(requestFrame); assert.ok(forwarded(h));
+  }
+  // an impostor that cannot prove the bridge half: refused, no hello, no requests
+  {
+    const h = fresh({ id: 't1', secret: SECRET }); const ws = h.ws(); ws.open();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', nonce: NB });
+    const auth = ws.sent.at(-1);
+    ws.deliver({ type: 'auth_ok', proof: proof('ff'.repeat(32), 'bridge', NB, auth.nonce) });
+    assert.ok(!helloAsked(h), 'no file name or key is sent to a bridge that failed the proof');
+    ws.deliver(requestFrame); assert.ok(!forwarded(h));
+    assert.ok(h.has('warning')); assert.match(h.title(), /could not prove who it is/);
+    // the plugin's own proof must not be replayable as the bridge's
+    const h2 = fresh({ id: 't1', secret: SECRET }); const ws2 = h2.ws(); ws2.open();
+    ws2.deliver({ kind: 'welcome', sessionId: 's1', nonce: NB });
+    const a2 = ws2.sent.at(-1);
+    ws2.deliver({ type: 'auth_ok', proof: a2.proof });
+    assert.ok(!helloAsked(h2), 'reflecting the plugin proof does not pass');
+  }
+  // a squatter with NO pairing support while we hold a token: refused (downgrade)
+  {
+    const h = fresh({ id: 't1', secret: SECRET }); const ws = h.ws(); ws.open();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.9.5' });
+    assert.ok(!helloAsked(h)); ws.deliver(requestFrame); assert.ok(!forwarded(h));
+    assert.ok(h.has('warning'));
+  }
+  // not paired and not allowed to: says what to run, click retries
+  {
+    const h = fresh(); const ws = h.ws(); ws.open();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', nonce: NB, pairing: 'enforced' });
+    ws.deliver({ type: 'pair_denied', reason: 'pairing_required' });
+    assert.ok(h.has('warning') && h.has('actionable'));
+    assert.match(h.title(), /grip-bridge\.mjs pair/);
+    const n = h.instances.length;
+    h.click();
+    assert.strictEqual(h.instances.length, n + 1, 'a click reconnects at once');
+    assert.ok(!helloAsked(h));
+  }
+  // refused right after someone else paired: say so, with the recovery
+  {
+    const h = fresh(); const ws = h.ws(); ws.open();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', nonce: NB, pairing: 'enforced' });
+    ws.deliver({ type: 'pair_denied', reason: 'pairing_required', recentGrant: true });
+    assert.ok(h.has('warning'));
+    assert.match(h.title(), /Another client paired first/);
+    assert.match(h.title(), /pair --reset/);
+  }
+  // two windows pair at the same moment: the loser must pick up the winner's token on its next connect
+  {
+    const TOKEN = { id: '0123456789abcdef', secret: SECRET };
+    const h = fresh(); const ws = h.ws(); ws.open();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', nonce: NB, pairing: 'enforced' });
+    ws.deliver({ type: 'pair_denied', reason: 'pairing_required', recentGrant: true });
+    assert.match(h.title(), /Another client paired first/);
+    h.store.token = TOKEN;                                   // the other window saved its token meanwhile
+    h.advance(9000);                                         // slow reconnect
+    const ws2 = h.ws(); assert.notStrictEqual(ws2, ws, 'reconnected');
+    ws2.open();
+    ws2.deliver({ kind: 'welcome', sessionId: 's2', nonce: NB, pairing: 'enforced' });
+    assert.strictEqual(ws2.sent.at(-1).type, 'auth', 'the loser authenticates with the winner\'s token instead of asking to pair again');
+    assert.strictEqual(ws2.sent.at(-1).tokenId, TOKEN.id);
+  }
+  // the bridge forgot us: tell the user, a click drops the old token and pairs again
+  {
+    const h = fresh({ id: 't1', secret: SECRET }); const ws = h.ws(); ws.open();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', nonce: NB });
+    ws.deliver({ type: 'auth_failed' });
+    assert.match(h.title(), /Pairing lost/);
+    h.click();
+    assert.strictEqual(h.store.token, null, 'the stale token is cleared');
+    assert.ok(!h.has('warning') || h.title() !== 'Pairing lost. Click to pair again');
+  }
+}
+
+// ------------------------------------------------------------ admission ticket (reserved pool)
+{
+  const TOKEN = { id: '0123456789abcdef', secret: 'ab'.repeat(32) };
+  // a paired plugin carries its token id (never the secret) in the connect URL
+  {
+    const h = harness(); h.store.token = TOKEN; h.fromMain({ kind: 'pairToken', token: TOKEN });
+    h.ws().drop(1006); h.advance(5000);
+    assert.strictEqual(h.ws().url, 'ws://localhost:7777/?t=0123456789abcdef', 'the reconnect carries the ticket');
+    assert.ok(!h.ws().url.includes(TOKEN.secret));
+  }
+  // unpaired: plain URL
+  {
+    const h = harness();
+    assert.strictEqual(h.ws().url, 'ws://localhost:7777');
+  }
+  // if Figma refused a URL with a query, the third attempt goes without it and the ticket is then dropped
+  {
+    const h = harness(); h.store.token = TOKEN; h.fromMain({ kind: 'pairToken', token: TOKEN });
+    h.ws().drop(1006); h.advance(5000);                                    // attempt with ticket (fails)
+    assert.ok(h.ws().url.includes('?t='));
+    h.ws().drop(1006); h.advance(5000);                                    // ticket again (fails)
+    assert.ok(h.ws().url.includes('?t='));
+    h.ws().drop(1006); h.advance(5000);                                    // two failures: try without
+    assert.strictEqual(h.ws().url, 'ws://localhost:7777', 'the third attempt goes without the ticket');
+    h.ws().openWelcomed();
+    h.ws().drop(1006); h.advance(5000);
+    assert.strictEqual(h.ws().url, 'ws://localhost:7777', 'a ticketless success drops the ticket for this window');
+  }
+  // a working ticket keeps being used
+  {
+    const h = harness(); h.store.token = TOKEN; h.fromMain({ kind: 'pairToken', token: TOKEN });
+    h.ws().drop(1006); h.advance(5000);
+    h.ws().open(); h.ws().drop(1006); h.advance(5000);
+    assert.ok(h.ws().url.includes('?t='));
   }
 }
 

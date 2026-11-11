@@ -74,6 +74,135 @@
       let updFlash = false;       // the red flash on screen is an update failure, not "no bridge"
       let updTimer = null;
 
+      // ---- Pairing (bridge/src/pairing.ts) ------------------------------------------------
+      // The socket is untrusted until the bridge proves it holds the shared secret we keep in
+      // clientStorage (via code.ts). Until then we neither say hello (no file name, no key) nor
+      // obey a request. A bridge that predates pairing sends no nonce; with no token stored we
+      // go on as before, but once a token exists a bridge without a nonce is refused (that is
+      // what an impostor squatting the port looks like).
+      let trusted = false;          // may this socket's requests be obeyed?
+      let pairIssue = '';           // '' | 'needs' | 'raced' | 'lost' | 'unverified'
+      let welcomeMsg = null;        // the welcome frame we are answering
+      let nonceBridge = '', noncePlugin = '';
+      let storedToken = null;       // {id, secret} | null
+      let tokenLoaded = false;
+      let tokenWaiters = [];
+      let pairDeniedRetried = false;
+      // Admission ticket: a paired plugin puts the id of its token (never the secret) in the connect
+      // URL so the bridge queues it in a reserved pool that socket churn from a web page cannot
+      // exhaust. If Figma were to refuse a URL with a query, every third attempt goes without it
+      // and, once that works, the ticket is dropped for the rest of this window.
+      let ticketFails = 0, ticketOk = true, usedTicket = false;
+
+      // Plain-JS SHA-256 / HMAC-SHA-256 (no dependency on crypto.subtle, which a sandboxed
+      // iframe may not offer). Checked against node:crypto in test/plugin-ui.mjs.
+      const SHA_K = [], SHA_H0 = [];
+      (function () {
+        let found = 0;
+        for (let n = 2; found < 64; n++) {
+          let prime = true;
+          for (let d = 2; d * d <= n; d++) if (n % d === 0) { prime = false; break; }
+          if (!prime) continue;
+          if (found < 8) SHA_H0.push((Math.sqrt(n) % 1) * 4294967296 | 0);
+          SHA_K.push((Math.cbrt(n) % 1) * 4294967296 | 0);
+          found++;
+        }
+      })();
+      function sha256(bytes) {
+        const l = bytes.length, words = [];
+        for (let i = 0; i < l; i++) words[i >> 2] |= bytes[i] << (24 - (i % 4) * 8);
+        words[l >> 2] |= 0x80 << (24 - (l % 4) * 8);
+        words[(((l + 8) >> 6) << 4) + 15] = l * 8;
+        const H = SHA_H0.slice(), w = new Array(64);
+        for (let o = 0; o < words.length; o += 16) {
+          for (let i = 0; i < 64; i++) {
+            if (i < 16) { w[i] = words[o + i] | 0; continue; }
+            const x = w[i - 15], y = w[i - 2];
+            const s0 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3);
+            const s1 = ((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+          }
+          let a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+          for (let i = 0; i < 64; i++) {
+            const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+            const t1 = (h + S1 + ((e & f) ^ (~e & g)) + SHA_K[i] + w[i]) | 0;
+            const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+            const t2 = (S0 + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+            h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+          }
+          H[0] = (H[0] + a) | 0; H[1] = (H[1] + b) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0;
+          H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+        }
+        const out = new Uint8Array(32);
+        for (let i = 0; i < 8; i++) { out[i * 4] = H[i] >>> 24; out[i * 4 + 1] = (H[i] >>> 16) & 255; out[i * 4 + 2] = (H[i] >>> 8) & 255; out[i * 4 + 3] = H[i] & 255; }
+        return out;
+      }
+      function utf8(str) { return new TextEncoder().encode(str); }
+      function hmacHex(keyStr, msgStr) {
+        let key = utf8(keyStr);
+        if (key.length > 64) key = sha256(key);
+        const ipad = new Uint8Array(64), opad = new Uint8Array(64);
+        for (let i = 0; i < 64; i++) { const k = i < key.length ? key[i] : 0; ipad[i] = k ^ 0x36; opad[i] = k ^ 0x5c; }
+        const m = utf8(msgStr);
+        const inner = new Uint8Array(64 + m.length); inner.set(ipad); inner.set(m, 64);
+        const ih = sha256(inner);
+        const outer = new Uint8Array(96); outer.set(opad); outer.set(ih, 64);
+        return Array.from(sha256(outer)).map((x) => (x < 16 ? '0' : '') + x.toString(16)).join('');
+      }
+      function randomHex(n) {
+        const b = new Uint8Array(n);
+        (globalThis.crypto || window.crypto).getRandomValues(b);
+        return Array.from(b).map((x) => (x < 16 ? '0' : '') + x.toString(16)).join('');
+      }
+      function sameString(a, b) {
+        if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
+        let r = 0; for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+        return r === 0;
+      }
+      function withToken(cb) { if (tokenLoaded) cb(storedToken); else tokenWaiters.push(cb); }
+      function toCode(m) { parent.postMessage({ pluginMessage: m }, '*'); }
+      function sayHello() { if (welcomeMsg) toCode({ kind: 'welcome', sessionId: welcomeMsg.sessionId }); }
+      function beginPairing() {
+        withToken((tok) => {
+          if (!welcomeMsg || !ws || ws.readyState !== 1) return;
+          if (tok) {
+            noncePlugin = randomHex(16);
+            send({ type: 'auth', tokenId: tok.id, nonce: noncePlugin, proof: hmacHex(tok.secret, 'grip-auth|plugin|' + nonceBridge + '|' + noncePlugin) });
+          } else {
+            send({ type: 'pair_request' });
+          }
+        });
+      }
+      // Give up on this socket for a reason the user can act on; retry slowly.
+      function refuseBridge(issue) {
+        pairIssue = issue; trusted = false;
+        backoff = 8000;
+        try { if (ws) ws.close(1000, 'pairing'); } catch (e) {}
+        setState('warning');
+      }
+      function onPairFrame(msg) {
+        if (msg.type === 'auth_ok') {
+          const tok = storedToken;
+          if (!tok || !welcomeMsg) return;
+          if (!sameString(msg.proof, hmacHex(tok.secret, 'grip-auth|bridge|' + nonceBridge + '|' + noncePlugin))) { refuseBridge('unverified'); return; }
+          trusted = true; pairIssue = ''; sayHello(); render();
+        } else if (msg.type === 'auth_failed') {
+          refuseBridge('lost');
+        } else if (msg.type === 'paired') {
+          if (typeof msg.tokenId !== 'string' || typeof msg.secret !== 'string' || msg.secret.length < 32) return;
+          storedToken = { id: msg.tokenId, secret: msg.secret }; tokenLoaded = true;
+          toCode({ kind: 'pairSet', token: storedToken });
+          trusted = true; pairIssue = ''; sayHello(); render();
+        } else if (msg.type === 'pair_denied') {
+          // Another window of this plugin may have paired a moment ago and saved its token: look once more.
+          if (!pairDeniedRetried) {
+            pairDeniedRetried = true; tokenLoaded = false;
+            toCode({ kind: 'pairGet' });
+            withToken((tok) => { if (tok) beginPairing(); else refuseBridge(msg.recentGrant ? 'raced' : 'needs'); });
+          } else refuseBridge(msg.recentGrant ? 'raced' : 'needs');
+        }
+      }
+
       // x.y.z compare; anything unparseable counts as 'not older' (never nag on a guess).
       function olderThan(a, b) {
         const pa = /^(\d+)\.(\d+)\.(\d+)/.exec(a), pb = /^(\d+)\.(\d+)\.(\d+)/.exec(b);
@@ -97,6 +226,7 @@
       function render() {
         el.classList.remove('connected', 'warning', 'error', 'update', 'updating', 'clickable', 'actionable', 'pulsing');
         if (current !== 'disconnected') el.classList.add(current);
+        if (pairIssue) el.classList.add('actionable');
         // Purple only while connected: a disconnected strip stays grey.
         const offered = current === 'connected' && !!updLatest && !updClone;
         // Grey means no bridge is listening. The plugin can't start one (the Figma
@@ -118,6 +248,10 @@
       // Tooltips are native `title`s: keep every one very short and plain.
       function tooltip(offered, needsSetup) {
         if (updPhase === 'updating') return current === 'connected' ? 'Updating…' : 'Restarting…';
+        if (pairIssue === 'raced') return 'Another client paired first. If that was not you, run "node ~/.grip/grip-bridge.mjs pair --reset", then "pair"';
+        if (pairIssue === 'needs') return 'Not paired. Run "node ~/.grip/grip-bridge.mjs pair", then click here';
+        if (pairIssue === 'lost') return 'Pairing lost. Click to pair again';
+        if (pairIssue === 'unverified') return 'This bridge could not prove who it is. Click to forget the pairing';
         if (needsSetup) return 'Bridge not running. Click for setup';
         if (current !== 'connected') return '';
         if (updLatest && updClone) return 'Update available (developer install)';
@@ -157,14 +291,25 @@
       function connect() {
         if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
         try {
-          ws = new WebSocket(URL);
+          const ticket = storedToken && ticketOk && ticketFails < 2 && /^[0-9a-f]{16}$/.test(storedToken.id);
+          usedTicket = !!ticket;
+          ws = new WebSocket(ticket ? URL + '/?t=' + storedToken.id : URL);
         } catch (e) {
           setState('error');
           scheduleReconnect();
           return;
         }
+        let everOpened = false;
         ws.onopen = () => {
+          everOpened = true;
+          if (usedTicket) ticketFails = 0;
+          else if (storedToken && ticketFails >= 2) { ticketOk = false; }   // it works without the query, not with it
           backoff = 500;
+          trusted = false; welcomeMsg = null; pairDeniedRetried = false;
+          // Always re-read: another window of this plugin may have paired (and saved the token) since
+          // we last looked; a stale empty copy would keep asking to pair and be refused forever.
+          tokenLoaded = false;
+          toCode({ kind: 'pairGet' });
           // Back after an update-triggered restart: whatever was pending belongs
           // to the OLD bridge. The new one re-announces an update itself if one
           // is still pending.
@@ -173,12 +318,16 @@
         };
         ws.onclose = (ev) => {
           busyCount = 0;
+          if (!everOpened) { if (usedTicket) ticketFails++; else if (ticketFails >= 2) ticketFails = 0; }
           // Mid-update the drop is expected (the bridge restarts): keep "Updating…"
           // until we reconnect. Otherwise nothing is on offer without a bridge.
           if (updPhase !== 'updating') clearUpdate();
+          trusted = false;
           if (ev.code === 1000 && ev.reason === 'duplicate') {
             setState('warning');
             backoff = 10000;
+          } else if (pairIssue) {
+            setState('warning');
           } else {
             setState('disconnected');
           }
@@ -193,10 +342,22 @@
           // Bridge → UI control (welcome) is forwarded to plugin so it can hello back.
           if (msg && msg.kind === 'welcome') {
             if (typeof msg.bridgeVersion === 'string') bridgeVersion = msg.bridgeVersion;
+            welcomeMsg = msg;
             render();
-            parent.postMessage({ pluginMessage: { kind: 'welcome', sessionId: msg.sessionId } }, '*');
+            if (typeof msg.nonce === 'string' && msg.nonce.length >= 16) {
+              nonceBridge = msg.nonce;
+              beginPairing();
+            } else {
+              // A bridge without pairing. Fine for a plugin that never paired; once it has a
+              // token, a bridge that cannot take part is not the one it paired with.
+              withToken((tok) => { if (tok) refuseBridge('unverified'); else { trusted = true; sayHello(); } });
+            }
             return;
           }
+          // Pairing answers come first and never need trust.
+          if (msg && (msg.type === 'auth_ok' || msg.type === 'auth_failed' || msg.type === 'paired' || msg.type === 'pair_denied')) { onPairFrame(msg); return; }
+          // Everything else is the bridge talking: nothing from a socket that has not proven itself.
+          if (!trusted) return;
           // Update frames (additive; older plugins/bridges simply ignore them).
           if (msg && msg.type === 'update') { onUpdateNotice(msg); return; }
           if (msg && msg.type === 'update_result') { onUpdateResult(msg); return; }
@@ -287,7 +448,7 @@
         const MAX_BACKOFF = 2000;
         // The bridge is restarting for an update: poll fast, it is back within ~2s.
         const fast = updPhase === 'updating';
-        const delay = fast ? 250 : Math.min(backoff, MAX_BACKOFF);
+        const delay = fast ? 250 : pairIssue ? 8000 : Math.min(backoff, MAX_BACKOFF);
         if (!fast) backoff = Math.min(backoff * 2, MAX_BACKOFF);
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null;
@@ -303,7 +464,13 @@
         const msg = ev.data && ev.data.pluginMessage;
         if (!msg) return;
 
-        if (msg.kind === 'response') {
+        if (msg.kind === 'pairToken') {
+          const t = msg.token;
+          storedToken = t && typeof t.id === 'string' && typeof t.secret === 'string' ? { id: t.id, secret: t.secret } : null;
+          tokenLoaded = true;
+          const w = tokenWaiters; tokenWaiters = [];
+          for (const cb of w) cb(storedToken);
+        } else if (msg.kind === 'response') {
           send({ id: msg.id, result: msg.result, error: msg.error });
         } else if (msg.kind === 'scriptLog') {
           // Relay a streamed run_script log line so the bridge can attach it
@@ -330,6 +497,15 @@
       };
 
       el.addEventListener('click', () => {
+        if (pairIssue) {
+          // 'lost' / 'unverified': forget the old pairing so this plugin can pair again (the
+          // bridge decides whether it may: first use or an open window). 'needs': just retry.
+          if (pairIssue !== 'needs' && pairIssue !== 'raced') { storedToken = null; tokenLoaded = true; toCode({ kind: 'pairClear' }); }
+          pairIssue = ''; backoff = 500; render();
+          if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+          connect();
+          return;
+        }
         if (el.classList.contains('actionable')) {
           parent.postMessage({ pluginMessage: { kind: 'openSetup' } }, '*');
         } else if (el.classList.contains('clickable')) {
@@ -339,7 +515,10 @@
 
       // Starting state: disconnected, grey, with the setup tooltip.
       render();
-      connect();
+      // The first connect waits (briefly) for the stored token so it can carry its id.
+      toCode({ kind: 'pairGet' });
+      setTimeout(() => { if (!tokenLoaded) { tokenLoaded = true; storedToken = null; const w = tokenWaiters; tokenWaiters = []; for (const cb of w) cb(null); } }, 1500);
+      withToken(() => connect());
     </script>
   </body>
 </html>

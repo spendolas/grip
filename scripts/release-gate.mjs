@@ -12,11 +12,14 @@ import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Every file a release must carry. The in-place updater downloads six of them
+// Every file a release must carry. The in-place updater downloads seven of them
 // by exact name (see src/bridge/src/update.ts: ASSET_BRIDGE, PLUGIN_ASSETS,
-// ASSET_SUMS, ASSET_COMPAT); grip-install.zip is for fresh installs (it carries
+// ASSET_SUMS, ASSET_SUMS_SIG, ASSET_COMPAT); grip-install.zip is for fresh installs (it carries
 // the installer, which is useless on its own and so is not a loose asset);
 // THIRD-PARTY-NOTICES.txt is for people (and legal), the updater never fetches it.
+// SHA256SUMS.txt.sig is the Ed25519 signature over SHA256SUMS.txt, made by
+// scripts/sign-release.mjs (not by the packager); a release without it is
+// incomplete, so the gate reports 'recover' for it like for any missing asset.
 export const REQUIRED_ASSETS = [
   'grip-bridge.mjs',
   'grip-plugin-code.js',
@@ -26,6 +29,7 @@ export const REQUIRED_ASSETS = [
   'compat.json',
   'THIRD-PARTY-NOTICES.txt',
   'SHA256SUMS.txt',
+  'SHA256SUMS.txt.sig',
 ];
 
 // Everything from this line on in a release body is for people reading the

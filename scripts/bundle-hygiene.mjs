@@ -14,8 +14,10 @@
 // CI runs this after `npm run build` (release.yml); scripts/bundle-hygiene.test.mjs
 // covers every pattern with fixture strings. Modelled on Gaffer's bundle-daemon.sh.
 //
-// ALLOWLIST is intentionally empty: the current bundles are clean, so nothing
-// needs an exemption. If a bundled library ever ships harmless example text that
+// ALLOWLIST holds exactly one entry: the PUBLIC key the bridge pins to verify
+// release signatures (src/bridge/src/update.ts RELEASE_PUBLIC_KEYS). A public key
+// is not a secret, but its PEM header trips the pem-block pattern. Private keys
+// and every other PEM block are still flagged. If a bundled library ever ships harmless example text that
 // trips a pattern, add the exact offending substring below with a comment saying
 // where it comes from. Anything on an allowlisted line is skipped, so keep entries
 // as specific as possible. Never widen a pattern's regex to make a hit go away.
@@ -23,7 +25,10 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const ALLOWLIST = [];
+export const ALLOWLIST = [
+  // update.ts RELEASE_PUBLIC_KEYS: the pinned release-signing PUBLIC key (an SPKI block, not a secret).
+  '-----BEGIN PUBLIC KEY-----',
+];
 
 export const PATTERNS = [
   // developer paths
