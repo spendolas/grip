@@ -468,6 +468,8 @@ assert.strictEqual(U.releaseNotes('short'), 'short');
   assert.match(readFileSync(join(picked, 'code.js'), 'utf8'), new RegExp(`'${esc(NEWER)}'`));
   assert.strictEqual(readFileSync(join(clone, 'ui.html'), 'utf8'), 'OLD UI', 'the checkout was not written');
   assert.ok(!snapshotDir(picked).includes('.tmp-'), 'no temp files left in the imported folder');
+  const mk2 = JSON.parse(readFileSync(join(home, 'update-done.json'), 'utf8'));
+  assert.deepStrictEqual([mk2.version, mk2.from, mk2.refreshed], [NEWER, BRIDGE_VERSION, 1], 'the update leaves a marker for the restarted bridge');
   delete process.env.GRIP_FIGMA_SETTINGS;
 }
 
@@ -482,12 +484,13 @@ assert.strictEqual(U.releaseNotes('short'), 'short');
     writeFileSync(join(home, 'grip-bridge.mjs'), 'OLD BRIDGE');
     const bridge = new EventEmitter();
     const sent = [];
-    Object.assign(bridge, { snapshot: () => ({ plugins }), setUpdateState() {}, sendTo: (id, m) => sent.push([id, m]), pushUpdate() {} });
+    const toasts = [];
+    Object.assign(bridge, { snapshot: () => ({ plugins }), setUpdateState() {}, sendTo: (id, m) => sent.push([id, m]), pushUpdate() {}, toast: (id, m) => { toasts.push([id, m]); return true; } });
     const off = U.wireUpdateToBridge(bridge);
     bridge.emit('update-request', { sessionId: 'p', version: 'latest' });
     for (let i = 0; i < 100 && !sent.length; i++) await sleep(20);
     off();
-    return { sent, home };
+    return { sent, home, toasts };
   };
   const needs = (minBridge) => [{ sessionId: 'p', pluginVersion: '1.0.0', fileName: 'F', wsReady: true, hello: true, ...(minBridge ? { minBridge } : {}) }];
   // the plugin wants a bridge newer than this one: the current release installs (same checks as any install)
@@ -504,6 +507,7 @@ assert.strictEqual(U.releaseNotes('short'), 'short');
   // nothing newer published
   r = await run(needs('99.5.0'), { version: BRIDGE_VERSION });
   assert.deepStrictEqual([r.sent[0][1].status, r.sent[0][1].code], ['error', 'no_update_available']);
+  assert.deepStrictEqual(r.toasts, [['p', 'Grip could not update: no newer bridge is published yet']], 'a failure is also said in Figma');
   assert.strictEqual(readFileSync(join(r.home, 'grip-bridge.mjs'), 'utf8'), 'OLD BRIDGE');
   // checks off: no request leaves the machine
   r = await run(needs('99.5.0'), {}, true);
@@ -532,7 +536,7 @@ assert.strictEqual(U.releaseNotes('short'), 'short');
   if (process.platform !== 'win32') assert.ok(statSync(join(home, 'grip-bridge.mjs')).mode & 0o100, 'bridge is executable');
   assert.ok(!snapshotDir(home).includes('.tmp-'), 'no temp files left behind');
   const written = readdirSync(home).sort();
-  assert.ok(written.every((n) => ['figma-plugin', 'grip-bridge.mjs', 'grip-bridge.prev.mjs', 'install.json', 'update-check.json'].includes(n)), `only expected entries in GRIP_HOME: ${written}`);
+  assert.ok(written.every((n) => ['figma-plugin', 'grip-bridge.mjs', 'grip-bridge.prev.mjs', 'install.json', 'update-check.json', 'update-done.json'].includes(n)), `only expected entries in GRIP_HOME: ${written}`);
   // every asset came through the GitHub-style redirect, once
   assert.deepStrictEqual(
     downloads().filter((p) => p.startsWith('/download/')).sort(),

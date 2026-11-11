@@ -2,12 +2,14 @@
 // told only about what is left. No network, temp GRIP_HOME, fake Figma settings.
 import assert from 'node:assert';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, utimesSync, readdirSync } from 'node:fs';
+import * as fs from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, utimesSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import * as U from '../dist/update.js';
+import { BRIDGE_VERSION } from '../dist/types.js';
 import { createSession } from '../dist/mcp-server.js';
 
 const tmp = (p) => mkdtempSync(join(tmpdir(), p));
@@ -150,7 +152,7 @@ const health = (c) => c.client.callTool({ name: 'grip_health', arguments: {} });
   let off = U.wireUpdateToBridge(b);
   assert.strictEqual(toasts.length, 1);
   assert.strictEqual(toasts[0][0], 'old');
-  assert.match(toasts[0][1], /Grip was updated\. Close and reopen the Grip plugin to load its newer version \(0\.8\.0 → 0\.9\.0\)/);
+  assert.strictEqual(toasts[0][1], 'Grip was updated. Reopen the plugin to load its new version.');
   b.emit('session-change'); b.emit('session-change');
   assert.strictEqual(toasts.length, 1, 'reconnect churn does not repeat it');
   off();
@@ -182,6 +184,67 @@ const health = (c) => c.client.callTool({ name: 'grip_health', arguments: {} });
   Object.assign(plain, { snapshot: () => ({ plugins }), setUpdateState() {}, sendTo() {}, pushUpdate() {} });
   world([]);
   U.wireUpdateToBridge(plain)();
+}
+
+// ---- "Grip updated" confirmation: marker, one toast per open file, merged with the reopen nudge
+{
+  const mkBridge = (plugins) => {
+    const b = new EventEmitter();
+    const toasts = [];
+    Object.assign(b, { snapshot: () => ({ plugins }), setUpdateState() {}, sendTo() {}, pushUpdate() {}, toast: (sid, msg) => { toasts.push([sid, msg]); return true; } });
+    return { b, toasts, plugins };
+  };
+  const w = world([]);
+  const markerFile = join(w.home, 'update-done.json');
+  const now = Date.now();
+  // the marker counts only for this running version and only while fresh
+  assert.strictEqual(U.readUpdateMarker(), null, 'no marker');
+  U.writeUpdateMarker({ version: '99.0.0', from: BRIDGE_VERSION, at: new Date(now).toISOString(), refreshed: 0 });
+  assert.strictEqual(U.readUpdateMarker(), null, 'announces another version: not ours');
+  U.writeUpdateMarker({ version: BRIDGE_VERSION, from: '0.0.1', at: new Date(now - 11 * 60_000).toISOString(), refreshed: 0 });
+  assert.strictEqual(U.readUpdateMarker(), null, 'older than ten minutes');
+  assert.ok(!existsSync(markerFile), 'a stale marker is removed');
+  U.writeUpdateMarker({ version: BRIDGE_VERSION, from: '0.0.1', at: new Date(now).toISOString(), refreshed: 2 });
+  assert.deepStrictEqual(U.readUpdateMarker(), { version: BRIDGE_VERSION, from: '0.0.1', at: new Date(now).toISOString(), refreshed: 2 });
+  writeFileSync(markerFile, '{ nope');
+  assert.strictEqual(U.readUpdateMarker(), null, 'garbage: ignored');
+
+  // every open file gets exactly one confirmation, also across reconnect churn (new session id, same file)
+  U.writeUpdateMarker({ version: BRIDGE_VERSION, from: '0.0.1', at: new Date().toISOString(), refreshed: 1 });
+  const cur = [win(BRIDGE_VERSION, 'A', { sessionId: 'a1', fileKey: 'ka' }), win(BRIDGE_VERSION, 'B', { sessionId: 'b1', fileKey: 'kb' })];
+  let { b, toasts, plugins } = mkBridge(cur);
+  let off = U.wireUpdateToBridge(b);
+  assert.deepStrictEqual(toasts.map((t) => t[0]).sort(), ['a1', 'b1']);
+  assert.strictEqual(toasts[0][1], `Grip updated to ${BRIDGE_VERSION}.`, 'short and plain, also when a plugin copy was refreshed');
+  plugins[0] = win(BRIDGE_VERSION, 'A', { sessionId: 'a2', fileKey: 'ka' });   // Figma respawned the iframe
+  b.emit('session-change');
+  assert.strictEqual(toasts.length, 2, 'not again for the same file');
+  plugins.push(win(BRIDGE_VERSION, 'C', { sessionId: 'c1', fileKey: 'kc' }));   // a file opened later (still within ten minutes)
+  b.emit('session-change');
+  assert.strictEqual(toasts.length, 3);
+  assert.strictEqual(toasts[2][0], 'c1');
+  off();
+  // no marker: no confirmation
+  fs.rmSync(markerFile, { force: true });
+  ({ b, toasts } = mkBridge(cur));
+  off = U.wireUpdateToBridge(b);
+  assert.strictEqual(toasts.length, 0);
+  off();
+  // a Community window that is also behind: ONE message with both
+  U.writeUpdateMarker({ version: BRIDGE_VERSION, from: '0.0.1', at: new Date().toISOString(), refreshed: 0 });
+  ({ b, toasts } = mkBridge([win('0.1.0', 'Old', { sessionId: 'o1', fileKey: 'ko' })]));
+  off = U.wireUpdateToBridge(b);
+  assert.strictEqual(toasts.length, 1);
+  assert.strictEqual(toasts[0][1], `Grip updated to ${BRIDGE_VERSION}. Reopen the plugin to load its new version.`, 'one short message when both apply');
+  off();
+  // checks off: the confirmation still shows (the user did update), the reopen nudge does not
+  world([]); process.env.GRIP_NO_UPDATE_CHECK = '1';
+  U.writeUpdateMarker({ version: BRIDGE_VERSION, from: '0.0.1', at: new Date().toISOString(), refreshed: 0 });
+  ({ b, toasts } = mkBridge([win('0.1.0', 'Old', { sessionId: 'o1', fileKey: 'ko' })]));
+  off = U.wireUpdateToBridge(b);
+  assert.deepStrictEqual(toasts.map((t) => t[1]), [`Grip updated to ${BRIDGE_VERSION}.`]);
+  off();
+  delete process.env.GRIP_NO_UPDATE_CHECK;
 }
 
 // ---- the strip: purple for a refreshable copy, one click refreshes it

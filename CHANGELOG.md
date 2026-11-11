@@ -2,6 +2,12 @@
 
 Newest first. Each `## <version>` heading is the exact version number; the GitHub Release for that version uses its section as the release notes. The history starts at 0.6.0.
 
+## 0.9.2
+
+**Grip now tells you inside Figma when it has updated, and what to do next.**
+
+- After an update, every open Figma window with the Grip plugin shows a short message ("Grip updated to 0.9.2"). If the update fails, the window you clicked says why. A Community plugin that needs reopening gets that in the same message ("Reopen the plugin to load its new version"), and the reopen message is shorter than in 0.9.1. These messages come from the bridge, so they work with any plugin version.
+
 ## 0.9.1
 
 **Grip now keeps the plugin you imported up to date, and your agent only steps in for what Grip cannot do.**

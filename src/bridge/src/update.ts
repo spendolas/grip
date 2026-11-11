@@ -377,6 +377,7 @@ export interface PluginInfo {
   sessionId?: string;
   pluginVersion?: string | null;
   fileName?: string;
+  fileKey?: string | null;
   wsReady?: boolean;
   hello?: boolean;               // false until the plugin's hello arrived (version not known yet)
   minBridge?: string | null;     // the plugin says: I need a bridge >= this
@@ -384,7 +385,7 @@ export interface PluginInfo {
 
 export function pluginInfos(bridge: { snapshot(): { plugins: any[] } }): PluginInfo[] {
   return bridge.snapshot().plugins.map((p) => ({
-    sessionId: p.sessionId, pluginVersion: p.pluginVersion, fileName: p.fileName, wsReady: p.wsReady, hello: p.hello, minBridge: p.minBridge,
+    sessionId: p.sessionId, pluginVersion: p.pluginVersion, fileName: p.fileName, fileKey: p.fileKey, wsReady: p.wsReady, hello: p.hello, minBridge: p.minBridge,
   }));
 }
 
@@ -585,6 +586,33 @@ export function syncPluginCopies(): CopySyncResult {
     }
   }
   return out;
+}
+
+// ---------- "Grip updated" confirmation ----------
+//
+// installUpdate leaves a small marker; the restarted bridge reads it and shows each
+// open Grip window one toast (the plugin's own `notify`, so any plugin version
+// gets it). The marker only counts for the version it announces and for ten minutes.
+
+const UPDATE_MARKER_TTL_MS = 10 * 60 * 1000;
+export interface UpdateMarker { version: string; from: string; at: string; refreshed: number }
+function markerPath() { return join(gripHome(), 'update-done.json'); }
+
+export function writeUpdateMarker(m: UpdateMarker): void {
+  try { mkdirSync(gripHome(), { recursive: true }); atomicWrite(markerPath(), Buffer.from(JSON.stringify(m) + '\n')); } catch { /* advisory */ }
+}
+
+// The marker for THIS running bridge, or null (none, other version, too old). A stale one is removed.
+export function readUpdateMarker(now: number = Date.now()): UpdateMarker | null {
+  const j = readJson(markerPath());
+  if (!j) return null;
+  const at = typeof j.at === 'string' ? Date.parse(j.at) : NaN;
+  const fresh = Number.isFinite(at) && now - at < UPDATE_MARKER_TTL_MS && now >= at - 60_000;
+  if (!fresh || j.version !== BRIDGE_VERSION || typeof j.from !== 'string') {
+    if (!fresh) { try { rmSync(markerPath(), { force: true }); } catch { /* ignore */ } }
+    return null;
+  }
+  return { version: j.version, from: j.from, at: j.at, refreshed: Number.isFinite(j.refreshed) ? Number(j.refreshed) : 0 };
 }
 
 // ---------- the agent helps only when nothing else can ----------
@@ -1103,6 +1131,7 @@ export async function installUpdate(o: InstallOptions): Promise<InstallResult> {
     // The verified plugin files are in place: refresh the user's own imported copies too (best effort, never fatal).
     let pluginCopies: CopySyncResult | undefined;
     try { const r = syncPluginCopies(); if (r.updated.length || r.skipped.length) pluginCopies = r; } catch { /* advisory */ }
+    writeUpdateMarker({ version: rel.version, from: BRIDGE_VERSION, at: new Date().toISOString(), refreshed: pluginCopies?.updated.length ?? 0 });
 
     logErr(`update: installed ${BRIDGE_VERSION} -> ${rel.version} into ${home}`);
     return { status: 'updated', from: BRIDGE_VERSION, to: rel.version, home, pluginFilesWritten: written, ...(pluginCopies ? { pluginCopies } : {}), ...(compatWarning ? { compatWarning } : {}), ...(staleWindows ? { staleWindows } : {}) };
@@ -1277,32 +1306,43 @@ export function wireUpdateToBridge(bridge: PluginBridge): () => void {
     }
     bridge.setUpdateState(s ? { available: sig.signal, latest: s.latest, current: BRIDGE_VERSION, headline: s.headline ?? null, eligible } : null);
   };
-  // A Community plugin window that is older than the plugin this bridge ships: nothing on disk can fix it
-  // (Figma loads the newest published version only when the plugin is opened, and a plugin cannot reload
-  // itself), so show a toast in that window, once per window and version (and once per 3 days across restarts).
+  // Toasts inside Figma (the plugin's own `notify`, so every plugin version gets them):
+  //  1. right after an update, once per open file: "Grip updated to x";
+  //  2. a Community plugin window older than the plugin this bridge ships: nothing on disk can fix it
+  //     (Figma loads the newest published version only when the plugin is opened, and a plugin cannot
+  //     reload itself), so ask to reopen it, once per window and version (and once per 3 days across
+  //     restarts). When both apply it is one message.
   const toasted = new Set<string>();
-  const nudgeReopen = () => {
+  const confirmed = new Set<string>();
+  const nudge = () => {
     const t = (bridge as unknown as { toast?: (sid: string, msg: string) => boolean }).toast;
-    if (typeof t !== 'function' || updatesDisabled()) return;
-    const installed = installedPluginVersion();
-    if (!installed) return;
-    const plugins = pluginInfos(bridge);
-    const behind = connectedPlugins(plugins).filter((p) => p.sessionId && isSemver(p.pluginVersion) && compareSemver(p.pluginVersion, installed) < 0);
-    if (!behind.length) return;
-    const c = findPluginCopies();
-    if (c.known && c.copies.length > 0) return;   // an imported dev copy exists: refreshed by us, hot-swaps by itself
-    for (const p of behind) {
-      const id = `${p.fileName ?? ''}|${p.pluginVersion}|${installed}`;
-      if (toasted.has(id)) continue;
-      toasted.add(id);
-      if (!claimNotice(`reopen:${id}`)) continue;
-      t.call(bridge, p.sessionId!, `Grip was updated. Close and reopen the Grip plugin to load its newer version (${p.pluginVersion} → ${installed}).`);
+    if (typeof t !== 'function') return;
+    const live = connectedPlugins(pluginInfos(bridge)).filter((p) => p.sessionId);
+    if (!live.length) return;
+    const marker = readUpdateMarker();
+    const installed = updatesDisabled() ? null : installedPluginVersion();
+    const dev = installed ? (() => { const c = findPluginCopies(); return c.known && c.copies.length > 0; })() : true;
+    for (const p of live) {
+      const parts: string[] = [];
+      const fileKey = `${p.fileKey ?? ''}|${p.fileName ?? ''}`;
+      if (marker && !confirmed.has(fileKey)) {
+        confirmed.add(fileKey);
+        parts.push(`Grip updated to ${marker.version}.`);
+      }
+      if (installed && !dev && isSemver(p.pluginVersion) && compareSemver(p.pluginVersion, installed) < 0) {
+        const id = `${p.fileName ?? ''}|${p.pluginVersion}|${installed}`;
+        if (!toasted.has(id)) {
+          toasted.add(id);
+          if (claimNotice(`reopen:${id}`)) parts.push(`${parts.length ? '' : 'Grip was updated. '}Reopen the plugin to load its new version.`);
+        }
+      }
+      if (parts.length) t.call(bridge, p.sessionId!, parts.join(' '));
     }
   };
   recompute();
-  nudgeReopen();
+  nudge();
   const offState = onUpdateState(recompute);
-  const onChange = () => { recompute(); nudgeReopen(); };
+  const onChange = () => { recompute(); nudge(); };
   bridge.on('session-change', onChange);
 
   const onRequest = async (e: { sessionId: string; version?: string }) => {
@@ -1365,6 +1405,11 @@ export function wireUpdateToBridge(bridge: PluginBridge): () => void {
       msg = { type: 'update_result', status: 'error', code, message: (err as Error).message };
     }
     bridge.sendTo(e.sessionId, msg);
+    // A failed update is also said in Figma (the strip only flashes red). 'version_changed' is not a failure.
+    if (msg.status === 'error' && msg.code !== 'version_changed') {
+      const tf = (bridge as unknown as { toast?: (sid: string, m: string) => boolean }).toast;
+      if (typeof tf === 'function') tf.call(bridge, e.sessionId, `Grip could not update: ${String(msg.message ?? 'unknown error').replace(/\s+/g, ' ').slice(0, 140)}`);
+    }
     // The state may have changed under the user (a newer release, a refused
     // install): after the result, make sure this strip shows the truth again.
     if (msg.status === 'error') { recompute(); bridge.pushUpdate(e.sessionId, true); }
