@@ -1,6 +1,6 @@
 # Grip MCP Tools
 
-154 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
+155 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
 
 **Figma Plugin API coverage:** through plugin update 141 (Oct 15, 2026) and `@figma/plugin-typings` 1.142.0. <!-- figma-api-coverage: update=141 typings=1.142.0 --> The weekly API-updates check reads the marker in this line as its baseline — bump both numbers in the same commit whenever support for newly shipped Plugin API features lands.
 
@@ -279,6 +279,13 @@ Promote a node to a Component.
 Merge ≥2 COMPONENT nodes into one COMPONENT_SET (variant set). Same as Cmd+Opt+K.
 - Params: `nodeIds[]` (≥2, all COMPONENT), `parentId` (default first node's parent), `index`, `name`.
 - Returns: `{ id, name, type: 'COMPONENT_SET' }`.
+
+### `create_component_set`
+Build a variant set from an axes matrix: one COMPONENT per combination, named `Axis=Value, Axis=Value`, laid out in a grid, then combined into one COMPONENT_SET. One call is one undo step.
+- Params: `axes` **req** (`{ Size: ['S','M','L'], State: ['default','hover'] }`: at least one axis, each with at least one unique value; names and values may not contain `,` or `=`; at most 200 combinations, else `too_many_variants`), `name?`, `template?` (node cloned for every variant: a COMPONENT or any node Figma can turn into one; not an INSTANCE, a COMPONENT_SET or a variant already inside a set; the template stays untouched), `parentId?`, `x?`/`y?` (grid top-left), `gap?` (default 16).
+- Without `template` each variant is an empty 100x100 component. Variant order follows axis order, last axis fastest: the last axis becomes the columns, the other axes the rows. Default position: right of the template, or the viewport centre on a page, else 0,0.
+- Returns: `{ id, name, type: 'COMPONENT_SET', variantCount, variants: [{ id, name }] }`. All-or-nothing: a failure removes the components already made.
+- Axis order follows JS key order, so integer-like axis names (`'1'`) sort first; use letters. Add component properties or styling afterwards with `component_property` / `set_node_property`.
 
 ---
 
@@ -605,7 +612,7 @@ Replace a node's prototype reactions.
 
 ### `create_sticky` / `create_connector` / `create_shape_with_text` / `create_table`
 FigJam node creation. Params follow each Figma `createX` shape; check Plugin API docs for legal values. All return `{ id, type }`.
-- `create_sticky` also takes `authorVisible`, `isWideWidth` (booleans). `create_connector` also takes `startStrokeCap`, `endStrokeCap` (`NONE | ARROW_EQUILATERAL | ARROW_LINES | TRIANGLE_FILLED | DIAMOND_FILLED | CIRCLE_FILLED | ERD_*`).
+- `create_sticky` also takes `authorVisible`, `isWideWidth` (booleans). **Batch:** `create_sticky {items:[{text?,x?,y?,author?,authorVisible?,isWideWidth?,color?}]}` (1-200) makes them all in one call and one undo step, returning `{ids, count}` instead of `{id, type}`. Top-level `author`, `authorVisible`, `isWideWidth`, `color` (hex fill) are defaults per item; top-level `text` is rejected with `items`. Items without both `x` and `y` are laid out in a grid (origin = top-level `x`/`y`, else where Figma places a new sticky; `columns` default `min(count,5)`, `gap` default 24); an item with its own `x` and `y` goes exactly there. All-or-nothing: a failure removes the stickies already made. `create_connector` also takes `startStrokeCap`, `endStrokeCap` (`NONE | ARROW_EQUILATERAL | ARROW_LINES | TRIANGLE_FILLED | DIAMOND_FILLED | CIRCLE_FILLED | ERD_*`).
 - Post-creation via `set_node_property`: STICKY `authorVisible`, `isWideWidth`, `authorName`; CONNECTOR `connectorStartStrokeCap`, `connectorEndStrokeCap`, `textBackground` (Paint[] or `{ fills }` for the label background; `[]` clears). `get_node` reads all of these (connector `textBackground` as `{ fills }`), and TABLE_CELL nodes carry read-only `rowIndex`/`columnIndex`.
 
 ### `table_op`
@@ -847,7 +854,7 @@ Applied via `set_node_property` fills/strokes/effects (fully-shaped objects pass
 
 ## Tool scoping (`GRIP_TOOLS`)
 
-By default an agent only sees the `core` scope (~35 always-useful tools), not the full 154 — this keeps per-turn schema weight small. Widen the scope per agent — at launch (below) or mid-session with `grip_load_tools {categories:['motion', …]}` (or `'all'`), and drop them again with `grip_load_tools {unload:['motion']}` (`'all'` resets to core; `core`/`meta` can't be unloaded, and tools that are also in core stay). Each change refreshes the tool list via `tools/list_changed` (applies next turn; clients that ignore the notification can still use `run_script`). Not available to restricted scopes without `run_script` (e.g. `GRIP_TOOLS=read`):
+By default an agent only sees the `core` scope (~35 always-useful tools), not the full 155 — this keeps per-turn schema weight small. Widen the scope per agent — at launch (below) or mid-session with `grip_load_tools {categories:['motion', …]}` (or `'all'`), and drop them again with `grip_load_tools {unload:['motion']}` (`'all'` resets to core; `core`/`meta` can't be unloaded, and tools that are also in core stay). Each change refreshes the tool list via `tools/list_changed` (applies next turn; clients that ignore the notification can still use `run_script`). Not available to restricted scopes without `run_script` (e.g. `GRIP_TOOLS=read`):
 
 - **stdio:** set env `GRIP_TOOLS=core,motion` on the agent process (delivered to the daemon as an IPC control frame, alongside `GRIP_FILE`).
 - **HTTP:** pass `?tools=core,motion` on the `/mcp` URL.

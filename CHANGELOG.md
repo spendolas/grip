@@ -2,6 +2,13 @@
 
 Newest first. Each `## <version>` heading is the exact version number; the GitHub Release for that version uses its section as the release notes. The history starts at 0.6.0.
 
+## 0.9.4
+
+**Build a whole variant set in one call, and drop a pile of FigJam stickies at once.**
+
+- New `create_component_set`: give it your axes (for example Size: S, M, L and State: default, hover) and it makes one component per combination, named the way Figma expects, lays them out in a grid and combines them into a variant set. Pass a `template` node and every variant starts as a copy of it. One call is one undo step, and if anything fails nothing is left behind.
+- `create_sticky` now takes `items` to make up to 200 stickies in one call (one undo step). Each item can set its own text, position, author and color; items without a position are laid out in a grid. Needs the updated plugin.
+
 ## 0.9.3
 
 **Fixes a wrong hint when your imported plugin is already up to date.**

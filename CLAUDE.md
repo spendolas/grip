@@ -99,7 +99,7 @@ plugin/
 
 ## MCP tool surface
 
-154 tools. Per-tool reference lives in [`TOOLS.md`](./TOOLS.md). The default advertised scope is now `core` (~35 tools) rather than all 154; agents widen via `GRIP_TOOLS`/`?tools=` at launch, or **at runtime via the meta tool `grip_load_tools {categories?, unload?}`** (updates the session's scope + sends `tools/list_changed`; refused for scopes without `run_script`, so a read-only agent can't self-escalate; `unload` drops categories — never `core`/`meta`, `'all'` resets to core, and tools that are also in core stay; categories from `grip_capabilities`), and `run_script` reaches any tool regardless of scope. `grip_capabilities` also takes `{tool:'<name>'}` to return that single tool's relocated `detail` (the deep guidance trimmed out of the always-injected `description`). Phase 3 merged 19 clusters of "N verbs on one object" into single op-enum-dispatched tools (e.g. `table_op {op}`, `bind_to_variable {target}`, `timer {op}`) — the former per-verb tools (`table_insert_row`, `group_nodes`, `bind_paint_to_variable`, …) no longer exist as standalone TOOLS entries; call them via the merged tool's `op`/`target` discriminator. Per-op params are in `grip_capabilities {tool:'<name>'}`. Quick map:
+155 tools. Per-tool reference lives in [`TOOLS.md`](./TOOLS.md). The default advertised scope is now `core` (~35 tools) rather than all 155; agents widen via `GRIP_TOOLS`/`?tools=` at launch, or **at runtime via the meta tool `grip_load_tools {categories?, unload?}`** (updates the session's scope + sends `tools/list_changed`; refused for scopes without `run_script`, so a read-only agent can't self-escalate; `unload` drops categories — never `core`/`meta`, `'all'` resets to core, and tools that are also in core stay; categories from `grip_capabilities`), and `run_script` reaches any tool regardless of scope. `grip_capabilities` also takes `{tool:'<name>'}` to return that single tool's relocated `detail` (the deep guidance trimmed out of the always-injected `description`). Phase 3 merged 19 clusters of "N verbs on one object" into single op-enum-dispatched tools (e.g. `table_op {op}`, `bind_to_variable {target}`, `timer {op}`) — the former per-verb tools (`table_insert_row`, `group_nodes`, `bind_paint_to_variable`, …) no longer exist as standalone TOOLS entries; call them via the merged tool's `op`/`target` discriminator. Per-op params are in `grip_capabilities {tool:'<name>'}`. Quick map:
 
 **Bridge-side (no plugin round-trip):**
 - `list_files`, `set_active_file` — multi-file session routing.
@@ -115,7 +115,7 @@ plugin/
 
 **Write — pages:** `create_page`, `set_current_page`, `delete_page`.
 
-**Write — components / instances:** `detach_instance`, `swap_instance`, `create_component_from_node`, `combine_as_variants`.
+**Write — components / instances:** `detach_instance`, `swap_instance`, `create_component_from_node`, `combine_as_variants`, `create_component_set` (axes matrix -> one variant per combination, grid layout, combined; optional `template` cloned per variant).
 
 **Write — styles & variables:** `set_style` (PAINT/TEXT/EFFECT/GRID), `apply_style`, `set_variable_value`, `bind_to_variable` (merged; `target:'property'|'paint'|'effect'|'layout_grid'`), `variable_collection` (merged; `op:'create'|'delete'`), `variable` (merged; `op:'create'|'delete'`), `variable_mode` (merged; `op:'add'|'remove'|'rename'`), `explicit_variable_mode` (merged; `op:'set'|'clear'`), `set_variable_meta`.
 
@@ -137,7 +137,7 @@ plugin/
 
 **Prototype:** `set_reactions`.
 
-**FigJam-only:** `create_sticky`, `create_connector`, `create_shape_with_text`, `create_table`, `table_op` (merged; `op:'insert_row'|'insert_column'|'remove_row'|'remove_column'|'move_row'|'move_column'|'resize_row'|'resize_column'|'cell_at'`).
+**FigJam-only:** `create_sticky` (single or `items` batch up to 200, grid layout), `create_connector`, `create_shape_with_text`, `create_table`, `table_op` (merged; `op:'insert_row'|'insert_column'|'remove_row'|'remove_column'|'move_row'|'move_column'|'resize_row'|'resize_column'|'cell_at'`).
 
 **Cross-plugin metadata:** `set_shared_plugin_data`, `get_shared_plugin_data`.
 

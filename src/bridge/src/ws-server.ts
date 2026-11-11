@@ -242,6 +242,7 @@ const PAGE_TIMEOUT_MS = Number(process.env.GRIP_PAGE_TIMEOUT_MS ?? 60_000);
 const SLOW_METHOD_TIMEOUT_MS: Record<string, number> = {
   export_node: EXPORT_TIMEOUT_MS,
   get_library_usage: SCAN_TIMEOUT_MS,
+  create_component_set: SCAN_TIMEOUT_MS,   // up to 200 clones + a combine in one write
   map_nodes: SCAN_TIMEOUT_MS,   // bulk edit over many nodes; chunks+yields, but the whole run can be long
   set_current_page: PAGE_TIMEOUT_MS,
   get_document: PAGE_TIMEOUT_MS,   // loadAllPagesAsync across the file

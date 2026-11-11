@@ -50,7 +50,7 @@ export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
     'explicit_variable_mode', 'set_variable_meta',
     'request_variable_to_be_enabled', 'request_variable_to_be_disabled'],
   components: ['swap_instance', 'detach_instance', 'reset_instance_overrides', 'create_component_from_node',
-    'combine_as_variants', 'create_slot', 'component_property'],
+    'combine_as_variants', 'create_component_set', 'create_slot', 'component_property'],
   text: ['set_text_range_property', 'edit_characters', 'load_font', 'list_fonts',
     'get_styled_text_segments', 'get_text_content', 'create_text_path', 'get_text_range_bound_variable',
     'set_text_range_bound_variable', 'replace_text'],
@@ -963,15 +963,32 @@ export const TOOLS: ToolDef[] = [
   // ---------- tier 3 ----------
   {
     name: 'create_sticky',
-    description: 'FigJam: create a sticky note.',
+    description: 'FigJam: create a sticky note, or many in one call with `items` (up to 200, one undo step).',
+    detail:
+      "Single: {text?, author?, authorVisible?, isWideWidth?, color?, parentId?, x?, y?} -> {id, type}. " +
+      "Batch: pass `items: [{text?, x?, y?, author?, authorVisible?, isWideWidth?, color?}]` (1-200) -> {ids, count}. Top-level author/authorVisible/isWideWidth/color are defaults each item can override; top-level `text` is rejected with items. " +
+      "Items without both x and y are laid out in a grid: origin = top-level x/y (default: where Figma places a new sticky), `columns` (default min(count, 5)), `gap` (default 24). Items with their own x and y go exactly there and stay out of the grid. " +
+      "`color` is a hex string ('#FFD966') set as the sticky's fill. The batch is all-or-nothing: if any item fails, the stickies already made are removed and the error is returned. The sticky font is loaded once per call.",
     schema: z.object({
       text: z.string().optional(),
       author: z.string().optional(),
       authorVisible: z.boolean().optional(),
       isWideWidth: z.boolean().optional(),
+      color: z.string().optional(),
       parentId: z.string().optional(),
       x: z.number().optional(),
       y: z.number().optional(),
+      columns: z.number().int().min(1).max(50).optional(),
+      gap: z.number().min(0).optional(),
+      items: z.array(z.object({
+        text: z.string().optional(),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        author: z.string().optional(),
+        authorVisible: z.boolean().optional(),
+        isWideWidth: z.boolean().optional(),
+        color: z.string().optional(),
+      })).min(1).max(200).optional(),
     }),
   },
   {
@@ -1339,6 +1356,23 @@ export const TOOLS: ToolDef[] = [
       parentId: z.string().optional(),
       index: z.number().int().nonnegative().optional(),
       name: z.string().optional(),
+    }),
+  },
+  {
+    name: 'create_component_set',
+    description: 'Build a variant set from an axes matrix: one COMPONENT per combination (named "Axis=Value, Axis=Value"), laid out in a grid and combined into a COMPONENT_SET. One call, one undo step.',
+    detail:
+      "Params: `axes` {AxisName: [values...]} (at least one axis, each with at least one value; names and values must be unique and may not contain ',' or '='; at most 200 combinations), `name?` (set name), `template?` (node id cloned for every variant; a COMPONENT or any node Figma can turn into one, not an INSTANCE or a COMPONENT_SET, and not a variant already inside a set; the template itself is left untouched), `parentId?`, `x?`/`y?` (top-left of the grid), `gap?` (default 16). " +
+      "Without `template` each variant is an empty 100x100 component. Variant order follows axis order, last axis varying fastest: the last axis becomes the columns, the other axes the rows. Default position: right of the template, or the viewport centre when the parent is the page, else 0,0. " +
+      "Returns {id, name, type:'COMPONENT_SET', variantCount, variants:[{id,name}]}. All-or-nothing: if any step fails, the components already made are removed. Axis order follows JS key order, so integer-like axis names such as '1' sort first; name axes with letters. Add component properties or styling afterwards with component_property / set_node_property.",
+    schema: z.object({
+      axes: z.record(z.string(), z.array(z.string()).min(1)),
+      name: z.string().optional(),
+      template: z.string().optional(),
+      parentId: z.string().optional(),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      gap: z.number().min(0).optional(),
     }),
   },
   // ---------- text range ----------
@@ -2127,20 +2161,6 @@ export function toolInputSchema(name: string): Record<string, unknown> {
         type: 'object',
         properties: { nodeId: { type: 'string' } },
         required: ['nodeId'],
-        additionalProperties: false,
-      };
-    case 'create_sticky':
-      return {
-        type: 'object',
-        properties: {
-          text: { type: 'string' },
-          author: { type: 'string' },
-          authorVisible: { type: 'boolean' },
-          isWideWidth: { type: 'boolean' },
-          parentId: { type: 'string' },
-          x: { type: 'number' },
-          y: { type: 'number' },
-        },
         additionalProperties: false,
       };
     case 'create_connector':

@@ -52,6 +52,7 @@ type ToolMethod =
   | 'rename_variable_mode'
   | 'set_variable_meta'
   | 'combine_as_variants'
+  | 'create_component_set'
   | 'bind_paint_to_variable'
   // tier 1
   | 'flatten_nodes'
@@ -2402,24 +2403,90 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
 
     // ---------- tier 3: figjam / vector / shared data / palette / thumbnail ----------
     case 'create_sticky': {
-      const s = figma.createSticky();
+      const MAX_STICKY_BATCH = 200;
       let parent: BaseNode & ChildrenMixin = figma.currentPage;
       if (params.parentId) {
         const p = await getNode(params.parentId);
         if (!hasChildren(p)) throw new Error(`Parent ${params.parentId} cannot contain children`);
         parent = p;
       }
-      parent.appendChild(s);
-      if (params.text) {
-        await figma.loadFontAsync(s.text.fontName as FontName);
-        s.text.characters = String(params.text);
+      const batch = Array.isArray(params.items);
+      if (params.items !== undefined && !batch) throw new Error('create_sticky: items must be an array');
+      if (batch) {
+        if (params.items.length < 1) throw new Error('create_sticky: items is empty');
+        if (params.items.length > MAX_STICKY_BATCH) {
+          throw new Error(`too_many_items: create_sticky takes at most ${MAX_STICKY_BATCH} items per call, got ${params.items.length}. Split into several calls.`);
+        }
+        if (params.text !== undefined) throw new Error('create_sticky: top-level text cannot be combined with items; put text on each item');
       }
-      if (params.author) s.authorName = String(params.author);
-      if (typeof params.authorVisible === 'boolean') s.authorVisible = params.authorVisible;
-      if (typeof params.isWideWidth === 'boolean') s.isWideWidth = params.isWideWidth;
-      if (typeof params.x === 'number') s.x = params.x;
-      if (typeof params.y === 'number') s.y = params.y;
-      return { id: s.id, type: s.type };
+      const specs: any[] = batch ? params.items : [params];
+      // Per-item value, falling back to the top-level default (for a single sticky spec === params).
+      const pick = (spec: any, key: string) => (spec[key] !== undefined ? spec[key] : params[key]);
+      // Validate every colour before creating anything, so a bad item fails the batch up front.
+      for (const spec of specs) {
+        const c = pick(spec, 'color');
+        if (c !== undefined) hexToRgb(String(c));
+      }
+      const made: StickyNode[] = [];
+      try {
+        let fontLoaded = false;
+        for (const spec of specs) {
+          const s = figma.createSticky();
+          made.push(s);
+          parent.appendChild(s);
+          if (spec.text) {
+            if (!fontLoaded) {
+              await figma.loadFontAsync(s.text.fontName as FontName);
+              fontLoaded = true;
+            }
+            s.text.characters = String(spec.text);
+          }
+          const author = pick(spec, 'author');
+          if (author) s.authorName = String(author);
+          const authorVisible = pick(spec, 'authorVisible');
+          if (typeof authorVisible === 'boolean') s.authorVisible = authorVisible;
+          const wide = pick(spec, 'isWideWidth');
+          if (typeof wide === 'boolean') s.isWideWidth = wide;
+          const color = pick(spec, 'color');
+          if (color !== undefined) s.fills = [{ type: 'SOLID', color: hexToRgb(String(color)) }];
+        }
+        if (!batch) {
+          const s = made[0];
+          if (typeof params.x === 'number') s.x = params.x;
+          if (typeof params.y === 'number') s.y = params.y;
+          return { id: s.id, type: s.type };
+        }
+        // Batch placement: an item with both x and y goes exactly there; the rest fill a grid.
+        const gap = typeof params.gap === 'number' ? params.gap : 24;
+        const loose: StickyNode[] = [];
+        specs.forEach((spec, idx) => {
+          const s = made[idx];
+          if (typeof spec.x === 'number' && typeof spec.y === 'number') {
+            s.x = spec.x;
+            s.y = spec.y;
+          } else {
+            loose.push(s);
+          }
+        });
+        if (loose.length) {
+          const originX = typeof params.x === 'number' ? params.x : loose[0].x;
+          const originY = typeof params.y === 'number' ? params.y : loose[0].y;
+          const cols = typeof params.columns === 'number' ? params.columns : Math.min(loose.length, 5);
+          const cellW = Math.max(...loose.map((s) => s.width)) + gap;
+          const cellH = Math.max(...loose.map((s) => s.height)) + gap;
+          loose.forEach((s, n) => {
+            s.x = originX + (n % cols) * cellW;
+            s.y = originY + Math.floor(n / cols) * cellH;
+          });
+        }
+        return { ids: made.map((s) => s.id), count: made.length };
+      } catch (err) {
+        // All-or-nothing: drop what this call already made.
+        for (const s of made) {
+          try { s.remove(); } catch (_) { /* already gone */ }
+        }
+        throw err;
+      }
     }
     case 'create_connector': {
       const c = figma.createConnector();
@@ -3808,6 +3875,105 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       if (params.name) set.name = params.name;
       return { id: set.id, name: set.name, type: set.type };
     }
+    case 'create_component_set': {
+      const MAX_VARIANTS = 200;
+      const axes = params.axes;
+      if (!axes || typeof axes !== 'object' || Array.isArray(axes)) {
+        throw new Error('create_component_set: axes must be an object like {Size: ["S","M"], State: ["default","hover"]}');
+      }
+      const axisNames = Object.keys(axes);
+      if (axisNames.length < 1) throw new Error('create_component_set: axes needs at least one axis');
+      let total = 1;
+      for (const a of axisNames) {
+        if (!a || /[,=]/.test(a)) throw new Error(`create_component_set: axis name "${a}" must be non-empty and may not contain "," or "="`);
+        const vals = axes[a];
+        if (!Array.isArray(vals) || vals.length < 1) throw new Error(`create_component_set: axis "${a}" needs at least one value`);
+        const seen = new Set<string>();
+        for (const v of vals) {
+          if (typeof v !== 'string' || !v || /[,=]/.test(v)) {
+            throw new Error(`create_component_set: value ${JSON.stringify(v)} on axis "${a}" must be a non-empty string without "," or "="`);
+          }
+          if (seen.has(v)) throw new Error(`create_component_set: duplicate value "${v}" on axis "${a}"`);
+          seen.add(v);
+        }
+        total *= vals.length;
+        if (total > MAX_VARIANTS) {
+          throw new Error(`too_many_variants: the axes make more than ${MAX_VARIANTS} combinations. Split the matrix or build the set in two steps.`);
+        }
+      }
+      const gap = typeof params.gap === 'number' ? params.gap : 16;
+
+      let template: SceneNode | null = null;
+      if (params.template) {
+        const t = await getNode(params.template);
+        if (t.type === 'COMPONENT_SET') throw new Error('create_component_set: template cannot be a COMPONENT_SET');
+        if (t.type === 'INSTANCE') throw new Error('create_component_set: template is an INSTANCE; detach_instance it first or pass its main component');
+        if (t.parent && t.parent.type === 'COMPONENT_SET') throw new Error('create_component_set: template is already a variant inside a set; clone it out first');
+        if (t.type === 'PAGE' || t.type === 'DOCUMENT') throw new Error(`create_component_set: template cannot be a ${t.type}`);
+        template = t as SceneNode;
+      }
+      let parent: BaseNode & ChildrenMixin = figma.currentPage;
+      if (params.parentId) {
+        const p = await getNode(params.parentId);
+        if (!hasChildren(p)) throw new Error(`Parent ${params.parentId} cannot contain children`);
+        parent = p;
+      } else if (template && template.parent && hasChildren(template.parent)) {
+        parent = template.parent;
+      }
+
+      // Cartesian product, last axis varying fastest.
+      let current: string[][] = [[]];
+      for (const a of axisNames) {
+        const next: string[][] = [];
+        for (const c of current) for (const v of axes[a] as string[]) next.push([...c, v]);
+        current = next;
+      }
+      const cols = (axes[axisNames[axisNames.length - 1]] as string[]).length;
+
+      const created: ComponentNode[] = [];
+      try {
+        for (const combo of current) {
+          let comp: ComponentNode;
+          if (template) {
+            const copy = template.clone();
+            comp = copy.type === 'COMPONENT' ? copy : figma.createComponentFromNode(copy);
+          } else {
+            comp = figma.createComponent();
+          }
+          created.push(comp);
+          if (comp.parent !== parent) parent.appendChild(comp);
+          comp.name = combo.map((v, i) => `${axisNames[i]}=${v}`).join(', ');
+        }
+        const w = created[0].width;
+        const h = created[0].height;
+        let originX: number;
+        let originY: number;
+        if (typeof params.x === 'number') originX = params.x;
+        else if (template) originX = template.x + template.width + 80;
+        else originX = parent.type === 'PAGE' ? Math.round(figma.viewport.center.x - (cols * (w + gap)) / 2) : 0;
+        if (typeof params.y === 'number') originY = params.y;
+        else if (template) originY = template.y;
+        else originY = parent.type === 'PAGE' ? Math.round(figma.viewport.center.y - h / 2) : 0;
+        created.forEach((c, n) => {
+          c.x = originX + (n % cols) * (c.width + gap);
+          c.y = originY + Math.floor(n / cols) * (c.height + gap);
+        });
+        const set = figma.combineAsVariants(created, parent);
+        set.name = params.name ? String(params.name) : 'Component set';
+        return {
+          id: set.id,
+          name: set.name,
+          type: set.type,
+          variantCount: created.length,
+          variants: created.map((c) => ({ id: c.id, name: c.name })),
+        };
+      } catch (err) {
+        for (const c of created) {
+          try { c.remove(); } catch (_) { /* already gone */ }
+        }
+        throw err;
+      }
+    }
     case 'bind_paint_to_variable': {
       const node = await getNode(params.nodeId);
       const sn = node as any;
@@ -4880,7 +5046,7 @@ async function upsertStyle(params: any): Promise<{ id: string; name: string }> {
 // logs a warning on mismatch so stale-cached plugin code (a known Figma
 // Desktop caching behavior) surfaces immediately instead of returning
 // "unknown method" or stalling on missing handlers.
-const PLUGIN_VERSION = '0.9.3';
+const PLUGIN_VERSION = '0.9.4';
 
 // The oldest bridge this plugin works with. Sent in `hello` (ui.html forwards the
 // full hello). Informational for now: a bridge that sees minBridge > its own
@@ -5113,7 +5279,7 @@ function requestBudgetMs(msg: any): number {
   if (msg?.method === 'run_script' && typeof p.timeoutMs === 'number') {
     return Math.min(Math.max(p.timeoutMs, 1000), 120_000);
   }
-  if (msg?.method === 'map_nodes') return 60_000;
+  if (msg?.method === 'map_nodes' || msg?.method === 'create_component_set') return 60_000;
   return 10_000;
 }
 
