@@ -1263,18 +1263,19 @@ assert.ok(!originAllowedForUpdate('https://evil.example') && !originAllowedForUp
   const updates = (c) => c.msgs.filter((m) => m.type === 'update');
   const lastUpdate = (c) => updates(c).at(-1);
 
-  // a plugin with a bad Origin: refused, nothing installed
-  const evil = await open('https://evil.example');
-  hello(evil.ws);
+  // a web page with a bad Origin: the handshake itself is refused (403), so it can neither
+  // say hello nor ask for an update; nothing is installed
+  const evilStatus = await new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`, { origin: 'https://evil.example' });
+    ws.on('unexpected-response', (_req, res) => { resolve(res.statusCode); ws.terminate(); });
+    ws.on('open', () => { resolve('open'); ws.close(); });
+    ws.on('error', () => {});
+  });
+  assert.strictEqual(evilStatus, 403, 'web-page origin refused at the handshake');
   await sleep(100);
-  evil.ws.send(JSON.stringify({ type: 'update_request', version: NEWER }));
-  const refused = await waitFor(evil.msgs, (m) => m.type === 'update_result');
-  assert.deepStrictEqual([refused?.status, refused?.code], ['error', 'origin'], 'web-page origin refused');
-  await sleep(100);
-  assert.deepStrictEqual(downloads(), [], 'refused request downloaded nothing');
+  assert.deepStrictEqual(downloads(), [], 'refused connection downloaded nothing');
   assert.ok(!existsSync(join(home, 'grip-bridge.mjs')));
-  evil.ws.close();
-  await sleep(50);
+  assert.strictEqual(bridge.snapshot().plugins.length, 0, 'the refused socket never became a session');
 
   // a real plugin (Origin null), compatible: gets the signal frame on hello
   const plug = await open('null');

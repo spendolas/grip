@@ -2,6 +2,14 @@
 
 Newest first. Each `## <version>` heading is the exact version number; the GitHub Release for that version uses its section as the release notes. The history starts at 0.6.0.
 
+## 0.9.5
+
+**Security fix: Grip's plugin socket is no longer reachable from the network. Update now.**
+
+- Until now the bridge listened for the Figma plugin on every network interface, with no sign-in. Anyone on the same Wi-Fi or office network could connect to it as if they were your plugin, read what your agent sent to Figma, and answer with made-up results. It now listens on this computer only (`127.0.0.1`).
+- A web page open in your browser could also reach `localhost` and do the same. The bridge now refuses any connection that comes from a web page (only Figma's plugin and local programs get in), and the local MCP address (`http://127.0.0.1:7778/mcp`) refuses requests whose host or origin is not this computer, which also blocks DNS rebinding.
+- Nothing changes for you: the plugin and your agents connect exactly as before. If you ran Grip on a shared or public network before this version, treat that session as exposed. The plugin has no changes besides its version number, so there is nothing to re-import.
+
 ## 0.9.4
 
 **Build a whole variant set in one call, and drop a pile of FigJam stickies at once.**

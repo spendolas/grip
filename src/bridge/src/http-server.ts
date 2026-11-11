@@ -37,6 +37,26 @@ interface PendingSession {
   createdAt: number;
 }
 
+// The MCP endpoint is loopback-only, but a web page can still reach it: DNS rebinding makes
+// an attacker's hostname resolve to 127.0.0.1 (the request then carries THEIR Host), and a
+// page on any site can send cross-origin requests. Both give full tool access, including
+// run_script, so refuse any request whose Host is not a loopback name or whose Origin is a
+// web origin. Native MCP clients send no Origin.
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+
+export function hostAllowed(host: string | undefined): boolean {
+  if (typeof host !== 'string' || host === '') return false;
+  try { return LOOPBACK_HOSTS.has(new URL(`http://${host}`).hostname); } catch { return false; }
+}
+
+export function originAllowed(origin: string | undefined): boolean {
+  if (origin === undefined) return true;
+  try {
+    const u = new URL(origin);
+    return (u.protocol === 'http:' || u.protocol === 'https:') && LOOPBACK_HOSTS.has(u.hostname);
+  } catch { return false; }
+}
+
 export class HttpServer {
   private server: HttpNetServer;
   private sessions = new Map<string, HttpSession>();
@@ -51,6 +71,11 @@ export class HttpServer {
   }
 
   private onRequest(req: IncomingMessage, res: ServerResponse) {
+    if (!hostAllowed(req.headers.host) || !originAllowed(req.headers.origin)) {
+      process.stderr.write(`[grip] http request refused (host ${req.headers.host}, origin ${req.headers.origin})\n`);
+      res.writeHead(403, { 'content-type': 'text/plain' }).end('forbidden\n');
+      return;
+    }
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     if (url.pathname !== '/mcp') {
       // Cheap liveness probe; everything else 404s.

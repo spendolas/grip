@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID as uuid } from 'node:crypto';
 import { EventEmitter } from 'events';
+import type { IncomingMessage } from 'node:http';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type {
   BindingState, FileBind, ListedFileInfo, McpSession, PluginSessionInfo, WSEvent, WSHello, WSResponse,
@@ -141,6 +142,12 @@ export interface UpdateBroadcast { available: boolean; latest: string | null; cu
 // A Figma plugin iframe connects with Origin "null" (sandboxed) — or the
 // figma.com origin. A normal web page connecting to ws://localhost:7777 sends
 // its own https://... origin, and must not be able to trigger an update.
+// The address the plugin WebSocket binds. Never a wildcard (see the constructor).
+export const WS_HOST = '127.0.0.1';
+
+// The same rule now gates the WebSocket handshake itself (see the constructor):
+// a browser page can open ws://127.0.0.1:7777 even when the port is loopback-only,
+// so a web origin is refused before the socket exists, not only for update_request.
 export function originAllowedForUpdate(origin: string | undefined): boolean {
   if (origin === undefined || origin === '' || origin === 'null') return true;
   try {
@@ -330,6 +337,8 @@ const READ_METHODS = new Set(['get_node', 'get_nodes', 'get_page', 'get_selectio
 
 export class PluginBridge extends EventEmitter {
   private wss: WebSocketServer;
+  // Second listener on the IPv6 loopback (best effort), see the constructor.
+  private wss6?: WebSocketServer;
   private sessions = new Map<string, Session>();
   private pending = new Map<string, Pending>();
   // Flow control (per plugin sessionId): count of requests sent-and-awaiting,
@@ -368,9 +377,19 @@ export class PluginBridge extends EventEmitter {
     super();
     // 10 MB cap — accommodates large export payloads but bounds OOM risk
     // from a misbehaving peer / runaway run_script result.
-    this.wss = new WebSocketServer({ port, maxPayload: 10 * 1024 * 1024 });
+    // Loopback only. The plugin has no authentication, so the socket must not be reachable
+    // from the network: without `host`, ws binds every interface (`*:7777`) and anyone on the
+    // same Wi-Fi could connect as a fake plugin. A browser page on this machine can still
+    // reach loopback, so the handshake also refuses any web Origin (Figma's plugin iframe
+    // sends "null" or a figma.com origin; a native client sends none).
+    const verifyClient = (info: { origin?: string }, cb: (ok: boolean, code?: number, message?: string) => void): void => {
+      if (originAllowedForUpdate(info.origin)) { cb(true); return; }
+      process.stderr.write(`[grip] websocket from origin ${info.origin} refused\n`);
+      cb(false, 403, 'Forbidden');
+    };
+    this.wss = new WebSocketServer({ port, host: WS_HOST, maxPayload: 10 * 1024 * 1024, verifyClient });
 
-    this.wss.on('connection', (ws, req) => {
+    const onConnection = (ws: WebSocket, req: IncomingMessage): void => {
       const id = uuid();
       const session: Session = {
         id,
@@ -424,7 +443,8 @@ export class PluginBridge extends EventEmitter {
       ws.on('error', (err) => {
         process.stderr.write(`[grip] ws error (${id.slice(0, 8)}): ${err.message}\n`);
       });
-    });
+    };
+    this.wss.on('connection', onConnection);
 
     this.wss.on('listening', () => {
       process.stderr.write(`[grip] ws server listening on :${port}\n`);
@@ -433,6 +453,21 @@ export class PluginBridge extends EventEmitter {
     this.wss.on('error', (err: Error & { code?: string }) => {
       this.emit('bind-error', err);
     });
+
+    // The plugin dials `ws://localhost:7777`, and on many machines `localhost` resolves to
+    // ::1 as well as 127.0.0.1 (macOS lists ::1 first). A wildcard bind used to cover both;
+    // binding only 127.0.0.1 leaves a client that prefers IPv6 unable to connect, so also
+    // listen on the IPv6 loopback. Best effort: a machine without IPv6, or a taken port,
+    // just skips it. The single-instance lock stays the 127.0.0.1 bind above.
+    try {
+      this.wss6 = new WebSocketServer({ port, host: '::1', maxPayload: 10 * 1024 * 1024, verifyClient });
+      this.wss6.on('connection', onConnection);
+      this.wss6.on('error', (err: Error & { code?: string }) => {
+        process.stderr.write(`[grip] ipv6 loopback listener skipped: ${err.code ?? err.message}\n`);
+        try { this.wss6?.close(); } catch {}
+        this.wss6 = undefined;
+      });
+    } catch { this.wss6 = undefined; }
   }
 
   // ---------- session management ----------
@@ -1861,6 +1896,7 @@ export class PluginBridge extends EventEmitter {
     this.inflight.clear();
     this.writeInflight.clear();
     this.wss.close();
+    try { this.wss6?.close(); } catch {}
   }
 
   // Snapshot for grip_health.

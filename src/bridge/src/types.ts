@@ -2,7 +2,7 @@
 // file / grip_health) and ws-server.ts (welcome frame + plugin-mismatch warning)
 // so they can never drift. Keep in lockstep with bridge/package.json + the
 // plugin's PLUGIN_VERSION on a release bump.
-export const BRIDGE_VERSION = '0.9.4';
+export const BRIDGE_VERSION = '0.9.5';
 
 // The OLDEST Figma plugin version this bridge supports. The published plugin is
 // updated through Figma, not by the bridge's self-updater, so an installed
