@@ -330,12 +330,70 @@ const CONNECTED_TITLE = 'Connected';
     ws.open();
     ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.8.0' });
     hello(h, '0.9.0');
-    assert.ok(purple(h) && h.has('actionable'));
+    assert.ok(purple(h) && h.has('clickable') && !h.has('actionable'), 'a bridge that can update itself: the click is an update request, not the page');
     ws.deliver({ type: 'update', available: true, latest: '0.9.0', current: '0.8.0' });
     assert.ok(h.has('clickable') && !h.has('actionable'));
     assert.strictEqual(h.title(), 'Update available. Click to install');
     h.click();
     assert.deepStrictEqual(ws.sent.at(-1), { type: 'update_request', version: '0.9.0' });
+  }
+}
+
+// ------------------------------------------------------------ the click always asks a bridge that can hear it; only older bridges get the page
+{
+  const hello = (h, minBridge) => h.fromMain({ kind: 'hello', version: '0.9.0', minBridge, capabilities: [], fileKey: 'k', fileName: 'f', currentPageId: '0:1', currentPageName: 'P' });
+  const setup = (bridgeVersion, minBridge = '0.9.0') => {
+    const h = harness(); const ws = h.ws(); ws.open();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion });
+    hello(h, minBridge);
+    return { h, ws };
+  };
+  // 0.8.0 bridge, plugin wants 0.9.0, nothing offered: purple, "click to update", the click sends the request
+  {
+    const { h, ws } = setup('0.8.0');
+    assert.ok(h.has('update') && h.has('clickable') && !h.has('actionable'));
+    assert.strictEqual(h.title(), 'Bridge update needed. Click to update');
+    h.click();
+    assert.deepStrictEqual(ws.sent.at(-1), { type: 'update_request', version: 'latest' });
+    assert.ok(!h.posted.some((m) => m.pluginMessage?.kind === 'openSetup'), 'the install page is not opened');
+    assert.ok(h.has('updating') && h.title() === 'Updating…');
+    ws.deliver({ type: 'update_result', status: 'updated', restart: 'scheduled', to: '0.9.0' });
+    assert.ok(h.has('updating'), 'waits for the restart');
+  }
+  // nothing newer published yet: a short failure, then it can be clicked again
+  {
+    const { h, ws } = setup('0.8.0');
+    h.click();
+    ws.deliver({ type: 'update_result', status: 'error', code: 'no_update_available', message: 'no newer bridge is published yet' });
+    assert.ok(h.has('connected') || h.has('error'));
+    h.advance(3000);
+    assert.ok(h.has('update') && h.has('clickable'), `back to purple: ${h.classes()}`);
+    assert.match(h.title(), /Update failed/);
+    h.click();
+    assert.deepStrictEqual(ws.sent.at(-1), { type: 'update_request', version: 'latest' }, 'retry asks again');
+  }
+  // developer install answers clone_install: no longer purple-clickable, says so
+  {
+    const { h, ws } = setup('0.8.0');
+    h.click();
+    ws.deliver({ type: 'update_result', status: 'clone_install', to: '0.9.0' });
+    assert.strictEqual(h.title(), 'Update available (developer install)');
+    assert.ok(!h.has('clickable'));
+  }
+  // a bridge that cannot hear (older than 0.8.0): the page, never a request
+  {
+    const { h, ws } = setup('0.7.0', '0.8.0');
+    assert.ok(h.has('actionable') && !h.has('clickable'));
+    h.click();
+    assert.deepStrictEqual(h.posted.at(-1), { pluginMessage: { kind: 'openSetup' } });
+    assert.ok(!ws.sent.some((m) => m.type === 'update_request'));
+  }
+  // nothing wrong: green, a click does nothing
+  {
+    const { h, ws } = setup('0.9.0');
+    assert.ok(h.has('connected') && !purple(h));
+    h.click();
+    assert.ok(!ws.sent.some((m) => m.type === 'update_request'));
   }
 }
 

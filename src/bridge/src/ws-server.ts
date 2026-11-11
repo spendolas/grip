@@ -1747,6 +1747,18 @@ export class PluginBridge extends EventEmitter {
   }
 
   // Send one JSON frame to one plugin session (best effort, never throws).
+  // A toast in ONE Figma window (the plugin's own `notify` method, so it works with every
+  // plugin version). Fire and forget: no flow control, no pending entry; the plugin's reply
+  // carries an id nobody waits for and is ignored. Returns whether it was sent.
+  toast(sessionId: string, message: string, timeoutMs = 8000): boolean {
+    const sess = this.sessions.get(sessionId);
+    if (!sess || sess.helloAt === 0 || sess.ws.readyState !== 1) return false;
+    try {
+      sess.ws.send(JSON.stringify({ id: `toast-${uuid()}`, method: 'notify', params: { message, timeout: timeoutMs }, timeoutMs: 5000 }));
+      return true;
+    } catch { return false; }
+  }
+
   sendTo(sessionId: string, msg: Record<string, unknown>) {
     const s = this.sessions.get(sessionId);
     if (!s || s.ws.readyState !== WebSocket.OPEN) return;

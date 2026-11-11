@@ -82,9 +82,15 @@
         return false;
       }
       // The bridge is older than this plugin wants and has not offered an in-place
-      // update (bridges before 0.8.0 cannot). Purple too; the click opens the install page.
+      // update. Purple too. A bridge from 0.8.0 on hears update requests, so the click
+      // asks it for the latest release; only an older bridge cannot, and then the click
+      // opens the install page.
+      const UPDATER_SINCE = '0.8.0';
       function bridgeOutdated() {
         return current === 'connected' && !updLatest && !updClone && updPhase !== 'updating' && !!bridgeVersion && !!minBridge && olderThan(bridgeVersion, minBridge);
+      }
+      function bridgeHearsUpdates() {
+        return !!bridgeVersion && !olderThan(bridgeVersion, UPDATER_SINCE);
       }
 
       // Colour + tooltip + cursor are all derived from the state above, in one place.
@@ -100,7 +106,7 @@
           el.classList.add(updPhase === 'updating' ? 'updating' : 'update');
           if (updPhase !== 'updating') el.classList.add('clickable');
         } else if (bridgeOutdated()) {
-          el.classList.add('update', 'actionable');
+          el.classList.add('update', bridgeHearsUpdates() ? 'clickable' : 'actionable');
         } else if (needsSetup) {
           el.classList.add('actionable');
         } else if (current === 'connected' && busyCount > 0) {
@@ -115,7 +121,7 @@
         if (needsSetup) return 'Bridge not running. Click for setup';
         if (current !== 'connected') return '';
         if (updLatest && updClone) return 'Update available (developer install)';
-        if (bridgeOutdated()) return 'Bridge update needed. Click for steps';
+        if (bridgeOutdated()) return bridgeHearsUpdates() ? 'Bridge update needed. Click to update' : 'Bridge update needed. Click for steps';
         if (offered && updPhase === 'failed') return 'Update failed. Click to retry';
         if (offered) return 'Update available. Click to install';
         return 'Connected';
@@ -256,8 +262,14 @@
 
       // The user's click on the purple strip: ask the bridge to install the
       // version that is being shown (it refuses if a newer one has appeared).
+      // With nothing offered (the bridge is just too old for this plugin) the plugin has not
+      // been shown a version: it asks for 'latest', and the bridge looks the release up itself.
       function startUpdate() {
-        if (!updLatest || updPhase === 'updating') return;
+        if (updPhase === 'updating') return;
+        if (!updLatest) {
+          if (!bridgeOutdated() || !bridgeHearsUpdates()) return;
+          updLatest = 'latest';
+        }
         updPhase = 'updating';
         updError = '';
         send({ type: 'update_request', version: updLatest });

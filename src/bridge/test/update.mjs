@@ -435,6 +435,83 @@ assert.strictEqual(U.releaseNotes('short'), 'short');
   assert.ok(!odd.error && odd.latest === '1.0.0' && odd.headline === null, 'tolerates a null body and odd assets for a plain check');
 }
 
+// ---------------------------------------------------------------- 2b. install refreshes imported plugin copies
+{
+  const home = tmp('grip-upd-home-');
+  env(home);
+  const mk = (dir, ver, extra = {}) => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ id: '777', main: 'code.js', ui: 'ui.html', ...extra }));
+    writeFileSync(join(dir, 'code.js'), `const PLUGIN_VERSION = '${ver}';`);
+    writeFileSync(join(dir, 'ui.html'), 'OLD UI');
+  };
+  const root = tmp('grip-copies-');
+  const picked = join(root, 'picked'); mk(picked, '0.8.0');
+  const clone = join(root, 'clone'); mk(clone, '0.8.0'); mkdirSync(join(clone, '.git'));
+  const settings = join(root, 'settings.json');
+  writeFileSync(settings, JSON.stringify({ clientID: 'secret', localFileExtensions: [
+    { id: 1, manifestPath: join(picked, 'manifest.json'), fileMetadata: { type: 'manifest' } },
+    { id: 2, manifestPath: join(clone, 'manifest.json'), fileMetadata: { type: 'manifest' } },
+  ] }));
+  process.env.GRIP_FIGMA_SETTINGS = settings;
+  freshRelease({ files: {
+    'code.js': Buffer.from(`const PLUGIN_VERSION = '${NEWER}';`),
+    'ui.html': Buffer.from('NEW UI'),
+    'manifest.json': Buffer.from(JSON.stringify({ id: '777', main: 'code.js', ui: 'ui.html' })),
+  } });
+  writeFileSync(join(home, 'grip-bridge.mjs'), 'OLD BRIDGE');
+  const r = await inst();
+  assert.strictEqual(r.status, 'updated');
+  assert.deepStrictEqual(r.pluginCopies.updated, [picked], 'the imported copy was refreshed');
+  assert.deepStrictEqual(r.pluginCopies.skipped, [{ dir: clone, reason: 'git_checkout' }], 'a git checkout is left alone');
+  assert.strictEqual(readFileSync(join(picked, 'ui.html'), 'utf8'), 'NEW UI');
+  assert.match(readFileSync(join(picked, 'code.js'), 'utf8'), new RegExp(`'${esc(NEWER)}'`));
+  assert.strictEqual(readFileSync(join(clone, 'ui.html'), 'utf8'), 'OLD UI', 'the checkout was not written');
+  assert.ok(!snapshotDir(picked).includes('.tmp-'), 'no temp files left in the imported folder');
+  delete process.env.GRIP_FIGMA_SETTINGS;
+}
+
+// ---------------------------------------------------------------- 2c. a plugin that needs a newer bridge asks for "latest"
+{
+  const { EventEmitter } = await import('node:events');
+  const run = async (plugins, over, noCheck = false) => {
+    const home = tmp('grip-upd-home-');
+    env(home);
+    if (noCheck) process.env.GRIP_NO_UPDATE_CHECK = '1';
+    freshRelease(over);
+    writeFileSync(join(home, 'grip-bridge.mjs'), 'OLD BRIDGE');
+    const bridge = new EventEmitter();
+    const sent = [];
+    Object.assign(bridge, { snapshot: () => ({ plugins }), setUpdateState() {}, sendTo: (id, m) => sent.push([id, m]), pushUpdate() {} });
+    const off = U.wireUpdateToBridge(bridge);
+    bridge.emit('update-request', { sessionId: 'p', version: 'latest' });
+    for (let i = 0; i < 100 && !sent.length; i++) await sleep(20);
+    off();
+    return { sent, home };
+  };
+  const needs = (minBridge) => [{ sessionId: 'p', pluginVersion: '1.0.0', fileName: 'F', wsReady: true, hello: true, ...(minBridge ? { minBridge } : {}) }];
+  // the plugin wants a bridge newer than this one: the current release installs (same checks as any install)
+  let r = await run(needs('99.5.0'), {});
+  assert.strictEqual(r.sent[0][1].status, 'updated', JSON.stringify(r.sent));
+  assert.strictEqual(r.sent[0][1].to, NEWER);
+  assert.strictEqual(readFileSync(join(r.home, 'grip-bridge.mjs'), 'utf8'), release.bridge.toString(), 'the bridge was installed');
+  // a plugin that does not need a newer bridge cannot use "latest"
+  r = await run(needs(null), {});
+  assert.deepStrictEqual([r.sent[0][1].status, r.sent[0][1].code], ['error', 'version_required']);
+  assert.strictEqual(readFileSync(join(r.home, 'grip-bridge.mjs'), 'utf8'), 'OLD BRIDGE', 'nothing changed');
+  r = await run(needs(BRIDGE_VERSION), {});
+  assert.strictEqual(r.sent[0][1].code, 'version_required', 'a bridge that is new enough: nothing to ask for');
+  // nothing newer published
+  r = await run(needs('99.5.0'), { version: BRIDGE_VERSION });
+  assert.deepStrictEqual([r.sent[0][1].status, r.sent[0][1].code], ['error', 'no_update_available']);
+  assert.strictEqual(readFileSync(join(r.home, 'grip-bridge.mjs'), 'utf8'), 'OLD BRIDGE');
+  // checks off: no request leaves the machine
+  r = await run(needs('99.5.0'), {}, true);
+  assert.strictEqual(r.sent[0][1].status, 'error');
+  assert.strictEqual(readFileSync(join(r.home, 'grip-bridge.mjs'), 'utf8'), 'OLD BRIDGE');
+  delete process.env.GRIP_NO_UPDATE_CHECK;
+}
+
 // ---------------------------------------------------------------- 3. install
 {
   const home = tmp('grip-upd-home-');
@@ -1246,6 +1323,15 @@ assert.ok(!originAllowedForUpdate('https://evil.example') && !originAllowedForUp
   hello(fresher.ws, { version: '9.0.0', minBridge: '9.0.0', fileName: 'Fresh' });
   await sleep(150);
   assert.match(U.bridgeStaleReason(U.pluginInfos(bridge)), /plugin 9\.0\.0 in "Fresh" needs Grip bridge >= 9\.0\.0/);
+  // a toast goes to exactly that window, as the plugin's own `notify` method (works with every plugin version)
+  const sidF = U.pluginInfos(bridge).find((p) => p.fileName === 'Fresh').sessionId;
+  assert.strictEqual(bridge.toast(sidF, 'Reopen Grip'), true);
+  const toastFrame = await waitFor(fresher.msgs, (m) => m.method === 'notify');
+  assert.deepStrictEqual([toastFrame.method, toastFrame.params.message, typeof toastFrame.id, toastFrame.id.startsWith('toast-')], ['notify', 'Reopen Grip', 'string', true]);
+  assert.strictEqual(bridge.toast('no-such-window', 'x'), false, 'unknown window: nothing sent');
+  fresher.ws.send(JSON.stringify({ id: toastFrame.id, result: { success: true } }));   // the plugin's reply: ignored, no crash
+  await sleep(50);
+  assert.strictEqual(bridge.snapshot().pendingCount, 0, 'a toast leaves nothing pending');
   fresher.ws.close();
   await sleep(100);
 

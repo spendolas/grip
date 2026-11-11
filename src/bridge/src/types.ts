@@ -2,7 +2,7 @@
 // file / grip_health) and ws-server.ts (welcome frame + plugin-mismatch warning)
 // so they can never drift. Keep in lockstep with bridge/package.json + the
 // plugin's PLUGIN_VERSION on a release bump.
-export const BRIDGE_VERSION = '0.9.0';
+export const BRIDGE_VERSION = '0.9.1';
 
 // The OLDEST Figma plugin version this bridge supports. The published plugin is
 // updated through Figma, not by the bridge's self-updater, so an installed
@@ -147,6 +147,9 @@ export interface McpSession {
   // `instructions` already carry the paragraph; the first tool result then
   // carries the matching notice.
   updateNoticeGranted?: boolean;
+  // The 'help the user update the plugin/bridge' notices were handled for this session (shown or throttled).
+  helpNoticeSent?: boolean;
+  helpNoticesGranted?: string[];
 }
 
 export interface SerializedPaint {

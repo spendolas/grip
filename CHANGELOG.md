@@ -2,6 +2,15 @@
 
 Newest first. Each `## <version>` heading is the exact version number; the GitHub Release for that version uses its section as the release notes. The history starts at 0.6.0.
 
+## 0.9.1
+
+**Grip now keeps the plugin you imported up to date, and your agent only steps in for what Grip cannot do.**
+
+- When your Grip plugin needs a newer bridge than the one you run, clicking the purple bar now asks the bridge to update itself (any bridge from 0.8.0 on). Only a bridge too old to update itself sends you to the install page. Needs the updated plugin.
+- The bridge now keeps the Grip plugin you imported into Figma up to date, wherever you imported it from. Figma records every plugin you imported; when you click the purple bar to update (or, if only your plugin is behind, a purple bar offering "Refresh the Grip plugin you imported"), Grip also copies the new plugin files into that folder, and Figma reloads the plugin by itself. It only touches a folder whose `manifest.json` is Grip's, never a git checkout (your own clone), never writes more than the three plugin files, never downgrades, and reads only the plugin list from Figma's settings. Nothing is written without your click.
+- If the Grip plugin you run came from Figma Community and is older than the plugin your bridge ships, Grip shows a short message inside that Figma window after the update ("Close and reopen the Grip plugin to load its newer version"), once per window. Figma cannot reload a running plugin, and loads the newest published version when it is opened. Your agent can also mention it if you ask. Works with any plugin version, no plugin update needed.
+- Your agent now steps in only for what Grip cannot do itself: a plugin copy it will not write to (a git checkout), a plugin whose origin it cannot find out, a Community plugin that needs reopening, or a bridge that cannot update itself (a developer install, or no update on offer). It offers help once, never changes anything on its own, shows each notice at most once per 3 days, and `GRIP_NO_UPDATE_CHECK=1` silences it. `grip_health.update` always shows the facts (`pluginBehind`, `pluginCopies`, `pluginHelp`, `bridgeHelp`). The update result lists which plugin folders were refreshed or left alone.
+
 ## 0.9.0
 
 **Several agents can now work in the same Figma file, or in several files, without stepping on each other.**

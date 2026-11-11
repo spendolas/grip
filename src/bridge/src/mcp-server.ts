@@ -20,6 +20,7 @@ import { BRIDGE_VERSION } from './types.js';
 import {
   getUpdateState, updatesDisabled, checkForUpdate, installAndScheduleRestart, updateNoticeText,
   updateInstructionsParagraph, updateSignal, pluginInfos, claimNotice, bridgeStaleReason, UpdateError,
+  helpNotices, pluginsBehind, findPluginCopies,
   type UpdateState, type PluginInfo,
 } from './update.js';
 
@@ -231,6 +232,12 @@ export function createSession(bridge: PluginBridge): LiveSession {
       if (claimNotice(u.latest!)) { session.updateNoticeGranted = true; updateParagraph = updateInstructionsParagraph(u); }
       else session.updateNoticeSent = true;   // throttled: nothing more to show this session
     }
+    // Plugin / bridge behind what auto-update can reach: the agent helps the user (same throttle).
+    const granted: string[] = [];
+    for (const n of helpNotices(safePluginInfos(bridge))) {
+      if (claimNotice(n.key)) { granted.push(n.key); updateParagraph += `\n\n${n.text}`; }
+    }
+    if (granted.length) session.helpNoticesGranted = granted;
   }
   // `instructions` is returned with initialize and injected into the agent's
   // context once — unlike tool descriptions, it costs nothing per tool and is
@@ -315,6 +322,16 @@ export function createSession(bridge: PluginBridge): LiveSession {
           session.updateNoticeSent = true;   // shown, or throttled: not again this session
         }
       }
+    }
+    // Help notice: the plugin (or bridge) is behind and auto-update cannot reach it. One extra
+    // block on the first successful result once a plugin has said hello; same 3-day throttle.
+    if (!(res as any)?.isError && !session.helpNoticeSent && name !== 'grip_update' && !updatesDisabled()) {
+      const plugins = safePluginInfos(bridge);
+      const texts = helpNotices(plugins)
+        .filter((n) => session.helpNoticesGranted?.includes(n.key) || claimNotice(n.key))
+        .map((n) => n.text);
+      if (texts.length) (res as any).content.push({ type: 'text' as const, text: texts.join('\n\n') });
+      if (texts.length || plugins.some((p) => p.hello !== false && p.wsReady !== false)) session.helpNoticeSent = true;
     }
     const ms = Date.now() - t0;
     const isErr = (res as any)?.isError;
@@ -431,8 +448,9 @@ export function createSession(bridge: PluginBridge): LiveSession {
           to: r.to,
           restart: r.restart,
           pluginFilesWritten: r.pluginFilesWritten,
+          ...(r.pluginCopies ? { pluginCopies: r.pluginCopies } : {}),
           consent,
-          next: installNextSteps(r.restart),
+          next: installNextSteps(r.restart, r.pluginCopies),
         });
       } catch (err) {
         return errorResult(`${err instanceof UpdateError && err.code ? err.code + ': ' : ''}update failed: ${(err as Error).message}`);
@@ -755,11 +773,25 @@ export async function connectStdio(bridge: PluginBridge): Promise<LiveSession> {
   return live;
 }
 
+// The help notices are a convenience: a bridge that cannot list its plugins (a test stub, a
+// half-started daemon) just means no notice, never a failed session or tool call.
+function safePluginInfos(bridge: PluginBridge): PluginInfo[] {
+  try { return typeof (bridge as any).snapshot === 'function' ? pluginInfos(bridge) : []; } catch { return []; }
+}
+
 // Always the truth (never throttled): what exists, what it needs, and whether
 // the bridge offers it (`signalled`) or why not (`blockedReason`).
 function updateSummary(s: UpdateState | null = getUpdateState(), plugins: PluginInfo[] = []) {
   const sig = updateSignal(s, plugins);
   const stale = bridgeStaleReason(plugins);
+  const behind = pluginsBehind(plugins);
+  const notices = helpNotices(plugins);
+  const pluginNotice = notices.find((n) => n.kind === 'plugin');
+  const bridgeNotice = notices.find((n) => n.kind === 'bridge');
+  const found = behind.length ? findPluginCopies().copies : [];
+  const refreshable = found.filter((c) => !c.skip && c.behind).map((c) => c.dir);
+  const needsYou = found.filter((c) => c.skip).map((c) => ({ dir: c.dir, reason: c.skip }));
+  const copyFacts = refreshable.length || needsYou.length ? { refreshable, needsYou } : null;
   return {
     current: BRIDGE_VERSION,
     latest: s?.latest ?? null,
@@ -771,6 +803,12 @@ function updateSummary(s: UpdateState | null = getUpdateState(), plugins: Plugin
     ...(sig.staleWindows ? { staleWindows: sig.staleWindows } : {}),
     // A connected plugin needs a NEWER bridge than this one: the bridge is the stale side.
     ...(stale ? { bridgeStale: stale, updateRecommended: true } : {}),
+    ...(bridgeNotice ? { bridgeHelp: bridgeNotice.text } : {}),
+    // A plugin window older than the copy next to this bridge. The bridge refreshes imported copies by
+    // itself (the strip offers it); `pluginHelp` is only set when it cannot and the user has to act.
+    ...(behind.length ? { pluginBehind: behind } : {}),
+    ...(pluginNotice ? { pluginHelp: pluginNotice.text } : {}),
+    ...(copyFacts ? { pluginCopies: copyFacts } : {}),
   };
 }
 
@@ -802,7 +840,7 @@ async function askUserToConfirm(server: Server, message: string): Promise<'accep
 }
 
 // What the agent should tell the user after a successful install.
-function installNextSteps(restart: string | undefined): string[] {
+function installNextSteps(restart: string | undefined, copies?: { updated: string[]; skipped: Array<{ dir: string; reason: string }> }): string[] {
   const steps: string[] = [];
   if (restart === 'scheduled') {
     steps.push('The Grip bridge restarts in about a second to load the new version; your next Grip call may fail once with a connection error, simply retry it. stdio agents reconnect on their own; agents on the HTTP transport (http://127.0.0.1:7778/mcp) may need to reconnect their MCP server.');
@@ -811,7 +849,12 @@ function installNextSteps(restart: string | undefined): string[] {
   } else {
     steps.push('Restart your agent / the Grip bridge to load the new version.');
   }
-  steps.push('Figma plugin: if the user imported it from ~/.grip/figma-plugin it was updated in place; they should re-run the plugin (or have Plugins > Development > Hot reload plugin on). If they imported it from a git clone instead, they need to `git pull && npm run build` there or re-import ~/.grip/figma-plugin/manifest.json.');
+  steps.push(
+    'Figma plugin: the copy in ~/.grip/figma-plugin was updated in place.' +
+    (copies?.updated.length ? ` The bridge also refreshed the plugin the user imported from ${copies.updated.join(', ')}; a dev plugin reloads itself when its files change, so there is nothing to do.` : '') +
+    (copies?.skipped.length ? ` The bridge did NOT touch ${copies.skipped.map((c) => `${c.dir} (${c.reason})`).join(', ')}: for a git checkout the user runs \`git pull && npm run build\` there, otherwise they can import ~/.grip/figma-plugin/manifest.json in Figma instead.` : '') +
+    (!copies ? ' If the user imported the plugin from some other folder, the bridge could not find it: they can import ~/.grip/figma-plugin/manifest.json in Figma instead, or for a git clone run `git pull && npm run build` there (a Figma Community plugin updates through Figma).' : ''),
+  );
   steps.push('Undo: `node ~/.grip/grip-bridge.mjs update --rollback` restores the previous bridge (the plugin files stay at the new version).');
   return steps;
 }

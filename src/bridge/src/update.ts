@@ -32,12 +32,12 @@
 import { createHash } from 'node:crypto';
 import { execFile, execFileSync } from 'node:child_process';
 import {
-  chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, writeFileSync,
+  chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync,
 } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { homedir } from 'node:os';
-import { dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRIDGE_VERSION } from './types.js';
 import type { PluginBridge } from './ws-server.js';
@@ -461,6 +461,223 @@ export function bridgeStaleReason(plugins: PluginInfo[] | null | undefined): str
   return undefined;
 }
 
+// ---------- plugin copies the bridge can refresh itself ----------
+//
+// The release updater writes the plugin into ~/.grip/figma-plugin. A user who
+// imported the plugin into Figma from some OTHER folder has a copy the updater
+// never touched. Figma records every imported dev plugin (settings.json,
+// `localFileExtensions`), so the bridge can find those copies and refresh them
+// with the files it already installed and verified. A dev plugin reloads itself
+// when its files change, so nothing else is needed afterwards. Only a user click
+// triggers a refresh (the update click, or the strip's own "plugin copy" click).
+// Safeguards: only folders whose manifest.json has Grip's plugin id; never a git
+// checkout (a developer's own build output / tracked ui.html); only the three
+// plugin files; never a downgrade; atomic writes; only the plugin list is read
+// from Figma's settings.
+
+const PLUGIN_VERSION_RE = /PLUGIN_VERSION\s*=\s*['"](\d+\.\d+\.\d+)['"]/;
+const COPY_FILES = ['code.js', 'ui.html', 'manifest.json'] as const;
+let installedPluginMemo: { path: string; mtime: number; version: string | null } | null = null;
+
+function pluginVersionOf(codeJs: string): string | null {
+  try { return PLUGIN_VERSION_RE.exec(readFileSync(codeJs, 'utf8'))?.[1] ?? null; } catch { return null; }
+}
+
+// The plugin version of the copy installed next to this bridge
+// (~/.grip/figma-plugin/code.js), or null when there is none.
+export function installedPluginVersion(): string | null {
+  const path = join(gripHome(), 'figma-plugin', 'code.js');
+  try {
+    const mtime = statSync(path).mtimeMs;
+    if (installedPluginMemo && installedPluginMemo.path === path && installedPluginMemo.mtime === mtime) return installedPluginMemo.version;
+    const version = pluginVersionOf(path);
+    installedPluginMemo = { path, mtime, version };
+    return version;
+  } catch { return null; }
+}
+
+export type CopySkip = 'git_checkout' | 'not_a_plain_copy' | 'unreadable' | 'write_failed';
+export interface PluginCopy { dir: string; version: string | null; behind: boolean; skip?: CopySkip }
+
+// Where Figma keeps its settings (null: unknown platform). GRIP_FIGMA_SETTINGS overrides (tests).
+function figmaSettingsPath(): string | null {
+  if (process.env.GRIP_FIGMA_SETTINGS) return process.env.GRIP_FIGMA_SETTINGS;
+  if (process.platform === 'darwin') return join(homedir(), 'Library', 'Application Support', 'Figma', 'settings.json');
+  if (process.platform === 'win32' && process.env.APPDATA) return join(process.env.APPDATA, 'Figma', 'settings.json');
+  return null;
+}
+
+export interface PluginCopies { known: boolean; copies: PluginCopy[] }
+let copiesMemo: { at: number; key: string; value: PluginCopies } | null = null;
+const COPIES_TTL_MS = 5000;
+
+// Every imported dev copy of THIS plugin that Figma knows about. `known:false` =
+// Figma's list could not be read (so "no copies" proves nothing).
+export function findPluginCopies(fresh = false): PluginCopies {
+  const settings = figmaSettingsPath();
+  const home = join(gripHome(), 'figma-plugin');
+  const key = `${settings}|${home}`;
+  if (!fresh && copiesMemo && copiesMemo.key === key && Date.now() - copiesMemo.at < COPIES_TTL_MS) return copiesMemo.value;
+  const value = scanPluginCopies(settings, home);
+  copiesMemo = { at: Date.now(), key, value };
+  return value;
+}
+
+function readJson(path: string): any { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return null; } }
+
+function scanPluginCopies(settingsPath: string | null, home: string): PluginCopies {
+  const none: PluginCopies = { known: false, copies: [] };
+  const installed = installedPluginVersion();
+  const myId = readJson(join(home, 'manifest.json'))?.id;
+  if (!settingsPath || !installed || typeof myId !== 'string') return none;
+  const settings = readJson(settingsPath);
+  if (!settings || !Array.isArray(settings.localFileExtensions)) return none;   // only this one list is ever read
+  let homeReal = home;
+  try { homeReal = realpathSync(home); } catch { /* keep as is */ }
+  const seen = new Set<string>();
+  const copies: PluginCopy[] = [];
+  for (const e of settings.localFileExtensions) {
+    const mp = e?.fileMetadata?.type === 'manifest' && typeof e.manifestPath === 'string' ? e.manifestPath : null;
+    if (!mp || basename(mp) !== 'manifest.json' || !isAbsolute(mp)) continue;
+    const dir = dirname(mp);
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    const manifest = readJson(mp);
+    if (!manifest) { if (e.lastKnownPluginId === myId) copies.push({ dir, version: null, behind: false, skip: 'unreadable' }); continue; }
+    if (manifest.id !== myId) continue;                              // some other plugin
+    let real = dir;
+    try { real = realpathSync(dir); } catch { /* keep as is */ }
+    if (real === homeReal) continue;                                  // the copy the updater already owns
+    const version = pluginVersionOf(join(dir, 'code.js'));
+    const behind = version !== null && compareSemver(version, installed) < 0;
+    let skip: CopySkip | undefined;
+    if (detectInstallSource(dir) === 'clone') skip = 'git_checkout';
+    else if (manifest.main !== 'code.js' || manifest.ui !== 'ui.html' || version === null || !existsSync(join(dir, 'ui.html'))) skip = 'not_a_plain_copy';
+    copies.push({ dir, version, behind, ...(skip ? { skip } : {}) });
+  }
+  return { known: true, copies };
+}
+
+export interface CopySyncResult { updated: string[]; skipped: Array<{ dir: string; reason: CopySkip }> }
+
+// Refresh every imported copy that is behind, from the verified files in
+// ~/.grip/figma-plugin. Never throws; never touches a skipped folder.
+export function syncPluginCopies(): CopySyncResult {
+  const out: CopySyncResult = { updated: [], skipped: [] };
+  const installed = installedPluginVersion();
+  const src = join(gripHome(), 'figma-plugin');
+  const { copies } = findPluginCopies(true);
+  copiesMemo = null;
+  let bufs: Array<[string, Buffer]> | null = null;
+  try { bufs = installed ? COPY_FILES.map((f) => [f, readFileSync(join(src, f))] as [string, Buffer]) : null; } catch { bufs = null; }
+  for (const c of copies) {
+    if (c.skip) { out.skipped.push({ dir: c.dir, reason: c.skip }); continue; }
+    if (!c.behind) continue;
+    if (!bufs) { out.skipped.push({ dir: c.dir, reason: 'unreadable' }); continue; }
+    try {
+      // manifest last: a half-written folder keeps its old, matching manifest
+      for (const [name, buf] of [...bufs].sort((a, b) => (a[0] === 'manifest.json' ? 1 : 0) - (b[0] === 'manifest.json' ? 1 : 0))) atomicWrite(join(c.dir, name), buf);
+      out.updated.push(c.dir);
+      logErr(`update: refreshed the Grip plugin copy in ${c.dir} (${c.version} -> ${installed})`);
+    } catch (err) {
+      out.skipped.push({ dir: c.dir, reason: 'write_failed' });
+      logErr(`update: could not refresh the plugin copy in ${c.dir}: ${(err as Error).message}`);
+    }
+  }
+  return out;
+}
+
+// ---------- the agent helps only when nothing else can ----------
+//
+// The bridge owns what it can (the update, the ~/.grip plugin, imported copies,
+// via the strip). An agent notice exists only for what is left: a copy it will
+// not write (git checkout, not a plain copy), a plugin whose origin it cannot
+// tell, and a bridge that cannot update itself (developer install, or no update
+// offered). Nothing here installs or changes anything.
+
+export interface PluginBehind { window: string; running: string; installed: string }
+
+// Open windows whose plugin is older than the copy installed next to this bridge.
+export function pluginsBehind(plugins: PluginInfo[] | null | undefined): PluginBehind[] {
+  const installed = installedPluginVersion();
+  if (!installed) return [];
+  const out: PluginBehind[] = [];
+  for (const p of connectedPlugins(plugins)) {
+    if (isSemver(p.pluginVersion) && compareSemver(p.pluginVersion, installed) < 0) {
+      out.push({ window: p.fileName || 'an open file', running: p.pluginVersion, installed });
+    }
+  }
+  return out;
+}
+
+export interface HelpNotice { kind: 'plugin' | 'bridge'; key: string; text: string }
+
+const SKIP_WHY: Record<CopySkip, string> = {
+  git_checkout: 'a git checkout (the bridge never writes into one): there run git pull and npm run build',
+  not_a_plain_copy: 'not a plain copy of the plugin files',
+  unreadable: 'unreadable',
+  write_failed: 'not writable',
+};
+
+function pluginFolder(): string { return join(gripHome(), 'figma-plugin'); }
+
+// A plugin window is behind and the bridge cannot refresh it: tell the agent what is left.
+export function pluginHelpText(behind: PluginBehind[], blocked: PluginCopy[], community = false): string {
+  const manifest = join(pluginFolder(), 'manifest.json');
+  const list = behind.map((b) => `"${b.window}" runs ${b.running}`).join('; ');
+  const head = `The Grip plugin in Figma is behind the copy installed next to this bridge (${behind[0].installed}): ${list}. It works, but it is missing fixes. ` +
+    `Mention it to the user once and offer to help; do not change anything on your own. `;
+  if (community) {
+    return head + `Figma lists no imported copy of Grip, so this one most likely came from Figma Community: Figma loads the newest published version ` +
+      `the next time the plugin is opened, and a running plugin can never swap its own code. Grip already showed a notice inside Figma. ` +
+      `If the user asks: close the Grip plugin and open it again; if Figma has not published the newer version yet (it reviews updates), there is nothing to do.`;
+  }
+  if (blocked.length) {
+    return head + `The bridge refreshes imported plugin copies by itself, but not these: ` +
+      blocked.map((c) => `${c.dir} (${SKIP_WHY[c.skip!]})`).join('; ') +
+      `. Alternatively they can import ${manifest} in Figma (Plugins > Development > Import plugin from manifest...) and use that copy, which the bridge keeps current.`;
+  }
+  return head + `The bridge could not tell where this plugin was imported from. If they imported it from a folder, in Figma use Plugins > Development > Import plugin from manifest... ` +
+    `and choose ${manifest}, a copy the bridge keeps current. If it came from Figma Community, Figma updates it by itself and there is nothing to do.`;
+}
+
+// A plugin needs a newer bridge and the bridge cannot update itself right now.
+export function bridgeHelpText(reason: string): string {
+  const clone = readInstallRecord().source === 'clone';
+  return `${reason}. Mention it to the user once and offer to help. ` +
+    (clone
+      ? `This bridge is a developer install, so it does not update itself: in their Grip checkout run git pull, npm run build and node bridge/install.mjs (with their OK).`
+      : `No update is being offered. Call grip_update {action:'check'} to see why; if that does not help, ask them to tell their agent: Install Grip from https://github.com/spendolas/grip/releases/latest.`);
+}
+
+// The notices an agent should be told about now (the caller throttles each with
+// claimNotice(key), like the update notice).
+export function helpNotices(plugins: PluginInfo[] | null | undefined): HelpNotice[] {
+  const out: HelpNotice[] = [];
+  const behind = pluginsBehind(plugins);
+  if (behind.length) {
+    const c = findPluginCopies();
+    const refreshable = c.copies.some((x) => !x.skip && x.behind);   // the strip offers it: the user clicks, no agent
+    const blocked = c.copies.filter((x) => !!x.skip);
+    // Figma's list readable + no imported copy = most likely a Community plugin: only reopening loads the newer
+    // version Figma has published. Copies all current = a dev plugin, which hot-swaps: nothing to say.
+    const community = c.known && c.copies.length === 0;
+    if (!refreshable && (blocked.length || !c.known || community)) {
+      out.push({ kind: 'plugin', key: `plugin-behind:${behind[0].installed}`, text: pluginHelpText(behind, blocked, community) });
+    }
+  }
+  const stale = bridgeStaleReason(plugins);
+  if (stale) {
+    const s = updatesDisabled() ? null : getUpdateState();
+    const offered = !!s && updateSignal(s, plugins).signal && readInstallRecord().source !== 'clone';
+    if (!offered) {
+      const need = (plugins ?? []).map((p) => p.minBridge).filter((v): v is string => !!v && isSemver(v)).sort(compareSemver).pop() ?? '';
+      out.push({ kind: 'bridge', key: `bridge-behind:${need}`, text: bridgeHelpText(stale) });
+    }
+  }
+  return out;
+}
+
 // compat.json: { "version": "<release version>", "minPlugin": "<x.y.z>" },
 // generated by scripts/package-release.mjs from types.ts. Verified against
 // SHA256SUMS.txt before it is believed.
@@ -702,6 +919,7 @@ export interface InstallResult {
   headline?: string | null;   // version_changed: what the new release is
   notes?: string | null;
   compatWarning?: string;     // --force installed without a verified compat.json
+  pluginCopies?: CopySyncResult;   // imported plugin copies outside ~/.grip: refreshed / left alone (and why)
 }
 
 let installing = false;
@@ -882,9 +1100,12 @@ export async function installUpdate(o: InstallOptions): Promise<InstallResult> {
     atomicWrite(entry, bridgeBuf, 0o755);
     try { chmodSync(entry, 0o755); } catch { /* non-fatal on Windows */ }
     try { writeInstallRecord('release', rel.version); } catch { /* the record is advisory */ }
+    // The verified plugin files are in place: refresh the user's own imported copies too (best effort, never fatal).
+    let pluginCopies: CopySyncResult | undefined;
+    try { const r = syncPluginCopies(); if (r.updated.length || r.skipped.length) pluginCopies = r; } catch { /* advisory */ }
 
     logErr(`update: installed ${BRIDGE_VERSION} -> ${rel.version} into ${home}`);
-    return { status: 'updated', from: BRIDGE_VERSION, to: rel.version, home, pluginFilesWritten: written, ...(compatWarning ? { compatWarning } : {}), ...(staleWindows ? { staleWindows } : {}) };
+    return { status: 'updated', from: BRIDGE_VERSION, to: rel.version, home, pluginFilesWritten: written, ...(pluginCopies ? { pluginCopies } : {}), ...(compatWarning ? { compatWarning } : {}), ...(staleWindows ? { staleWindows } : {}) };
   } finally {
     installing = false;
   }
@@ -1013,6 +1234,18 @@ export function stopRunningDaemon(): { stopped: boolean; note: string } {
 // 'error'; on 'error' `code` is version_changed | incompatible_plugin |
 // plugins_unverifiable | compat_unverified | selftest_failed | version_required |
 // origin | install_failed). Older plugins ignore all of this.
+// The click is for the plugin-copy refresh when its version is the installed plugin's, no bridge
+// update has that version, and an imported copy really is behind.
+function copyRefreshRequested(version: string): boolean {
+  const iv = installedPluginVersion();
+  if (!iv || version !== iv || updatesDisabled()) return false;
+  const s = getUpdateState();
+  if (s?.available && s.latest === version) return false;
+  return findPluginCopies(true).copies.some((c) => !c.skip && c.behind);
+}
+
+const LATEST_REQUEST = 'latest';
+
 export function wireUpdateToBridge(bridge: PluginBridge): () => void {
   let lastBlocked = '';
   const recompute = () => {
@@ -1028,17 +1261,85 @@ export function wireUpdateToBridge(bridge: PluginBridge): () => void {
       const p = plugins.find((x) => x.sessionId === sessionId);
       return !!p && connectedPlugins([p]).length === 1 && pluginIncompatibility(s.minPlugin, s.latest, p) === null;
     };
+    // No bridge update to offer, but an imported plugin copy is behind the installed one: the same
+    // purple strip offers to refresh it (one click). Only windows older than the installed plugin are told.
+    const behindCopies = !updatesDisabled() && !(s && sig.signal) ? findPluginCopies().copies.filter((c) => !c.skip && c.behind) : [];
+    const installedV = installedPluginVersion();
+    if (behindCopies.length && installedV) {
+      const oldest = behindCopies.map((c) => c.version!).sort(compareSemver)[0];
+      const eligibleCopy = (sessionId: string) => {
+        const p = plugins.find((x) => x.sessionId === sessionId);
+        return !!p && connectedPlugins([p]).length === 1 && isSemver(p.pluginVersion) && compareSemver(p.pluginVersion, installedV) < 0;
+      };
+      const n = behindCopies.length;
+      bridge.setUpdateState({ available: true, latest: installedV, current: oldest, headline: `Refresh the Grip plugin you imported (${n} folder${n === 1 ? '' : 's'})`, eligible: eligibleCopy });
+      return;
+    }
     bridge.setUpdateState(s ? { available: sig.signal, latest: s.latest, current: BRIDGE_VERSION, headline: s.headline ?? null, eligible } : null);
   };
+  // A Community plugin window that is older than the plugin this bridge ships: nothing on disk can fix it
+  // (Figma loads the newest published version only when the plugin is opened, and a plugin cannot reload
+  // itself), so show a toast in that window, once per window and version (and once per 3 days across restarts).
+  const toasted = new Set<string>();
+  const nudgeReopen = () => {
+    const t = (bridge as unknown as { toast?: (sid: string, msg: string) => boolean }).toast;
+    if (typeof t !== 'function' || updatesDisabled()) return;
+    const installed = installedPluginVersion();
+    if (!installed) return;
+    const plugins = pluginInfos(bridge);
+    const behind = connectedPlugins(plugins).filter((p) => p.sessionId && isSemver(p.pluginVersion) && compareSemver(p.pluginVersion, installed) < 0);
+    if (!behind.length) return;
+    const c = findPluginCopies();
+    if (c.known && c.copies.length > 0) return;   // an imported dev copy exists: refreshed by us, hot-swaps by itself
+    for (const p of behind) {
+      const id = `${p.fileName ?? ''}|${p.pluginVersion}|${installed}`;
+      if (toasted.has(id)) continue;
+      toasted.add(id);
+      if (!claimNotice(`reopen:${id}`)) continue;
+      t.call(bridge, p.sessionId!, `Grip was updated. Close and reopen the Grip plugin to load its newer version (${p.pluginVersion} → ${installed}).`);
+    }
+  };
   recompute();
+  nudgeReopen();
   const offState = onUpdateState(recompute);
-  bridge.on('session-change', recompute);
+  const onChange = () => { recompute(); nudgeReopen(); };
+  bridge.on('session-change', onChange);
 
   const onRequest = async (e: { sessionId: string; version?: string }) => {
     let msg: Record<string, unknown>;
     try {
-      if (!e.version) {
+      // `version:'latest'`: a plugin that needs a NEWER bridge than this one asks for the current
+      // release without having been shown a version (its strip said "Bridge update needed. Click to update").
+      // Only that window may ask; the release is looked up fresh and then goes through exactly the same
+      // pin, compatibility and verification steps as any other install.
+      let ver = e.version;
+      let early: Record<string, unknown> | null = null;
+      if (ver === LATEST_REQUEST) {
+        const me = pluginInfos(bridge).find((x) => x.sessionId === e.sessionId);
+        if (!me?.minBridge || !isSemver(me.minBridge) || compareSemver(me.minBridge, BRIDGE_VERSION) <= 0) {
+          early = { type: 'update_result', status: 'error', code: 'version_required', message: 'only a plugin that needs a newer bridge can ask for the latest release; reload the plugin in Figma and try again' };
+        } else if (updatesDisabled()) {
+          early = { type: 'update_result', status: 'error', code: 'install_failed', message: 'automatic update checks are off (GRIP_NO_UPDATE_CHECK); update the bridge yourself' };
+        } else {
+          const st = await checkForUpdate();
+          if (!st.available || !st.latest) early = { type: 'update_result', status: 'error', code: 'no_update_available', message: st.error ? `could not check for a newer bridge: ${st.error}` : 'no newer bridge is published yet' };
+          else ver = st.latest;
+        }
+      }
+      if (early) {
+        msg = early;
+      } else if (!ver) {
         msg = { type: 'update_result', status: 'error', code: 'version_required', message: 'this Grip plugin did not say which version you were shown; reload the plugin in Figma and try again' };
+      } else if (copyRefreshRequested(ver)) {
+        // The strip offered "refresh the plugin copy" (no bridge update with that version): write the
+        // installed plugin files into the imported folders. No restart: a dev plugin reloads when its files change.
+        const r = syncPluginCopies();
+        msg = r.updated.length
+          ? { type: 'update_result', status: 'updated', to: ver, restart: 'none', copies: r.updated.length }
+          : { type: 'update_result', status: 'up_to_date', to: ver };
+        bridge.sendTo(e.sessionId, msg);
+        recompute();   // pushes the cleared (or remaining) offer to every strip
+        return;
       } else {
         const plugins = pluginInfos(bridge);
         // The click comes from ONE window: that window's plugin must be compatible.
@@ -1050,9 +1351,9 @@ export function wireUpdateToBridge(bridge: PluginBridge): () => void {
           bridge.pushUpdate(e.sessionId, true);
           return;
         }
-        const r = await installAndScheduleRestart({ version: e.version, plugins });
+        const r = await installAndScheduleRestart({ version: ver, plugins });
         if (r.status === 'version_changed') {
-          msg = { type: 'update_result', status: 'error', code: 'version_changed', latest: r.to, message: `Grip ${r.to} is now the latest release (you were shown ${e.version}); the strip refreshes so you can review it` };
+          msg = { type: 'update_result', status: 'error', code: 'version_changed', latest: r.to, message: `Grip ${r.to} is now the latest release (you were shown ${ver}); the strip refreshes so you can review it` };
         } else if (r.status === 'incompatible_plugin' || r.status === 'plugins_unverifiable') {
           msg = { type: 'update_result', status: 'error', code: r.status, message: r.reason };
         } else {
@@ -1069,5 +1370,5 @@ export function wireUpdateToBridge(bridge: PluginBridge): () => void {
     if (msg.status === 'error') { recompute(); bridge.pushUpdate(e.sessionId, true); }
   };
   bridge.on('update-request', onRequest);
-  return () => { offState(); bridge.off('session-change', recompute); bridge.off('update-request', onRequest); };
+  return () => { offState(); bridge.off('session-change', onChange); bridge.off('update-request', onRequest); };
 }
