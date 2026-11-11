@@ -9,7 +9,11 @@
 //   figma-plugin/code.js                                                         (npm run build)
 //   figma-plugin/manifest.json  figma-plugin/ui.html                             (hand-written, committed)
 // Outputs, into --out (default ./dist):
-//   grip-bridge.mjs  install.mjs                        the bridge + installer, as-is
+//   grip-bridge.mjs                                     the bridge, as-is (the in-place updater
+//                                                       downloads it by this exact name). The installer
+//                                                       is NOT a loose asset: alone it cannot run (it
+//                                                       reads grip-bridge.mjs next to itself), so it
+//                                                       ships only inside grip-install.zip.
 //   grip-plugin-code.js  grip-plugin-ui.html  grip-plugin-manifest.json
 //                                                       plain copies of figma-plugin/*, which the
 //                                                       in-place updater downloads one by one
@@ -228,7 +232,6 @@ export function packageRelease({ root, out }) {
 
   const assets = {
     'grip-bridge.mjs': src.bridge,
-    'install.mjs': src.installer,
     'grip-plugin-code.js': src.pluginCode,
     'grip-plugin-ui.html': src.pluginUi,
     'grip-plugin-manifest.json': src.pluginManifest,

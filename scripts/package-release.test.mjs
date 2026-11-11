@@ -72,7 +72,6 @@ test('packages every release asset with correct names and sums', () => {
   const same = {
     'THIRD-PARTY-NOTICES.txt': 'bridge/THIRD-PARTY-NOTICES.txt',
     'grip-bridge.mjs': 'bridge/grip-bridge.mjs',
-    'install.mjs': 'bridge/install.mjs',
     'grip-plugin-code.js': 'figma-plugin/code.js',
     'grip-plugin-ui.html': 'figma-plugin/ui.html',
     'grip-plugin-manifest.json': 'figma-plugin/manifest.json',
@@ -199,8 +198,9 @@ test('asset names agree with the updater (src/bridge/dist/update.js)', async (t)
   assert.equal(U.ASSET_COMPAT, 'compat.json');
   // the updater and the gate must cut the same footer marker
   assert.equal(U.INSTALL_MARKER, INSTALL_MARKER);
-  // nine release assets in all; the updater downloads six of them (not install.mjs / the zip / the notices)
-  assert.equal(REQUIRED_ASSETS.length, 9);
+  // eight release assets in all; the updater downloads six of them (not the zip / the notices).
+  // The installer is not among them: it ships only inside grip-install.zip.
+  assert.equal(REQUIRED_ASSETS.length, 8);
   assert.deepEqual([...U.UPDATE_ASSET_NAMES].sort(), ['SHA256SUMS.txt', 'compat.json', 'grip-bridge.mjs', 'grip-plugin-code.js', 'grip-plugin-manifest.json', 'grip-plugin-ui.html']);
   // ...and those figma-plugin files all exist
   for (const local of Object.values(U.PLUGIN_ASSETS)) assert.ok(existsSync(join(ROOT, 'figma-plugin', local)), local);

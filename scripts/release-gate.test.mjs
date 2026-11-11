@@ -46,8 +46,8 @@ test('parseVersion / compareVersions', () => {
 });
 
 test('required assets match what the packager and updater use', () => {
-  assert.equal(REQUIRED_ASSETS.length, 9);
-  for (const n of ['grip-bridge.mjs', 'install.mjs', 'grip-plugin-code.js', 'grip-plugin-ui.html', 'grip-plugin-manifest.json', 'grip-install.zip', 'compat.json', 'THIRD-PARTY-NOTICES.txt', 'SHA256SUMS.txt']) {
+  assert.equal(REQUIRED_ASSETS.length, 8);
+  for (const n of ['grip-bridge.mjs', 'grip-plugin-code.js', 'grip-plugin-ui.html', 'grip-plugin-manifest.json', 'grip-install.zip', 'compat.json', 'THIRD-PARTY-NOTICES.txt', 'SHA256SUMS.txt']) {
     assert.ok(REQUIRED_ASSETS.includes(n), n);
   }
 });

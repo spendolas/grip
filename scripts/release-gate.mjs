@@ -14,11 +14,11 @@ import { fileURLToPath } from 'node:url';
 
 // Every file a release must carry. The in-place updater downloads six of them
 // by exact name (see src/bridge/src/update.ts: ASSET_BRIDGE, PLUGIN_ASSETS,
-// ASSET_SUMS, ASSET_COMPAT); grip-install.zip and install.mjs are for fresh installs;
+// ASSET_SUMS, ASSET_COMPAT); grip-install.zip is for fresh installs (it carries
+// the installer, which is useless on its own and so is not a loose asset);
 // THIRD-PARTY-NOTICES.txt is for people (and legal), the updater never fetches it.
 export const REQUIRED_ASSETS = [
   'grip-bridge.mjs',
-  'install.mjs',
   'grip-plugin-code.js',
   'grip-plugin-ui.html',
   'grip-plugin-manifest.json',

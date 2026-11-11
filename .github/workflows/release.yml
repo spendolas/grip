@@ -227,7 +227,7 @@ jobs:
           # (compat.json tells the updater which Figma plugin versions this
           # bridge works with: a release without it is never offered);
           # a release missing any of them would break installs or updates.
-          ASSETS="grip-bridge.mjs install.mjs grip-plugin-code.js grip-plugin-ui.html grip-plugin-manifest.json grip-install.zip compat.json THIRD-PARTY-NOTICES.txt"
+          ASSETS="grip-bridge.mjs grip-plugin-code.js grip-plugin-ui.html grip-plugin-manifest.json grip-install.zip compat.json THIRD-PARTY-NOTICES.txt"
           for asset in $ASSETS SHA256SUMS.txt; do
             if [ ! -f "artifact/dist/$asset" ]; then
               echo "Required release asset missing from the build artifact: $asset"
