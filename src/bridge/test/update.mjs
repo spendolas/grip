@@ -286,7 +286,7 @@ assert.strictEqual(U.releaseNotes('short'), 'short');
   assert.strictEqual(U.updateSignal(st(), [pl('0.8.0-beta')]).signal, false);
 
   // reverse direction (informational): a plugin that needs a NEWER bridge
-  assert.match(U.bridgeStaleReason([pl('0.9.0', 'Fidelity', { minBridge: '0.9.0' })]), /needs Grip bridge >= 0\.9\.0 but this bridge is 0\.8\.0/);
+  assert.match(U.bridgeStaleReason([pl('9.0.0', 'Fidelity', { minBridge: '9.0.0' })]), new RegExp('needs Grip bridge >= 9\\.0\\.0 but this bridge is ' + BRIDGE_VERSION.replace(/\./g, '\\.')));
   assert.strictEqual(U.bridgeStaleReason([pl('0.8.0', 'F', { minBridge: '0.7.0' })]), undefined);
   assert.strictEqual(U.bridgeStaleReason([pl('0.8.0')]), undefined, 'older plugins without minBridge say nothing');
   assert.ok(MIN_PLUGIN_VERSION && /^\d+\.\d+\.\d+$/.test(MIN_PLUGIN_VERSION));
@@ -940,9 +940,9 @@ const OLD_PLUGIN = [{ pluginVersion: '0.5.0', fileName: 'Old file', wsReady: tru
 
   // ---- the reverse direction shows in health: a plugin that needs a newer bridge
   {
-    const stale = await connect(makeBridge([{ pluginVersion: '0.9.0', fileName: 'Fresh', wsReady: true, hello: true, minBridge: '0.9.0' }]));
+    const stale = await connect(makeBridge([{ pluginVersion: '9.0.0', fileName: 'Fresh', wsReady: true, hello: true, minBridge: '9.0.0' }]));
     const su = JSON.parse(texts(await stale.client.callTool({ name: 'grip_health', arguments: {} }))[0]).update;
-    assert.match(su.bridgeStale, /needs Grip bridge >= 0\.9\.0/);
+    assert.match(su.bridgeStale, /needs Grip bridge >= 9\.0\.0/);
     assert.strictEqual(su.updateRecommended, true);
   }
 
@@ -1243,9 +1243,9 @@ assert.ok(!originAllowedForUpdate('https://evil.example') && !originAllowedForUp
   // the plugin says it needs a NEWER bridge: logged, in health, bridge is the stale side
   const fresher = await open('null');
   await waitFor(fresher.msgs, (m) => m.kind === 'welcome');
-  hello(fresher.ws, { version: '0.9.0', minBridge: '0.9.0', fileName: 'Fresh' });
+  hello(fresher.ws, { version: '9.0.0', minBridge: '9.0.0', fileName: 'Fresh' });
   await sleep(150);
-  assert.match(U.bridgeStaleReason(U.pluginInfos(bridge)), /plugin 0\.9\.0 in "Fresh" needs Grip bridge >= 0\.9\.0/);
+  assert.match(U.bridgeStaleReason(U.pluginInfos(bridge)), /plugin 9\.0\.0 in "Fresh" needs Grip bridge >= 9\.0\.0/);
   fresher.ws.close();
   await sleep(100);
 

@@ -2,7 +2,9 @@
 
 Newest first. Each `## <version>` heading is the exact version number; the GitHub Release for that version uses its section as the release notes. The history starts at 0.6.0.
 
-## Unreleased
+## 0.9.0
+
+**Several agents can now work in the same Figma file, or in several files, without stepping on each other.**
 
 - Local and unsaved Figma files are no longer mixed up. These files have no real file key (Figma gives all of them the same placeholder, "0:0"), and Grip used to treat them as one file: your agent could end up reading or editing whichever of those windows had most recently switched pages. Now each of those windows is listed on its own, and when more than one is open your agent is asked to choose instead of guessing.
 - Binding your agent to a local file by its name (or by its window) now sticks to that file instead of drifting to another local file.
