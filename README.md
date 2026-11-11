@@ -51,7 +51,7 @@ Before you begin, read these rules. They apply to every step below.
 - If any step fails, stop. Report the exact error. Do not retry with modifications unless the user asks you to.
 - Each code block is its own command: run it on its own, and do not merge blocks or add commands to them. Blocks that delete a folder are kept separate on purpose, because Claude Code's own command check can block a delete that shares a command with other path-like text.
 - Run each Windows block in PowerShell. If your shell is bash, run it as `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ...`, or save it to a .ps1 file and run that with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File <file>`. Bash expands `$` inside double quotes, so the .ps1 file is the safer choice.
-- Never decide for the user whether Grip runs as an always-on background service. That is step 6: ask, and wait for the answer.
+- Never decide for the user whether Grip runs as an always-on background service. That is step 6: ask, say which one is recommended, and wait for the answer.
 - You cannot click in Figma. Step 7 is the user's. Say so, and wait for them to confirm.
 - After the install completes, run the verification step. Do not skip it.
 
@@ -134,7 +134,7 @@ Before you begin, read these rules. They apply to every step below.
 
    macOS and Linux must print `grip-install.zip: OK`; Windows must print `SHA-256 OK`. If it does not, stop and tell the user the download did not match its checksum. Never extract an archive that failed this check.
 
-6. **Ask the user how Grip should run, then run the installer.** Ask exactly this and wait for the answer: "Do you want Grip to start on demand (nothing stays running; the first time your agent uses Grip it starts the bridge), or as an always-on background service (a Login Item on macOS, a Startup entry on Windows, a systemd user service on Linux)? On-demand is the default and is fine for most people." Do not choose for them. Extract the package, then run the installer from the extracted folder (it copies the bridge and the plugin to `~/.grip` and registers Grip with your agent). Replace `<download folder step 4 printed>` as before.
+6. **Ask the user how Grip should run, then run the installer.** Ask exactly this and wait for the answer: "Do you want Grip to run as an always-on background service (recommended: a Login Item on macOS, a Startup entry on Windows, a systemd user service on Linux — it starts with your computer, so the plugin goes green the moment you open it in Figma), or on demand (nothing stays running; the first time your agent uses Grip it starts the bridge, and until then the plugin sits grey)? Always-on is the recommended default; on-demand is fine if you would rather nothing ran in the background." Do not choose for them. Extract the package, then run the installer from the extracted folder (it copies the bridge and the plugin to `~/.grip` and registers Grip with your agent). Replace `<download folder step 4 printed>` as before.
 
    ```bash
    # macOS / Linux
@@ -143,15 +143,15 @@ Before you begin, read these rules. They apply to every step below.
    ```
 
    ```bash
-   # macOS / Linux: on-demand (default)
+   # macOS / Linux: always-on service (recommended default)
    DL="<download folder step 4 printed>"
-   node "$DL/extract/grip/bridge/install.mjs"
+   node "$DL/extract/grip/bridge/install.mjs" --http
    ```
 
    ```bash
-   # macOS / Linux: only if the user chose the always-on service
+   # macOS / Linux: only if the user chose on demand
    DL="<download folder step 4 printed>"
-   node "$DL/extract/grip/bridge/install.mjs" --http
+   node "$DL/extract/grip/bridge/install.mjs"
    ```
 
    ```powershell
@@ -161,16 +161,18 @@ Before you begin, read these rules. They apply to every step below.
    ```
 
    ```powershell
-   # Windows (PowerShell): on-demand (default)
+   # Windows (PowerShell): always-on service (recommended default)
+   $dl = "<download folder step 4 printed>"
+   node "$dl\extract\grip\bridge\install.mjs" --http
+   ```
+
+   ```powershell
+   # Windows (PowerShell): only if the user chose on demand
    $dl = "<download folder step 4 printed>"
    node "$dl\extract\grip\bridge\install.mjs"
    ```
 
-   ```powershell
-   # Windows (PowerShell): only if the user chose the always-on service
-   $dl = "<download folder step 4 printed>"
-   node "$dl\extract\grip\bridge\install.mjs" --http
-   ```
+   `--http` installs the always-on service for this platform, starts it now, and registers Grip over HTTP (`http://127.0.0.1:7778/mcp`) instead of stdio. Without it Grip is registered as a stdio command and starts on the first call. Either way the installer does the whole thing; you do not start anything by hand.
 
    **Which client are you? This is your decision.** Grip is a standard MCP server, so any MCP client can use it. By default the installer registers Grip with Claude: it runs `claude mcp add` when the Claude Code CLI exists, otherwise it writes the server entry into `~/.claude.json`. If you are Claude Code or the Claude desktop app, run the commands above as they are and tell the user that is what it did. If you are any other agent (Codex, Cursor, or another MCP client), add `--no-register` to the installer command: it installs the files and changes no agent config, then prints how to connect (HTTP address, stdio command, and example snippets). Register Grip in your own client from that output (or from `node "$DL/extract/grip/bridge/install.mjs" --print-config`), after showing the user exactly what you will write and where, and asking. The examples are starting points; your client's own docs win if the format differs.
 
@@ -220,7 +222,9 @@ CHANGELOG.md      what changed in each release (also the release notes)
 
 ## Cold start
 
-The Figma sandbox can't launch a local process, so opening the plugin **before** any agent has called Grip shows it disconnected (grey). That's expected — the first agent call starts the bridge and the plugin reconnects within a couple of seconds. Use `--http` if you'd rather it always be running.
+With the always-on service (`--http`, the recommended install) the bridge is already running, so the plugin is green as soon as you open it.
+
+On an on-demand install the Figma sandbox can't launch a local process, so opening the plugin **before** any agent has called Grip shows it disconnected (grey). That's expected — the first agent call starts the bridge and the plugin reconnects within a couple of seconds.
 
 ## Updating
 

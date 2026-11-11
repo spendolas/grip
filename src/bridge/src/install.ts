@@ -7,13 +7,14 @@
 // which is itself a single self-contained file. So installing is: copy one file
 // to a stable home, then register it with the agent. No npm, no node_modules.
 //
-// Default is stdio + on-demand: nothing stays running, and the first agent call
-// spawns the daemon. --http installs an always-on daemon instead, using each
-// platform's own mechanism (all inlined here — no shell scripts shipped).
+// --http is the recommended install: an always-on daemon, using each platform's
+// own mechanism (all inlined here — no shell scripts shipped), registered over
+// HTTP. Without the flag it is stdio + on-demand: nothing stays running, and the
+// first agent call spawns the daemon (the plugin is grey until then).
 //
 // Usage:
-//   node install.js                # stdio, on-demand (recommended); registers with Claude
-//   node install.js --http         # + always-on daemon
+//   node install.js --http         # always-on daemon + HTTP (recommended)
+//   node install.js                # stdio, on demand; registers with Claude
 //   node install.js --no-register  # install the files only; the agent registers Grip in ITS client
 //   node install.js --print-config # print the connection details and ready-to-paste snippets, install nothing
 
@@ -161,8 +162,8 @@ function connectionDetails(): string {
   const stdioArgs = JSON.stringify([ENTRY]);
   return [
     'Connect Grip to your MCP client (any client works):',
-    `  HTTP (needs the always-on daemon, install with --http):  ${HTTP_URL}`,
-    `  stdio (on demand, nothing stays running):               ${process.execPath} ${ENTRY}`,
+    `  HTTP (recommended; needs the always-on daemon, install with --http):  ${HTTP_URL}`,
+    `  stdio (on demand, nothing stays running):                            ${process.execPath} ${ENTRY}`,
     '',
     'Examples (check your client\'s docs if its format differs):',
     '  Claude Code:  claude mcp add -s user grip ' + process.execPath + ' ' + ENTRY,
@@ -338,5 +339,8 @@ if (INSTALL_TYPE === 'clone') {
   log(`turns purple, or run: node ${ENTRY} update`);
 }
 log();
-if (!wantHttp) log('  (on-demand: nothing stays running; the first call starts it.)');
+if (!wantHttp) {
+  log('  (on demand: nothing stays running; the first call starts it, and the plugin');
+  log('   is grey until then. For an always-on bridge, re-run this installer with --http.)');
+}
 log(`Logs: ~/.grip-bridge.log   Status: ~/.grip-bridge.status`);
