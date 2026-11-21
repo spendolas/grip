@@ -3,8 +3,8 @@
   "version": "0.9.6",
   "private": true,
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch"
+    "build": "node ../../scripts/gen-flavour.mjs && tsc",
+    "dev": "node ../../scripts/gen-flavour.mjs && tsc --watch"
   },
   "devDependencies": {
     "@figma/plugin-typings": "^1.142.0",

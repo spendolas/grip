@@ -1,0 +1,19 @@
+{
+  "slug": "acme",
+  "displayName": "Acme",
+  "wsPort": 7877,
+  "httpPort": 7878,
+  "homeDirName": ".acme",
+  "filePrefix": ".acme-bridge",
+  "ipcName": "acme-bridge",
+  "mcpName": "acme",
+  "daemonAppName": "Acme Daemon",
+  "daemonBundleId": "com.acme.bridge.daemon",
+  "launchLabel": "com.acme.bridge",
+  "pluginId": "1000000000000000001",
+  "pluginName": "Acme",
+  "releasesApi": "https://example.invalid/acme/releases/latest",
+  "installUrl": "https://example.invalid/acme/install",
+  "pagesUrl": "https://example.invalid/acme/",
+  "lockOverrides": true
+}

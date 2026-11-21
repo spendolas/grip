@@ -17,3 +17,7 @@ src/bridge/dist/
 .claude/settings.local.json
 .claude/worktrees/
 .remember/
+
+# Generated flavour constants (scripts/gen-flavour.mjs); never committed
+src/bridge/src/flavour.gen.ts
+src/plugin/flavour.gen.ts

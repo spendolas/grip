@@ -1,0 +1,19 @@
+{
+  "slug": "grip",
+  "displayName": "Grip",
+  "wsPort": 7777,
+  "httpPort": 7778,
+  "homeDirName": ".grip",
+  "filePrefix": ".grip-bridge",
+  "ipcName": "grip-bridge",
+  "mcpName": "grip",
+  "daemonAppName": "Grip Daemon",
+  "daemonBundleId": "com.grip.bridge.daemon",
+  "launchLabel": "com.grip.bridge",
+  "pluginId": "1682868744739448629",
+  "pluginName": "Grip",
+  "releasesApi": "https://api.github.com/repos/spendolas/grip/releases/latest",
+  "installUrl": "https://github.com/spendolas/grip/releases/latest",
+  "pagesUrl": "https://spendolas.github.io/grip/",
+  "lockOverrides": false
+}
