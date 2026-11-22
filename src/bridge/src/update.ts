@@ -1311,7 +1311,7 @@ export async function installAndScheduleRestart(o: InstallOptions): Promise<Inst
   if (r.status !== 'updated') return r;
   if (!restartHook) return { ...r, restart: 'none' };
   if (!restartManaged) {
-    logErr('update: this bridge is not running from ~/.grip/grip-bridge.mjs, so it is not restarting; start the installed copy to use the new version');
+    logErr(`update: this bridge is not running from ${liveIdentity().homeLabel}/grip-bridge.mjs, so it is not restarting; start the installed copy to use the new version`);
     return { ...r, restart: 'not_managed' };
   }
   const delay = Number(process.env.GRIP_UPDATE_RESTART_DELAY_MS ?? 1000);

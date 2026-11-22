@@ -204,7 +204,7 @@ async function runDaemon(bridge: PluginBridge) {
   // clients below.
 
   // HTTP MCP transport — direct-connect clients (no shim, no IPC hop). Best
-  // effort: if the port is taken we keep serving WS+IPC (WS :7777 is the real
+  // effort: if the port is taken we keep serving WS+IPC (the WS port is the real
   // single-instance lock). Same PluginBridge, so routing/binding is shared.
   const http = new HttpServer(HTTP_PORT, bridge);
   await http.listen();

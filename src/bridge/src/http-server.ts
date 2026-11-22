@@ -201,7 +201,7 @@ export class HttpServer {
   }
 
   // Resolves true if listening, false if the port was taken (daemon keeps
-  // running WS+IPC without HTTP rather than dying — WS :7777 is the real
+  // running WS+IPC without HTTP rather than dying — the WS port is the real
   // single-instance lock). Rejects only on unexpected errors.
   listen(): Promise<boolean> {
     return new Promise((resolve, reject) => {
