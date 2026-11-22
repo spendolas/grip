@@ -28,8 +28,14 @@ const urls = {
   'a.bin': PFX + 'v1.0.0/a.bin',
   'b.bin': 'https://github.com/other/repo/releases/download/v1.0.0/b.bin',
   'c.bin': 'https://github.com/o/r/releases/download.evil/v1/c.bin',
+  'd.bin': PFX + '../../../../evil/x/releases/download/v1/d.bin',
+  'e.bin': PFX + '%2e%2e/%2e%2e/%2e%2e/%2e%2e/evil/x/releases/download/v1/e.bin',
+  'f.bin': PFX + '%2E%2E/%2E%2E/%2E%2E/%2E%2E/evil/x/releases/download/v1/f.bin',
+  'g.bin': PFX + '..\\..\\..\\..\\evil\\x\\releases\\download\\v1\\g.bin',
+  'h.bin': 'https://[bad/releases/download/v1/h.bin',
+  'i.bin': 'https://github.com:444/o/r/releases/download/v1/i.bin',
 };
 assert.deepEqual(Object.keys(parseRelease(rel(urls), PFX).assets), ['a.bin']);
-assert.deepEqual(Object.keys(parseRelease(rel(urls), null).assets).sort(), ['a.bin', 'b.bin', 'c.bin']);
-assert.deepEqual(Object.keys(parseRelease(rel(urls)).assets).sort(), ['a.bin', 'b.bin', 'c.bin']);
+assert.deepEqual(Object.keys(parseRelease(rel(urls), null).assets).sort(), Object.keys(urls).sort());
+assert.deepEqual(Object.keys(parseRelease(rel(urls)).assets).sort(), Object.keys(urls).sort());
 console.log('update-policy.mjs OK');

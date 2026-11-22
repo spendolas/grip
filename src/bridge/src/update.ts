@@ -375,6 +375,14 @@ export function releaseNotes(body: unknown, max: number = NOTES_MAX_CHARS): stri
   return (nl > max * 0.6 ? cut.slice(0, nl) : cut).trimEnd() + '\n…';
 }
 
+// True when `raw` stays under `prefix` after URL normalisation. The URL parser collapses
+// `..`, `%2e%2e` and backslashes, so a raw startsWith would let a path climb out of the
+// pinned repo; such spellings are refused outright and the parsed form is what is compared.
+function underPrefix(raw: string, prefix: string): boolean {
+  if (/%2e|\.\.|\\/i.test(raw)) return false;
+  try { return new URL(raw).href.startsWith(prefix); } catch { return false; }
+}
+
 // `downloadPrefix` (see downloadPrefixFor): when set, an asset whose download URL is not
 // under it is treated as absent, so a release cannot point the updater at another repo.
 export function parseRelease(buf: Buffer, downloadPrefix: string | null = null): Release {
@@ -390,7 +398,7 @@ export function parseRelease(buf: Buffer, downloadPrefix: string | null = null):
   for (const a of list) {
     if (!a || typeof a.name !== 'string' || typeof a.browser_download_url !== 'string') continue;
     if (!/^[A-Za-z0-9._-]{1,100}$/.test(a.name)) continue;
-    if (downloadPrefix && !a.browser_download_url.startsWith(downloadPrefix)) continue;
+    if (downloadPrefix && !underPrefix(a.browser_download_url, downloadPrefix)) continue;
     assets[a.name] = { name: a.name, url: a.browser_download_url, size: typeof a.size === 'number' ? a.size : undefined };
   }
   return { version: tag, notes: releaseNotes(j.body), headline: releaseHeadline(j.body), assets };
