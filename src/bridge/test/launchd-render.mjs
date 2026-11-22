@@ -19,18 +19,25 @@ const tmp = mkdtempSync(join(tmpdir(), 'launchd-render-'));
 try {
   const bin = join(tmp, 'bin');
   mkdirSync(bin);
-  // Stub lsof: prints the pid in STUB_LSOF_PID (nothing when unset).
-  writeFileSync(join(bin, 'lsof'), '#!/bin/sh\n[ -n "$STUB_LSOF_PID" ] && echo "$STUB_LSOF_PID"\nexit 0\n');
+  // Stub lsof: prints the listener pid in STUB_LSOF_PID (nothing when unset). The pid in
+  // STUB_LSOF_CLIENT (a client end of a connection, e.g. Figma) is printed only when the
+  // call does not ask for -sTCP:LISTEN, as the real lsof does.
+  writeFileSync(join(bin, 'lsof'), [
+    '#!/bin/sh',
+    'listen=0; for a in "$@"; do [ "$a" = "-sTCP:LISTEN" ] && listen=1; done',
+    '[ -n "$STUB_LSOF_PID" ] && echo "$STUB_LSOF_PID"',
+    '[ "$listen" = 0 ] && [ -n "$STUB_LSOF_CLIENT" ] && echo "$STUB_LSOF_CLIENT"',
+    'exit 0', ''].join('\n'));
   chmodSync(join(bin, 'lsof'), 0o755);
 
-  const run = (flavourFile, prefix, stubPid, statusPid) => {
+  const run = (flavourFile, prefix, stubPid, statusPid, clientPid = '') => {
     const home = mkdtempSync(join(tmp, 'home-'));
     if (statusPid != null) writeFileSync(join(home, `${prefix}.status`), JSON.stringify({ pid: statusPid, persistent: true }, null, 2));
     return spawnSync('bash', [script], {
       encoding: 'utf8',
       env: {
         PATH: `${bin}:${process.env.PATH}`, HOME: home, TMPDIR: tmp,
-        GRIP_DRYRUN: '1', GRIP_FLAVOUR_FILE: flavourFile, STUB_LSOF_PID: stubPid ?? '',
+        GRIP_DRYRUN: '1', GRIP_FLAVOUR_FILE: flavourFile, STUB_LSOF_PID: stubPid ?? '', STUB_LSOF_CLIENT: clientPid,
       },
     });
   };
@@ -53,6 +60,15 @@ try {
   assert.match(r.stdout, /^launchctl bootstrap .*com\.acme\.bridge\.plist/m);
   for (const s of ['com.acme.bridge', '7877', '7878', '.acme-bridge.log']) assert.ok(r.stdout.includes(s), `acme output lacks ${s}`);
   for (const s of ['com.grip', '7777', '7778', '.grip-bridge', '__']) assert.ok(!r.stdout.includes(s), `acme output still has ${s}`);
+
+  // a client end of a connection (Figma's plugin socket) is not an owner: only the listener counts.
+  r = run(acmeFlavour, '.acme-bridge', '4242', 4242, '5555');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^kill 4242$/m);
+  assert.ok(!/5555/.test(r.stdout + r.stderr), 'client pid must be ignored');
+  r = run(acmeFlavour, '.acme-bridge', '', 4242, '5555');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.ok(!/^kill /m.test(r.stdout));
 
   // nobody on the port: nothing to kill, still renders.
   r = run(acmeFlavour, '.acme-bridge', '', null);

@@ -30,7 +30,7 @@ free_own_port() {
   local own pid
   own="$(own_pid)"
   [[ -z "$own" ]] && return 0
-  for pid in $(lsof -ti:"${F_WS_PORT}" 2>/dev/null || true); do
+  for pid in $(lsof -tiTCP:"${F_WS_PORT}" -sTCP:LISTEN 2>/dev/null || true); do
     [[ "$pid" == "$own" ]] && { kill "$pid" 2>/dev/null || true; }
   done
 }

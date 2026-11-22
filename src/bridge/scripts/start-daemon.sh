@@ -24,7 +24,7 @@ if [[ ! -f "$DIST" ]]; then
 fi
 
 # Already running persistently? Nothing to do.
-if [[ -f "$STATUS" ]] && grep -q '"persistent": true' "$STATUS" 2>/dev/null && lsof -ti:${F_WS_PORT} >/dev/null 2>&1; then
+if [[ -f "$STATUS" ]] && grep -q '"persistent": true' "$STATUS" 2>/dev/null && lsof -tiTCP:${F_WS_PORT} -sTCP:LISTEN >/dev/null 2>&1; then
   echo "${F_DISPLAY} persistent daemon already running:"
   grep -E '"pid"|"version"|"httpPort"|"persistent"' "$STATUS"
   exit 0
@@ -39,7 +39,7 @@ fi
 # ones lose the next bind and exit. Fully reliable only once the stdio
 # registration is gone (no more shims) — see the remove/add step below.
 for i in 1 2 3 4 5 6 7 8; do
-  if [[ -f "$STATUS" ]] && grep -q '"persistent": true' "$STATUS" 2>/dev/null && lsof -ti:${F_WS_PORT} >/dev/null 2>&1; then
+  if [[ -f "$STATUS" ]] && grep -q '"persistent": true' "$STATUS" 2>/dev/null && lsof -tiTCP:${F_WS_PORT} -sTCP:LISTEN >/dev/null 2>&1; then
     break
   fi
   free_own_port

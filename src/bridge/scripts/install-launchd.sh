@@ -59,7 +59,7 @@ while read -r pid; do
     echo "port ${F_WS_PORT} is held by another program (pid $pid), not stopping it" >&2
     exit 1
   fi
-done < <(lsof -ti:"${F_WS_PORT}" 2>/dev/null || true)
+done < <(lsof -tiTCP:"${F_WS_PORT}" -sTCP:LISTEN 2>/dev/null || true)
 
 DOMAIN="gui/$(id -u)"
 
@@ -84,7 +84,7 @@ if [[ -n "$DRYRUN" ]]; then
   echo "plan: write $PLIST_DEST"
   render_plist
   echo "launchctl bootstrap $DOMAIN $PLIST_DEST"
-  [[ -n "$OWN_PID" ]] && lsof -ti:"${F_WS_PORT}" 2>/dev/null | grep -qx "$OWN_PID" && echo "kill $OWN_PID"
+  [[ -n "$OWN_PID" ]] && lsof -tiTCP:"${F_WS_PORT}" -sTCP:LISTEN 2>/dev/null | grep -qx "$OWN_PID" && echo "kill $OWN_PID"
   echo "launchctl kickstart -k $DOMAIN/$LABEL"
   exit 0
 fi
