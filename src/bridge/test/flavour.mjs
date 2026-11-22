@@ -38,13 +38,24 @@ rejects('extra', (f) => { f.bogusKey = 1; }, 'bogusKey');
 
 const outB = join(tmp, 'out', 'bridge.gen.ts');
 const outP = join(tmp, 'out', 'plugin.gen.ts');
-execFileSync('node', [script, '--dir', altDir, '--out-bridge', outB, '--out-plugin', outP], { stdio: 'pipe' });
+const outDir = join(tmp, 'out', 'figma-plugin');
+execFileSync('node', [script, '--dir', altDir, '--out-bridge', outB, '--out-plugin', outP, '--out-plugin-dir', outDir], { stdio: 'pipe' });
 for (const o of [outB, outP]) {
   assert.ok(existsSync(o), o);
-  const t = readFileSync(o, 'utf8');
-  assert.match(t, /slug: 'acme'/);
-  assert.match(t, /export interface Flavour/);
-  assert.match(t, /export const FLAVOUR/);
+  assert.match(readFileSync(o, 'utf8'), /slug: 'acme'/);
 }
-assert.equal(readFileSync(outB, 'utf8'), readFileSync(outP, 'utf8'));
+// the bridge file is an ES module ...
+assert.match(readFileSync(outB, 'utf8'), /export interface Flavour/);
+assert.match(readFileSync(outB, 'utf8'), /export const FLAVOUR/);
+// ... the plugin file the same values as a global script (tsc outFile, no module syntax)
+const pluginGen = readFileSync(outP, 'utf8');
+assert.ok(!/\b(export|import)\b/.test(pluginGen), 'the plugin flavour file has no module syntax');
+assert.match(pluginGen, /^const FLAVOUR: Flavour = /m);
+assert.equal(pluginGen.replace(/^interface /m, 'export interface ').replace(/^const FLAVOUR/m, 'export const FLAVOUR'), readFileSync(outB, 'utf8'));
+// templates rendered, no placeholder left
+for (const n of ['ui.html', 'manifest.json']) assert.ok(!/__[A-Z][A-Z0-9_]*__/.test(readFileSync(join(outDir, n), 'utf8')), n);
+// a placeholder the generator does not know is an error
+const { renderTemplate } = await import(script);
+assert.throws(() => renderTemplate('x.html', 'a __NOPE__ b', loadFlavour(altDir)), /__NOPE__/);
+assert.equal(renderTemplate('x', 'ws://localhost:__WS_PORT__ __FLAVOUR__', loadFlavour(altDir)), 'ws://localhost:7877 acme');
 console.log('flavour: ok');

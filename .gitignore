@@ -10,6 +10,8 @@ node_modules/
 # clone keep working after `npm run build`.
 /bridge/
 /figma-plugin/code.js
+/figma-plugin/ui.html
+/figma-plugin/manifest.json
 src/bridge/dist/
 /dist/
 

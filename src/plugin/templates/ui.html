@@ -51,9 +51,9 @@
   <body>
     <div id="state"></div>
     <script>
-      const URL = 'ws://localhost:7777';
+      const URL = 'ws://localhost:__WS_PORT__';
       // Build flavour of this plugin (the bridge refuses another flavour with close 4409).
-      const FLAVOUR = 'grip';
+      const FLAVOUR = '__FLAVOUR__';
       // Label that starts every pairing proof; same rule as authLabel in the bridge's
       // pairing.ts. The public flavour keeps the legacy label.
       function authLabel(slug) { return slug === 'grip' ? 'grip-auth' : 'grip-auth:' + slug; }
@@ -90,13 +90,14 @@
       // go on as before, but once a token exists a bridge without a nonce is refused (that is
       // what an impostor squatting the port looks like).
       let trusted = false;          // may this socket's requests be obeyed?
-      let pairIssue = '';           // '' | 'needs' | 'raced' | 'lost' | 'unverified'
+      let pairIssue = '';           // '' | 'needs' | 'raced' | 'lost' | 'unverified' | 'flavour'
       let welcomeMsg = null;        // the welcome frame we are answering
       let nonceBridge = '', noncePlugin = '';
       let storedToken = null;       // {id, secret} | null
       let tokenLoaded = false;
       let tokenWaiters = [];
       let pairDeniedRetried = false;
+      let bridgeFlavour = '';       // the other build's flavour, while pairIssue is 'flavour'
       // Admission ticket: a paired plugin puts the id of its token (never the secret) in the connect
       // URL so the bridge queues it in a reserved pool that socket churn from a web page cannot
       // exhaust. If Figma were to refuse a URL with a query, every third attempt goes without it
@@ -257,6 +258,7 @@
       // Tooltips are native `title`s: keep every one very short and plain.
       function tooltip(offered, needsSetup) {
         if (updPhase === 'updating') return current === 'connected' ? 'Updating…' : 'Restarting…';
+        if (pairIssue === 'flavour') return 'Wrong Grip build: this plugin is ' + FLAVOUR + ', the bridge is ' + bridgeFlavour;
         if (pairIssue === 'raced') return 'Another client paired first. If that was not you, run "node ~/.grip/grip-bridge.mjs pair --reset", then "pair"';
         if (pairIssue === 'needs') return 'Not paired. Run "node ~/.grip/grip-bridge.mjs pair", then click here';
         if (pairIssue === 'lost') return 'Pairing lost. Click to pair again';
@@ -350,6 +352,10 @@
           try { msg = JSON.parse(ev.data); } catch { return; }
           // Bridge → UI control (welcome) is forwarded to plugin so it can hello back.
           if (msg && msg.kind === 'welcome') {
+            // A bridge of another build (absent = the public 'grip'): never say hello to it.
+            const theirs = msg.flavour === undefined ? 'grip' : typeof msg.flavour === 'string' ? msg.flavour.replace(/[^\x20-\x7e]/g, '').slice(0, 40) : '?';
+            if (theirs !== FLAVOUR) { bridgeFlavour = theirs || '?'; refuseBridge('flavour'); return; }
+            if (pairIssue === 'flavour') { pairIssue = ''; bridgeFlavour = ''; }
             if (typeof msg.bridgeVersion === 'string') bridgeVersion = msg.bridgeVersion;
             welcomeMsg = msg;
             render();
@@ -510,7 +516,7 @@
         if (pairIssue) {
           // 'lost' / 'unverified': forget the old pairing so this plugin can pair again (the
           // bridge decides whether it may: first use or an open window). 'needs': just retry.
-          if (pairIssue !== 'needs' && pairIssue !== 'raced') { storedToken = null; tokenLoaded = true; toCode({ kind: 'pairClear' }); }
+          if (pairIssue !== 'needs' && pairIssue !== 'raced' && pairIssue !== 'flavour') { storedToken = null; tokenLoaded = true; toCode({ kind: 'pairClear' }); }
           pairIssue = ''; backoff = 500; render();
           if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
           connect();

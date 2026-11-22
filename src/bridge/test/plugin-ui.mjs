@@ -6,7 +6,9 @@
 // plugin iframe: that needs a live Figma check (see the report / README).
 import assert from 'node:assert';
 import vm from 'node:vm';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { webcrypto } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,7 +44,7 @@ assert.ok(html.includes('...rest'), 'the FULL hello is forwarded (minBridge and 
 // ------------------------------------------------------------ harness
 const script = /<script>([\s\S]*?)<\/script>/.exec(html)[1];
 
-function harness() {
+function harness(src = script) {
   let now = 0, seq = 0;
   const timers = new Map();
   const classes = new Set();
@@ -88,7 +90,7 @@ function harness() {
     TextEncoder,
     crypto: webcrypto,
   });
-  vm.runInContext(script, ctx);
+  vm.runInContext(src, ctx);
   const h = {
     classes: () => [...classes].sort(),
     has: (c) => classes.has(c),
@@ -553,6 +555,76 @@ const CONNECTED_TITLE = 'Connected';
     h.ws().drop(1006); h.advance(5000);
     h.ws().open(); h.ws().drop(1006); h.advance(5000);
     assert.ok(h.ws().url.includes('?t='));
+  }
+}
+
+// ------------------------------------------------------------ flavour: rendered from the templates, and refused when it differs
+{
+  const REPO = join(HERE, '..', '..', '..');
+  const gen = join(REPO, 'scripts', 'gen-flavour.mjs');
+  const out = mkdtempSync(join(tmpdir(), 'plugin-ui-flavour-'));
+  execFileSync('node', [gen, '--dir', join(HERE, 'fixtures', 'flavour-alt'),
+    '--out-bridge', join(out, 'bridge.gen.ts'), '--out-plugin', join(out, 'plugin.gen.ts'),
+    '--out-plugin-dir', join(out, 'figma-plugin')], { stdio: 'pipe' });
+  const altHtml = readFileSync(join(out, 'figma-plugin', 'ui.html'), 'utf8');
+  const altManifest = JSON.parse(readFileSync(join(out, 'figma-plugin', 'manifest.json'), 'utf8'));
+  assert.ok(!/__[A-Z_]+__/.test(altHtml), 'no placeholder survives in ui.html');
+  const altScript = /<script>([\s\S]*?)<\/script>/.exec(altHtml)[1];
+  assert.match(altScript, /^\s*const FLAVOUR = 'acme';/m, 'the alt page names its flavour');
+
+  // the alt page dials the alt port only
+  {
+    const h = harness(altScript);
+    assert.strictEqual(h.ws().url, 'ws://localhost:7877', 'connects to the alt port');
+    assert.ok(!altHtml.includes('7777'), 'the public port appears nowhere in the alt page');
+  }
+  // the alt manifest carries the alt id/name and only the alt domains
+  assert.strictEqual(altManifest.id, '1000000000000000001');
+  assert.strictEqual(altManifest.name, 'Acme');
+  assert.deepStrictEqual(altManifest.networkAccess.allowedDomains, ['ws://localhost:7877', 'http://localhost:7877']);
+
+  const helloSent = (h) => h.posted.some((p) => p.pluginMessage && p.pluginMessage.kind === 'welcome');
+  // a welcome from another flavour (absent = grip): yellow, the tooltip names both, socket closed, no hello
+  {
+    const h = harness(altScript);
+    const ws = h.ws();
+    ws.open(); ws.deliver({ kind: 'welcome', sessionId: 's0' });
+    assert.ok(h.has('warning'), 'wrong build turns the strip yellow');
+    assert.strictEqual(h.title(), 'Wrong Grip build: this plugin is acme, the bridge is grip');
+    assert.strictEqual(ws.readyState, 3, 'the socket is closed');
+    assert.ok(!helloSent(h), 'no hello is said');
+    assert.ok(ws.sent.length === 0, 'nothing is sent to the wrong bridge');
+    // no tight reconnect loop: the next attempt waits the slow pairing back-off
+    const before = h.instances.length;
+    h.advance(5000);
+    assert.strictEqual(h.instances.length, before, 'no reconnect within 5s');
+    h.advance(4000);
+    assert.strictEqual(h.instances.length, before + 1, 'retries slowly');
+    assert.ok(h.has('warning'), 'still yellow while it retries');
+    // the right bridge clears it
+    h.ws().open(); h.ws().deliver({ kind: 'welcome', sessionId: 's1', flavour: 'acme' });
+    assert.ok(h.has('connected') && !h.has('warning'), 'the matching bridge is accepted');
+    assert.ok(helloSent(h), 'hello after the matching welcome');
+  }
+  // the public page refuses a non-public bridge ...
+  {
+    const h = harness();
+    const ws = h.ws();
+    ws.open(); ws.deliver({ kind: 'welcome', sessionId: 's0', flavour: 'acme' });
+    assert.ok(h.has('warning'));
+    assert.strictEqual(h.title(), 'Wrong Grip build: this plugin is grip, the bridge is acme');
+    assert.ok(!helloSent(h));
+    // a click is a plain retry: it never forgets the pairing
+    h.store.token = { id: '0123456789abcdef', secret: 'x'.repeat(64) };
+    h.click();
+    assert.ok(h.store.token, 'the stored pairing survives the click');
+  }
+  // ... and accepts a welcome without a flavour (an older or public bridge)
+  {
+    const h = harness();
+    h.ws().open(); h.ws().deliver({ kind: 'welcome', sessionId: 's0' });
+    assert.ok(h.has('connected') && !h.has('warning'));
+    assert.ok(helloSent(h));
   }
 }
 

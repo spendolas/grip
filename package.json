@@ -8,7 +8,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "//": "Nothing generated is committed. `npm run build` is the LOCAL build: it writes bridge/grip-bridge.mjs, bridge/install.mjs, bridge/THIRD-PARTY-NOTICES.txt and figma-plugin/code.js (all gitignored). CI runs the same build to make the release assets. `npm test` builds first, so a clean checkout + `npm run setup` + `npm test` is enough.",
+    "//": "Nothing generated is committed. `npm run build` is the LOCAL build: it writes bridge/grip-bridge.mjs, bridge/install.mjs, bridge/THIRD-PARTY-NOTICES.txt, figma-plugin/code.js and figma-plugin/{ui.html,manifest.json} (rendered from src/plugin/templates; all gitignored). CI runs the same build to make the release assets. `npm test` builds first, so a clean checkout + `npm run setup` + `npm test` is enough.",
     "setup": "npm --prefix src/bridge ci && npm --prefix src/plugin ci",
     "build": "npm --prefix src/bridge run build && npm --prefix src/plugin run build && npm run build:notices",
     "build:bridge": "npm --prefix src/bridge run build",

@@ -7,7 +7,7 @@
 // builds these from source into gitignored locations; this script only reads them:
 //   bridge/grip-bridge.mjs  bridge/install.mjs  bridge/THIRD-PARTY-NOTICES.txt  (npm run build)
 //   figma-plugin/code.js                                                         (npm run build)
-//   figma-plugin/manifest.json  figma-plugin/ui.html                             (hand-written, committed)
+//   figma-plugin/manifest.json  figma-plugin/ui.html                             (npm run build, from src/plugin/templates)
 // Outputs, into --out (default ./dist):
 //   grip-bridge.mjs                                     the bridge, as-is (the in-place updater
 //                                                       downloads it by this exact name). The installer

@@ -1,9 +1,17 @@
 #!/usr/bin/env node
 // Reads flavour/flavour.json (the identity, ports, paths and MCP name of this
-// build) and emits src/bridge/src/flavour.gen.ts and src/plugin/flavour.gen.ts
-// (identical content, gitignored).
+// build) and emits (all gitignored):
+//   src/bridge/src/flavour.gen.ts  an ES module (export const FLAVOUR)
+//   src/plugin/flavour.gen.ts      the same values as a GLOBAL script (no import/
+//                                  export): tsc concatenates it with code.ts into one
+//                                  code.js (outFile), which Figma runs as a plain script
+//   figma-plugin/ui.html, figma-plugin/manifest.json
+//                                  rendered from src/plugin/templates/ (placeholders
+//                                  __WS_PORT__ __FLAVOUR__ __PLUGIN_ID__ __PLUGIN_NAME__;
+//                                  any __X__ left after rendering is an error)
 //
 //   node scripts/gen-flavour.mjs [--dir <path>] [--out-bridge <file>] [--out-plugin <file>]
+//                                [--out-plugin-dir <dir>]
 //
 // Default dir: env GRIP_FLAVOUR_DIR, else <repo>/flavour. No dependencies.
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -72,20 +80,50 @@ ${vals}
 `;
 }
 
+// Same values, but a global script: `const FLAVOUR` with no import/export, so a
+// tsc outFile build (module: none) keeps code.js one plain script.
+export function renderFlavourGlobal(f) {
+  return renderFlavour(f)
+    .replace('export interface Flavour', 'interface Flavour')
+    .replace('export const FLAVOUR', 'const FLAVOUR');
+}
+
+const TEMPLATES = ['ui.html', 'manifest.json'];
+
+// Fills the plugin templates. Values go in JSON-string-escaped (safe inside a JS
+// '...' literal for the slug/port, and inside a JSON "..." string); the slug is
+// already restricted to [a-z0-9-].
+export function renderTemplate(name, text, f) {
+  const esc = (v) => JSON.stringify(String(v)).slice(1, -1);
+  const values = { WS_PORT: f.wsPort, FLAVOUR: f.slug, PLUGIN_ID: f.pluginId, PLUGIN_NAME: f.pluginName };
+  const out = text.replace(/__([A-Z][A-Z0-9_]*)__/g, (m, k) => (k in values ? esc(values[k]) : m));
+  const left = out.match(/__[A-Z][A-Z0-9_]*__/g);
+  if (left) throw new Error(`gen-flavour: placeholder ${[...new Set(left)].join(', ')} left in ${name}`);
+  return out;
+}
+
 function main(argv) {
   const opt = { dir: process.env.GRIP_FLAVOUR_DIR ? resolve(process.env.GRIP_FLAVOUR_DIR) : join(root, 'flavour'),
     outBridge: join(root, 'src', 'bridge', 'src', 'flavour.gen.ts'),
-    outPlugin: join(root, 'src', 'plugin', 'flavour.gen.ts') };
+    outPlugin: join(root, 'src', 'plugin', 'flavour.gen.ts'),
+    outPluginDir: join(root, 'figma-plugin') };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const v = argv[i + 1];
     if (a === '--dir') { opt.dir = resolve(v); i++; }
     else if (a === '--out-bridge') { opt.outBridge = resolve(v); i++; }
     else if (a === '--out-plugin') { opt.outPlugin = resolve(v); i++; }
+    else if (a === '--out-plugin-dir') { opt.outPluginDir = resolve(v); i++; }
     else throw new Error(`gen-flavour: unknown argument ${a}`);
   }
-  const text = renderFlavour(loadFlavour(opt.dir));
-  for (const o of [opt.outBridge, opt.outPlugin]) {
+  const f = loadFlavour(opt.dir);
+  const outputs = [[opt.outBridge, renderFlavour(f)], [opt.outPlugin, renderFlavourGlobal(f)]];
+  for (const name of TEMPLATES) {
+    const tpl = readFileSync(join(root, 'src', 'plugin', 'templates', name), 'utf8');
+    outputs.push([join(opt.outPluginDir, name), renderTemplate(name, tpl, f)]);
+  }
+  // Render everything first, write after: a bad template never leaves half an output.
+  for (const [o, text] of outputs) {
     mkdirSync(dirname(o), { recursive: true });
     writeFileSync(o, text);
   }

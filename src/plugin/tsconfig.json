@@ -1,13 +1,12 @@
 {
   "compilerOptions": {
     "target": "ES2017",
-    "module": "commonjs",
+    "module": "none",
     "lib": ["ES2017", "DOM"],
     "strict": true,
-    "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "outDir": "../../figma-plugin"
+    "outFile": "../../figma-plugin/code.js"
   },
-  "include": ["code.ts", "node_modules/@figma/plugin-typings/index.d.ts"]
+  "include": ["flavour.gen.ts", "code.ts", "node_modules/@figma/plugin-typings/index.d.ts"]
 }

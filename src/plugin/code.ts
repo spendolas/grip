@@ -5356,7 +5356,9 @@ figma.ui.onmessage = async (msg: ToolRequest | any) => {
     // normal web page that carries the deep-link buttons (Claude desktop Code
     // session, Claude Code terminal) and a copy-the-prompt button: docs/index.html,
     // served by GitHub Pages.
-    figma.openExternal('https://spendolas.github.io/grip/');
+    // FLAVOUR is the global from flavour.gen.ts (scripts/gen-flavour.mjs), which tsc
+    // concatenates in front of this file into the one code.js (tsconfig outFile).
+    figma.openExternal(FLAVOUR.pagesUrl);
     return;
   }
   if (!msg || msg.kind !== 'request') return;

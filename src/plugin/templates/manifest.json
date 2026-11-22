@@ -1,13 +1,13 @@
 {
-  "name": "Grip",
-  "id": "1682868744739448629",
+  "name": "__PLUGIN_NAME__",
+  "id": "__PLUGIN_ID__",
   "api": "1.0.0",
   "main": "code.js",
   "ui": "ui.html",
   "editorType": ["figma", "figjam"],
   "networkAccess": {
-    "allowedDomains": ["ws://localhost:7777", "http://localhost:7777"],
-    "reasoning": "Connects to local Grip bridge for MCP agent access."
+    "allowedDomains": ["ws://localhost:__WS_PORT__", "http://localhost:__WS_PORT__"],
+    "reasoning": "Connects to local __PLUGIN_NAME__ bridge for MCP agent access."
   },
   "documentAccess": "dynamic-page",
   "permissions": ["activeusers", "currentuser", "teamlibrary"],
