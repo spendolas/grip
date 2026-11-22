@@ -60,6 +60,9 @@ export function loadFlavour(dir) {
   // can be rotated (trust old and new for one release). Public keys only: never a private key.
   if (!Array.isArray(raw.releaseKeys) || raw.releaseKeys.length < 1) throw new Error('flavour: field "releaseKeys" must be a non-empty array of Ed25519 public key PEM strings');
   for (const pem of raw.releaseKeys) {
+    // createPublicKey also accepts a private-key PEM (it derives the public half) and
+    // objects (JWK, {key,format}), so insist on a string with the public-key header.
+    if (typeof pem !== 'string' || !pem.includes('-----BEGIN PUBLIC KEY-----')) throw new Error('flavour: field "releaseKeys" holds an entry that is not a public key PEM string (a private key must never go here)');
     let k;
     try { k = createPublicKey(pem); } catch { throw new Error('flavour: field "releaseKeys" holds an entry that is not a public key PEM'); }
     if (k.asymmetricKeyType !== 'ed25519') throw new Error('flavour: field "releaseKeys" holds a key that is not Ed25519');

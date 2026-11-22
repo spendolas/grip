@@ -94,6 +94,11 @@ test('fails when there is nothing to sign, or no pinned key to check against', (
     writeFileSync(flavourFile, JSON.stringify(bad));
     assert.throws(() => signSums({ root: bare, dir, keyPem: TEST_PRIV }), (e) => e instanceof SignError && /flavour\.json/.test(e.message), JSON.stringify(bad));
   }
+  const ed = generateKeyPairSync('ed25519');
+  for (const bad of [ed.privateKey.export({ type: 'pkcs8', format: 'pem' }), { key: TEST_PUB, format: 'pem' }, ed.publicKey.export({ format: 'jwk' })]) {
+    writeFileSync(flavourFile, JSON.stringify({ releaseKeys: [bad] }));
+    assert.throws(() => signSums({ root: bare, dir, keyPem: TEST_PRIV }), (e) => e instanceof SignError && /flavour\.json/.test(e.message), 'non-public-key-PEM entry');
+  }
   writeFileSync(flavourFile, '{ not json');
   assert.throws(() => signSums({ root: bare, dir, keyPem: TEST_PRIV }), SignError);
   const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 }).publicKey.export({ type: 'spki', format: 'pem' });

@@ -41,6 +41,10 @@ rejects('keys-not-array', (f) => { f.releaseKeys = 'x'; }, 'releaseKeys');
 rejects('key-not-pem', (f) => { f.releaseKeys = ['not a pem']; }, 'releaseKeys');
 rejects('key-rsa', (f) => { f.releaseKeys = [generateKeyPairSync('rsa', { modulusLength: 2048 }).publicKey.export({ type: 'spki', format: 'pem' })]; }, 'releaseKeys');
 assert.equal(loadFlavour(altDir).releaseKeys.length, 1);
+{ const kp = generateKeyPairSync('ed25519');
+  rejects('key-private', (f) => { f.releaseKeys = [kp.privateKey.export({ type: 'pkcs8', format: 'pem' })]; }, 'releaseKeys');
+  rejects('key-object', (f) => { f.releaseKeys = [{ key: kp.publicKey.export({ type: 'spki', format: 'pem' }), format: 'pem' }]; }, 'releaseKeys');
+  rejects('key-jwk', (f) => { f.releaseKeys = [kp.publicKey.export({ format: 'jwk' })]; }, 'releaseKeys'); }
 rejects('extra', (f) => { f.bogusKey = 1; }, 'bogusKey');
 // names that reach AppleScript, plist XML, shell and paths: safe characters only
 for (const k of ['filePrefix', 'homeDirName', 'ipcName', 'launchLabel', 'daemonBundleId']) {
