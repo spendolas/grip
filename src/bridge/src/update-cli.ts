@@ -15,6 +15,7 @@
 
 import { createInterface } from 'node:readline';
 import { BRIDGE_VERSION } from './types.js';
+import { IDENTITY } from './identity.js';
 import {
   CLONE_NEXT_STEPS, checkForUpdate, checkPluginCompat, gripHome, installUpdate, readDaemonPlugins, readInstallRecord, releasesApi,
   rollbackBridge, stopRunningDaemon,
@@ -48,7 +49,7 @@ export async function runUpdateCli(argv: string[]): Promise<number> {
     try {
       const r = rollbackBridge();
       out(`Restored the previous bridge from ${r.restored}.`);
-      out('(Only the bridge goes back: the plugin files in ~/.grip/figma-plugin stay at the new version.)');
+      out(`(Only the bridge goes back: the plugin files in ${IDENTITY.homeLabel}/figma-plugin stay at the new version.)`);
       out(stopRunningDaemon().note);
       return 0;
     } catch (err) {
@@ -149,7 +150,7 @@ export async function runUpdateCli(argv: string[]): Promise<number> {
     for (const k of r.pluginCopies?.skipped ?? []) out(`  plugin  -> ${k.dir} left alone (${k.reason}${k.reason === 'git_checkout' ? ': run git pull && npm run build there' : ''})`);
     out('Rolling back restores the bridge only; the plugin files stay at the new version.');
     out(stopRunningDaemon().note);
-    if (!r.pluginCopies) out('If you imported the plugin from a folder other than ~/.grip/figma-plugin, import ~/.grip/figma-plugin/manifest.json in Figma instead (a git clone: git pull && npm run build there).');
+    if (!r.pluginCopies) out(`If you imported the plugin from a folder other than ${IDENTITY.homeLabel}/figma-plugin, import ${IDENTITY.homeLabel}/figma-plugin/manifest.json in Figma instead (a git clone: git pull && npm run build there).`);
     return 0;
   } catch (err) {
     process.stderr.write(`Update failed: ${(err as Error).message}\n`);

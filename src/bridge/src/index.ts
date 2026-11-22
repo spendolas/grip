@@ -5,8 +5,6 @@
 // real bugs without the quadratic.
 Error.stackTraceLimit = 3;
 
-import { tmpdir, homedir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { openSync, writeSync, closeSync, writeFileSync, unlinkSync, existsSync, statSync, renameSync, chmodSync } from 'node:fs';
@@ -20,6 +18,7 @@ import { runProxy } from './proxy.js';
 import { isUpdateCli, runUpdateCli } from './update-cli.js';
 import { isPairCli, runPairCli } from './pair-cli.js';
 import { PairingStore } from './pairing.js';
+import { IDENTITY } from './identity.js';
 import { startUpdateChecks, setRestartHook, isManagedInstall, wireUpdateToBridge } from './update.js';
 
 // `--selftest`: the self-updater runs a freshly downloaded bridge once with this
@@ -32,16 +31,15 @@ if (process.argv.includes('--selftest')) {
   await new Promise<never>(() => {});
 }
 
-const WS_PORT = Number(process.env.GRIP_WS_PORT ?? 7777);
-const HTTP_PORT = Number(process.env.GRIP_HTTP_PORT ?? 7778);
+const WS_PORT = IDENTITY.wsPort;
+const HTTP_PORT = IDENTITY.httpPort;
 // IPC endpoint. On Windows, Node's local-domain sockets ARE named pipes and
 // the path MUST live under \\.\pipe\ — a filesystem path silently fails to
 // bind/connect. On macOS/Linux it's a UNIX socket file in tmpdir. GRIP_IPC_PATH
 // overrides either.
 const IS_WIN = process.platform === 'win32';
-const IPC_PATH = process.env.GRIP_IPC_PATH ??
-  (IS_WIN ? '\\\\.\\pipe\\grip-bridge' : join(tmpdir(), 'grip-bridge.sock'));
-const STATUS_PATH = process.env.GRIP_STATUS_PATH ?? join(homedir(), '.grip-bridge.status');
+const IPC_PATH = IDENTITY.ipcPath;
+const STATUS_PATH = IDENTITY.statusPath;
 const IS_DAEMON = process.argv.includes('--daemon');
 // `update` / `--update` runs the self-update CLI instead of the shim/daemon:
 // no log mirroring, no daemon spawn, no MCP on stdout (see update-cli.ts).
@@ -59,7 +57,7 @@ const MAX_LIFETIME_MS = 6 * 60 * 60 * 1000;
 // Goes to both real stderr (so MCP clients can read it) AND the file.
 if (!IS_UPDATE_CLI && !IS_PAIR_CLI) (() => {
   try {
-    const path = process.env.GRIP_LOG_PATH ?? join(homedir(), '.grip-bridge.log');
+    const path = IDENTITY.logPath;
     // The log holds the full code of every run_script and file names: owner-only, and
     // size-capped (one previous generation kept as <log>.1) so a chatty or hostile peer
     // cannot fill the disk.
@@ -117,7 +115,7 @@ function tryBindWs(): Promise<PluginBridge | null> {
 // whatever just hung us. Lands in ~/.grip-bridge.dump-<ts>.json.
 function dumpForensics(reason: string, extra: Record<string, unknown>, bridge?: PluginBridge) {
   try {
-    const path = join(homedir(), `.grip-bridge.dump-${Date.now()}.json`);
+    const path = IDENTITY.dumpPath(Date.now());
     const snap = bridge?.snapshot?.() ?? null;
     const cpu = process.cpuUsage();
     const mem = process.memoryUsage();
@@ -425,6 +423,9 @@ async function main() {
     process.exit(runPairCli(process.argv));
   }
   if (IS_DAEMON) {
+    if (IDENTITY.overridesIgnored.length) {
+      process.stderr.write(`[grip] ignoring environment overrides in this build: ${IDENTITY.overridesIgnored.join(', ')}\n`);
+    }
     // One bad frame, one throwing timer or one rejected promise must not take down the
     // daemon every agent shares: log the message (never the stack, see stackTraceLimit) and
     // carry on. A real crash loop still ends: more than 20 in a minute exits for a clean respawn.

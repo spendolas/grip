@@ -12,10 +12,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/_flavour.sh"
 DIST="$(cd "$SCRIPT_DIR/.." && pwd)/dist/index.js"
 NODE="$(command -v node)"
-LOG="$HOME/.grip-bridge.log"
-STATUS="$HOME/.grip-bridge.status"
+LOG="$HOME/${F_PREFIX}.log"
+STATUS="$HOME/${F_PREFIX}.status"
 
 if [[ ! -f "$DIST" ]]; then
   echo "error: $DIST not found — run 'npm run build' in bridge/ first." >&2
@@ -23,7 +24,7 @@ if [[ ! -f "$DIST" ]]; then
 fi
 
 # Already running persistently? Nothing to do.
-if [[ -f "$STATUS" ]] && grep -q '"persistent": true' "$STATUS" 2>/dev/null && lsof -ti:7777 >/dev/null 2>&1; then
+if [[ -f "$STATUS" ]] && grep -q '"persistent": true' "$STATUS" 2>/dev/null && lsof -ti:${F_WS_PORT} >/dev/null 2>&1; then
   echo "grip persistent daemon already running:"
   grep -E '"pid"|"version"|"httpPort"|"persistent"' "$STATUS"
   exit 0
@@ -38,10 +39,10 @@ fi
 # ones lose the next bind and exit. Fully reliable only once the stdio
 # registration is gone (no more shims) — see the remove/add step below.
 for i in 1 2 3 4 5 6 7 8; do
-  if [[ -f "$STATUS" ]] && grep -q '"persistent": true' "$STATUS" 2>/dev/null && lsof -ti:7777 >/dev/null 2>&1; then
+  if [[ -f "$STATUS" ]] && grep -q '"persistent": true' "$STATUS" 2>/dev/null && lsof -ti:${F_WS_PORT} >/dev/null 2>&1; then
     break
   fi
-  lsof -ti:7777 2>/dev/null | while read -r pid; do kill "$pid" 2>/dev/null || true; done
+  lsof -ti:${F_WS_PORT} 2>/dev/null | while read -r pid; do kill "$pid" 2>/dev/null || true; done
   GRIP_PERSISTENT=1 nohup "$NODE" "$DIST" --daemon >>"$LOG" 2>&1 &
   disown || true
   sleep 1.5
@@ -64,4 +65,4 @@ fi
 echo
 echo "Register grip by URL (replaces the stdio entry):"
 echo "  claude mcp remove -s user grip"
-echo "  claude mcp add --transport http -s user grip http://127.0.0.1:7778/mcp"
+echo "  claude mcp add --transport http -s user ${F_MCP_NAME} http://127.0.0.1:${F_HTTP_PORT}/mcp"

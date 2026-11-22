@@ -26,6 +26,8 @@ import { fileURLToPath } from 'node:url';
 import { detectInstallSource, gripHome, stopRunningDaemon, writeInstallRecord } from './update.js';
 import { INSTALL_WINDOW_MS, prepareInstall } from './pairing.js';
 import { BRIDGE_VERSION } from './types.js';
+import { FLAVOUR } from './flavour.gen.js';
+import { liveIdentity } from './identity.js';
 
 const args = new Set(process.argv.slice(2));
 const wantHttp = args.has('--http');
@@ -52,7 +54,9 @@ const SOURCE_PLUGIN = [join(HERE, '..', 'figma-plugin'), join(HERE, 'figma-plugi
 const INSTALL_TYPE = detectInstallSource(HERE);
 const PLUGIN_DIR = join(GRIP_HOME, 'figma-plugin');
 const ENTRY = join(GRIP_HOME, 'grip-bridge.mjs');
-const HTTP_URL = 'http://127.0.0.1:7778/mcp';
+const HTTP_URL = liveIdentity().httpUrl;
+const HOME_LABEL = liveIdentity().homeLabel;
+const SERVICE_NAME = `${FLAVOUR.slug}-bridge`;
 
 function log(msg = '') { process.stdout.write(msg + '\n'); }
 function step(n: number, msg: string) { log(`\x1b[1m[${n}]\x1b[0m ${msg}`); }
@@ -91,7 +95,7 @@ function installPlugin(): boolean {
   // has the bridge (we are running it) but no code.js beside manifest.json.
   if (SOURCE_PLUGIN && !existsSync(join(SOURCE_PLUGIN, 'code.js'))) {
     warn(`code.js is missing in ${SOURCE_PLUGIN}: the plugin has not been built. Run \`npm run build\` in your Grip clone, then run this installer again.`);
-    warn('Skipped copying the plugin; an existing ~/.grip/figma-plugin was left as it was.');
+    warn(`Skipped copying the plugin; an existing ${HOME_LABEL}/figma-plugin was left as it was.`);
     return false;
   }
   if (!SOURCE_PLUGIN) {
@@ -215,7 +219,7 @@ function installPersistentDaemon() {
 // macOS: a hidden Login Item .app whose executable IS the daemon. Built in
 // ~/Applications so no admin password is ever needed.
 function daemonMac() {
-  const app = join(HOME, 'Applications', 'Grip Daemon.app');
+  const app = join(HOME, 'Applications', `${FLAVOUR.daemonAppName}.app`);
   const macos = join(app, 'Contents', 'MacOS');
   rmSync(app, { recursive: true, force: true });
   mkdirSync(macos, { recursive: true });
@@ -224,8 +228,8 @@ function daemonMac() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>Grip Daemon</string>
-  <key>CFBundleIdentifier</key><string>com.grip.bridge.daemon</string>
+  <key>CFBundleName</key><string>${FLAVOUR.daemonAppName}</string>
+  <key>CFBundleIdentifier</key><string>${FLAVOUR.daemonBundleId}</string>
   <key>CFBundleExecutable</key><string>grip-daemon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>1</string>
@@ -251,7 +255,7 @@ function daemonMac() {
   chmodSync(launcher, 0o755);
   try {
     execFileSync('osascript', ['-e',
-      'tell application "System Events" to delete (every login item whose name is "Grip Daemon")'],
+      `tell application "System Events" to delete (every login item whose name is "${FLAVOUR.daemonAppName}")`],
       { stdio: 'ignore' });
   } catch { /* none registered yet */ }
   try {
@@ -273,7 +277,7 @@ function daemonWindows() {
     'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup',
   );
   mkdirSync(startup, { recursive: true });
-  const vbsPath = join(startup, 'GripDaemon.vbs');
+  const vbsPath = join(startup, `${FLAVOUR.daemonAppName.replace(/\s+/g, '')}.vbs`);
   writeFileSync(vbsPath,
     'Set s = CreateObject("WScript.Shell")\r\n' +
     `s.Run """${process.execPath}"" ""${ENTRY}"" --daemon --persistent", 0, False\r\n`);
@@ -291,9 +295,9 @@ function daemonWindows() {
 function daemonLinux() {
   const unitDir = join(HOME, '.config', 'systemd', 'user');
   mkdirSync(unitDir, { recursive: true });
-  const unitPath = join(unitDir, 'grip-bridge.service');
+  const unitPath = join(unitDir, `${SERVICE_NAME}.service`);
   writeFileSync(unitPath,
-    '[Unit]\nDescription=Grip bridge daemon (Figma <-> MCP)\n\n' +
+    `[Unit]\nDescription=${FLAVOUR.displayName} bridge daemon (Figma <-> MCP)\n\n` +
     '[Service]\n' +
     `ExecStart=${process.execPath} ${ENTRY} --daemon --persistent\n` +
     // Always (not on-failure): a self-update restarts the daemon with a clean exit.
@@ -302,7 +306,7 @@ function daemonLinux() {
   ok(`systemd unit written → ${unitPath}`);
   try {
     execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'ignore' });
-    execFileSync('systemctl', ['--user', 'enable', '--now', 'grip-bridge'], { stdio: 'ignore' });
+    execFileSync('systemctl', ['--user', 'enable', '--now', SERVICE_NAME], { stdio: 'ignore' });
     ok('service enabled and started');
     warn('to survive logout: loginctl enable-linger $USER');
   } catch {
@@ -357,4 +361,4 @@ if (!wantHttp) {
   log('  (on demand: nothing stays running; the first call starts it, and the plugin');
   log('   is grey until then. For an always-on bridge, re-run this installer with --http.)');
 }
-log(`Logs: ~/.grip-bridge.log   Status: ~/.grip-bridge.status`);
+log(`Logs: ~/${FLAVOUR.filePrefix}.log   Status: ~/${FLAVOUR.filePrefix}.status`);

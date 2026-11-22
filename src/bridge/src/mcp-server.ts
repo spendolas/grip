@@ -7,7 +7,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { randomUUID as uuid } from 'node:crypto';
 import { writeFile, stat, open, mkdir } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { IDENTITY, liveIdentity } from './identity.js';
 import { join } from 'node:path';
 import {
   TOOLS, toolInputSchema, resolveToolScope, mergeToolScope, toolInScope, toolCategorySummary, toolDetail,
@@ -59,7 +59,7 @@ function rasterDimensions(buf: Buffer): { width: number; height: number } | unde
 
 // Read last N bytes of the bridge log without slurping the whole thing.
 async function tailLog(maxBytes = 8192): Promise<string> {
-  const path = process.env.GRIP_LOG_PATH ?? join(homedir(), '.grip-bridge.log');
+  const path = liveIdentity().logPath;
   try {
     const st = await stat(path);
     const start = Math.max(0, st.size - maxBytes);
@@ -672,7 +672,7 @@ export function createSession(bridge: PluginBridge): LiveSession {
           outPath = w.path;
         } else {
           // Auto temp path: ~/tmpdir/grip-exports/<node>-<ts>.<ext>
-          const dir = join(tmpdir(), 'grip-exports');
+          const dir = liveIdentity().exportsDir;
           try { await mkdir(dir, { recursive: true }); }
           catch (err) { return errorResult(`export_node: could not create temp dir ${dir}: ${(err as Error).message}`); }
           const nodeTag = String(d.nodeId ?? 'node').replace(/[^\w.-]/g, '_');
@@ -861,20 +861,21 @@ async function askUserToConfirm(server: Server, message: string): Promise<'accep
 // What the agent should tell the user after a successful install.
 function installNextSteps(restart: string | undefined, copies?: { updated: string[]; skipped: Array<{ dir: string; reason: string }> }): string[] {
   const steps: string[] = [];
+  const H = IDENTITY.homeLabel;
   if (restart === 'scheduled') {
-    steps.push('The Grip bridge restarts in about a second to load the new version; your next Grip call may fail once with a connection error, simply retry it. stdio agents reconnect on their own; agents on the HTTP transport (http://127.0.0.1:7778/mcp) may need to reconnect their MCP server.');
+    steps.push(`The Grip bridge restarts in about a second to load the new version; your next Grip call may fail once with a connection error, simply retry it. stdio agents reconnect on their own; agents on the HTTP transport (${IDENTITY.httpUrl}) may need to reconnect their MCP server.`);
   } else if (restart === 'not_managed') {
-    steps.push('The files were installed to ~/.grip, but this bridge is not running from ~/.grip/grip-bridge.mjs, so it did NOT restart. Restart it from the installed copy to use the new version.');
+    steps.push(`The files were installed to ${H}, but this bridge is not running from ${H}/grip-bridge.mjs, so it did NOT restart. Restart it from the installed copy to use the new version.`);
   } else {
     steps.push('Restart your agent / the Grip bridge to load the new version.');
   }
   steps.push(
-    'Figma plugin: the copy in ~/.grip/figma-plugin was updated in place.' +
+    `Figma plugin: the copy in ${H}/figma-plugin was updated in place.` +
     (copies?.updated.length ? ` The bridge also refreshed the plugin the user imported from ${copies.updated.join(', ')}; a dev plugin reloads itself when its files change, so there is nothing to do.` : '') +
-    (copies?.skipped.length ? ` The bridge did NOT touch ${copies.skipped.map((c) => `${c.dir} (${c.reason})`).join(', ')}: for a git checkout the user runs \`git pull && npm run build\` there, otherwise they can import ~/.grip/figma-plugin/manifest.json in Figma instead.` : '') +
-    (!copies ? ' If the user imported the plugin from some other folder, the bridge could not find it: they can import ~/.grip/figma-plugin/manifest.json in Figma instead, or for a git clone run `git pull && npm run build` there (a Figma Community plugin updates through Figma).' : ''),
+    (copies?.skipped.length ? ` The bridge did NOT touch ${copies.skipped.map((c) => `${c.dir} (${c.reason})`).join(', ')}: for a git checkout the user runs \`git pull && npm run build\` there, otherwise they can import ${H}/figma-plugin/manifest.json in Figma instead.` : '') +
+    (!copies ? ` If the user imported the plugin from some other folder, the bridge could not find it: they can import ${H}/figma-plugin/manifest.json in Figma instead, or for a git clone run \`git pull && npm run build\` there (a Figma Community plugin updates through Figma).` : ''),
   );
-  steps.push('Undo: `node ~/.grip/grip-bridge.mjs update --rollback` restores the previous bridge (the plugin files stay at the new version).');
+  steps.push(`Undo: \`node ${H}/grip-bridge.mjs update --rollback\` restores the previous bridge (the plugin files stay at the new version).`);
   return steps;
 }
 

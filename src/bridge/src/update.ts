@@ -46,13 +46,14 @@ import {
 } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRIDGE_VERSION } from './types.js';
+import { FLAVOUR } from './flavour.gen.js';
+import { liveIdentity } from './identity.js';
 import type { PluginBridge } from './ws-server.js';
 
-export const DEFAULT_RELEASES_API = 'https://api.github.com/repos/spendolas/grip/releases/latest';
+export const DEFAULT_RELEASES_API = FLAVOUR.releasesApi;
 
 // Release asset names. scripts/package-release.mjs produces them and
 // scripts/release-gate.mjs requires them; a test keeps all three in step.
@@ -99,10 +100,10 @@ function logErr(msg: string) { process.stderr.write(`[grip] ${msg}\n`); }
 
 // ~/.grip — GRIP_HOME overrides it so tests never touch the real one.
 export function gripHome(): string {
-  return process.env.GRIP_HOME || join(homedir(), '.grip');
+  return liveIdentity().home;
 }
 export function statusFilePath(): string {
-  return process.env.GRIP_STATUS_PATH ?? join(homedir(), '.grip-bridge.status');
+  return liveIdentity().statusPath;
 }
 // GRIP_NO_UPDATE_CHECK=1 turns off the AUTOMATIC checks and every notice.
 // Explicit user actions (install, the CLI) still work: the user asked.
@@ -575,10 +576,7 @@ export interface PluginCopy { dir: string; version: string | null; behind: boole
 
 // Where Figma keeps its settings (null: unknown platform). GRIP_FIGMA_SETTINGS overrides (tests).
 function figmaSettingsPath(): string | null {
-  if (process.env.GRIP_FIGMA_SETTINGS) return process.env.GRIP_FIGMA_SETTINGS;
-  if (process.platform === 'darwin') return join(homedir(), 'Library', 'Application Support', 'Figma', 'settings.json');
-  if (process.platform === 'win32' && process.env.APPDATA) return join(process.env.APPDATA, 'Figma', 'settings.json');
-  return null;
+  return liveIdentity().figmaSettingsPath ?? null;
 }
 
 export interface PluginCopies { known: boolean; copies: PluginCopy[] }
@@ -758,7 +756,7 @@ export function bridgeHelpText(reason: string): string {
   return `${reason}. Mention it to the user once and offer to help. ` +
     (clone
       ? `This bridge is a developer install, so it does not update itself: in their Grip checkout run git pull, npm run build and node bridge/install.mjs (with their OK).`
-      : `No update is being offered. Call grip_update {action:'check'} to see why; if that does not help, ask them to tell their agent: Install Grip from https://github.com/spendolas/grip/releases/latest.`);
+      : `No update is being offered. Call grip_update {action:'check'} to see why; if that does not help, ask them to tell their agent: Install Grip from ${FLAVOUR.installUrl}.`);
 }
 
 // The notices an agent should be told about now (the caller throttles each with

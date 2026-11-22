@@ -15,9 +15,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/_flavour.sh"
 DIST="$(cd "$SCRIPT_DIR/.." && pwd)/dist/index.js"
 NODE="$(command -v node)"
-APP="/Applications/Grip Daemon.app"
+APP="/Applications/${F_APP_NAME}.app"
 
 if [[ $EUID -eq 0 ]]; then
   echo "error: don't run this with sudo — the login item would be registered for root." >&2
@@ -30,14 +31,14 @@ if [[ ! -f "$DIST" ]]; then
 fi
 
 # Remove a stale copy from the old ~/Applications location, if present.
-rm -rf "$HOME/Applications/Grip Daemon.app" 2>/dev/null || true
+rm -rf "$HOME/Applications/${F_APP_NAME}.app" 2>/dev/null || true
 
 echo "node: $NODE"
 echo "dist: $DIST"
 echo "app:  $APP"
 
 # --- build the .app bundle in a temp dir, then place it in /Applications ---
-BUILD="$(mktemp -d)/Grip Daemon.app"
+BUILD="$(mktemp -d)/${F_APP_NAME}.app"
 mkdir -p "$BUILD/Contents/MacOS"
 
 cat > "$BUILD/Contents/Info.plist" <<PLIST
@@ -45,8 +46,8 @@ cat > "$BUILD/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>Grip Daemon</string>
-  <key>CFBundleIdentifier</key><string>com.grip.bridge.daemon</string>
+  <key>CFBundleName</key><string>${F_APP_NAME}</string>
+  <key>CFBundleIdentifier</key><string>${F_BUNDLE_ID}</string>
   <key>CFBundleExecutable</key><string>grip-daemon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>1</string>
@@ -77,7 +78,7 @@ else
 fi
 
 # --- register as a login item (idempotent: remove any prior, then add) ---
-osascript -e 'tell application "System Events" to delete (every login item whose name is "Grip Daemon")' 2>/dev/null || true
+osascript -e "tell application \"System Events\" to delete (every login item whose name is \"${F_APP_NAME}\")" 2>/dev/null || true
 osascript -e "tell application \"System Events\" to make login item at end with properties {path:\"$APP\", hidden:true}" >/dev/null
 
 echo
@@ -85,18 +86,18 @@ echo "registered login item:"
 osascript -e 'tell application "System Events" to get the name of every login item' 2>/dev/null | tr ',' '\n' | grep -i grip || true
 
 # --- start it now (frees the port for the persistent daemon first) ---
-lsof -ti:7777 2>/dev/null | while read -r pid; do kill "$pid" 2>/dev/null || true; done
+lsof -ti:${F_WS_PORT} 2>/dev/null | while read -r pid; do kill "$pid" 2>/dev/null || true; done
 sleep 1
 open "$APP"
 sleep 2
 echo
-if grep -q '"persistent": true' "$HOME/.grip-bridge.status" 2>/dev/null; then
+if grep -q '"persistent": true' "$HOME/${F_PREFIX}.status" 2>/dev/null; then
   echo "grip persistent daemon running:"
-  grep -E '"pid"|"version"|"httpPort"|"persistent"' "$HOME/.grip-bridge.status"
+  grep -E '"pid"|"version"|"httpPort"|"persistent"' "$HOME/${F_PREFIX}.status"
 else
-  echo "started (check ~/.grip-bridge.log); if a non-persistent daemon still holds"
+  echo "started (check ~/${F_PREFIX}.log); if a non-persistent daemon still holds"
   echo "the port, it's an active stdio shim — resolves once grip is HTTP-only."
 fi
 echo
 echo "Grip will now start at every login. Register it (once) if not already:"
-echo "  claude mcp remove -s user grip; claude mcp add --transport http -s user grip http://127.0.0.1:7778/mcp"
+echo "  claude mcp remove -s user ${F_MCP_NAME}; claude mcp add --transport http -s user ${F_MCP_NAME} http://127.0.0.1:${F_HTTP_PORT}/mcp"

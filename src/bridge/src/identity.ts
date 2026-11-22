@@ -71,3 +71,9 @@ export const IDENTITY: Identity = makeIdentity(FLAVOUR, {
   home: homedir(),
   tmp: tmpdir(),
 });
+
+// Re-derived from the CURRENT environment on every call, for code that has always read
+// its env lazily (tests and the installer set GRIP_HOME etc. after import).
+export function liveIdentity(): Identity {
+  return makeIdentity(FLAVOUR, { env: process.env, platform: process.platform, home: homedir(), tmp: tmpdir() });
+}

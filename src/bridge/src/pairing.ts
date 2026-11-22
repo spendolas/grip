@@ -27,8 +27,8 @@
 // proof. Both keep working until a plugin has actually paired.
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { liveIdentity } from './identity.js';
 
 export type PairingMode = 'auto' | 'off' | 'required';
 export const PAIR_WINDOW_MS = 120_000;
@@ -71,7 +71,7 @@ export class PairingStore {
   private cacheKey = '';
 
   constructor(dir?: string, mode?: PairingMode) {
-    this.dir = dir ?? process.env.GRIP_HOME ?? join(homedir(), '.grip');
+    this.dir = dir ?? liveIdentity().home;
     const env = (process.env.GRIP_PAIRING ?? '').trim();
     this.explicit = mode ?? (env !== '' ? parsePairingMode(env) : undefined);
   }
