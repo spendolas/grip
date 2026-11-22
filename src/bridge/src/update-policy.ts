@@ -4,7 +4,9 @@
 // The releases URL of a GitHub repo -> the only path its assets are downloaded from.
 // `https://api.github.com/repos/<O>/<R>/releases/latest` ->
 // `https://github.com/<O>/<R>/releases/download/`. null for any other shape (a test
-// server, a fork on another host): no pinning is applied there.
+// server, a fork on another host): no pinning is applied there, which is why a flavour
+// with lockOverrides must use this shape (scripts/gen-flavour.mjs isGithubReleasesApi,
+// kept equal by test/flavour.mjs). update.ts compares against it case-insensitively.
 export function downloadPrefixFor(releasesApi: string): string | null {
   let u: URL;
   try { u = new URL(releasesApi); } catch { return null; }

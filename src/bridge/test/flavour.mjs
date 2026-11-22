@@ -53,6 +53,29 @@ assert.equal(loadFlavour(altDir).releaseKeys.length, 1);
   const { MCP_NAME_RE } = await import('../dist/mcp-name.js');
   const gen = readFileSync(script, 'utf8').match(/const MCP_NAME_RE = (\/.*\/);/)[1];
   assert.equal(gen, String(MCP_NAME_RE), 'gen-flavour MCP_NAME_RE matches mcp-name.ts'); }
+// a locked flavour must name a GitHub releases URL, or its download pin would be silently absent
+rejects('locked-non-github', (f) => { f.lockOverrides = true; f.releasesApi = 'https://example.invalid/acme/releases/latest'; }, 'releasesApi');
+rejects('locked-github-query', (f) => { f.lockOverrides = true; f.releasesApi = 'https://api.github.com/repos/o/r/releases/latest?x=1'; }, 'releasesApi');
+assert.equal(loadFlavour(variant('locked-github', (f) => { f.lockOverrides = true; f.releasesApi = 'https://api.github.com/repos/acme-example/acme/releases/latest'; })).lockOverrides, true);
+assert.equal(loadFlavour(variant('unlocked-any-url', (f) => { f.lockOverrides = false; f.releasesApi = 'https://example.invalid/x'; })).releasesApi, 'https://example.invalid/x', 'an unlocked flavour may point anywhere');
+{ // the generator's GitHub-shape rule must agree with update-policy.ts downloadPrefixFor
+  const { downloadPrefixFor } = await import('../dist/update-policy.js');
+  const { isGithubReleasesApi } = await import(script);
+  for (const u of ['https://api.github.com/repos/o/r/releases/latest', 'https://api.github.com/repos/o/r/releases/latest/', 'https://API.github.com/repos/O.x/r_y-z/releases/latest',
+    'https://example.invalid/x', 'http://api.github.com/repos/o/r/releases/latest', 'https://api.github.com:8443/repos/o/r/releases/latest',
+    'https://u:p@api.github.com/repos/o/r/releases/latest', 'https://api.github.com/repos/o/r/releases/latest#x', 'https://api.github.com/repos/o/releases/latest',
+    'https://api.github.com.evil.test/repos/o/r/releases/latest', 'not a url']) {
+    assert.equal(isGithubReleasesApi(u), downloadPrefixFor(u) !== null, u);
+  }
+}
+{ // the plugin's generated flavour carries no release key (it never uses one); the bridge's does
+  const out = join(tmp, 'gen-keys');
+  execFileSync('node', [script, '--dir', altDir, '--out-bridge', join(out, 'b.ts'), '--out-plugin', join(out, 'p.ts'), '--out-plugin-dir', join(out, 'fp')], { stdio: 'pipe' });
+  assert.ok(readFileSync(join(out, 'b.ts'), 'utf8').includes('BEGIN PUBLIC KEY'), 'bridge flavour keeps releaseKeys');
+  const p = readFileSync(join(out, 'p.ts'), 'utf8');
+  assert.ok(!p.includes('BEGIN PUBLIC KEY') && !p.includes('releaseKeys'), 'plugin flavour has no releaseKeys');
+  assert.ok(p.includes('pagesUrl'), 'plugin flavour keeps what the plugin uses');
+}
 rejects('mcp-name-space', (f) => { f.mcpName = 'a b'; }, 'mcpName');
 rejects('plugin-id-letters', (f) => { f.pluginId = 'abc'; }, 'pluginId');
 { const kp = generateKeyPairSync('ed25519');
@@ -87,7 +110,8 @@ assert.match(readFileSync(outB, 'utf8'), /export const FLAVOUR/);
 const pluginGen = readFileSync(outP, 'utf8');
 assert.ok(!/\b(export|import)\b/.test(pluginGen), 'the plugin flavour file has no module syntax');
 assert.match(pluginGen, /^const FLAVOUR: Flavour = /m);
-assert.equal(pluginGen.replace(/^interface /m, 'export interface ').replace(/^const FLAVOUR/m, 'export const FLAVOUR'), readFileSync(outB, 'utf8'));
+// the same values, minus the release keys (the plugin never verifies a release)
+assert.equal(pluginGen.replace(/^interface /m, 'export interface ').replace(/^const FLAVOUR/m, 'export const FLAVOUR'), readFileSync(outB, 'utf8').replace(/^  releaseKeys: .*\n/gm, ''));
 // templates rendered, no placeholder left
 for (const n of ['ui.html', 'manifest.json']) assert.ok(!/__[A-Z][A-Z0-9_]*__/.test(readFileSync(join(outDir, n), 'utf8')), n);
 // a placeholder the generator does not know is an error

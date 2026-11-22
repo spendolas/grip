@@ -12,7 +12,7 @@
   "launchLabel": "com.acme.bridge",
   "pluginId": "1000000000000000001",
   "pluginName": "Acme",
-  "releasesApi": "https://example.invalid/acme/releases/latest",
+  "releasesApi": "https://api.github.com/repos/acme-example/acme/releases/latest",
   "installUrl": "https://example.invalid/acme/install",
   "pagesUrl": "https://example.invalid/acme/",
   "releaseKeys": [

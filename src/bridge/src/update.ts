@@ -385,13 +385,16 @@ export function releaseNotes(body: unknown, max: number = NOTES_MAX_CHARS): stri
 // True when `raw` stays under `prefix` after URL normalisation. The URL parser collapses
 // `..`, `%2e%2e` and backslashes, so a raw startsWith would let a path climb out of the
 // pinned repo; such spellings are refused outright and the parsed form is what is compared.
+// Case-insensitive: GitHub owner and repo names are, so a re-cased repo keeps its assets.
 function underPrefix(raw: string, prefix: string): boolean {
   if (/%2e|\.\.|\\/i.test(raw)) return false;
-  try { return new URL(raw).href.startsWith(prefix); } catch { return false; }
+  try { return new URL(raw).href.toLowerCase().startsWith(prefix.toLowerCase()); } catch { return false; }
 }
 
 // `downloadPrefix` (see downloadPrefixFor): when set, an asset whose download URL is not
 // under it is treated as absent, so a release cannot point the updater at another repo.
+// Dropped assets are logged once per parse, by NAME only (the URL text comes from the
+// release and is not ours to echo), so a later "missing asset" error is diagnosable.
 export function parseRelease(buf: Buffer, downloadPrefix: string | null = null): Release {
   let j: any;
   try { j = JSON.parse(buf.toString('utf8')); } catch { throw new UpdateError('the releases API did not return valid JSON'); }
@@ -400,19 +403,22 @@ export function parseRelease(buf: Buffer, downloadPrefix: string | null = null):
   const tag = typeof j.tag_name === 'string' ? j.tag_name.replace(/^v/, '') : '';
   if (!isSemver(tag)) throw new UpdateError('the latest release has no valid version tag');
   const assets: Record<string, ReleaseAsset> = {};
+  const dropped: string[] = [];
   const list = Array.isArray(j.assets) ? j.assets : [];
   if (list.length > MAX_ASSETS) throw new UpdateError('the latest release lists too many assets');
   for (const a of list) {
     if (!a || typeof a.name !== 'string' || typeof a.browser_download_url !== 'string') continue;
     if (!/^[A-Za-z0-9._-]{1,100}$/.test(a.name)) continue;
-    if (downloadPrefix && !underPrefix(a.browser_download_url, downloadPrefix)) continue;
+    if (downloadPrefix && !underPrefix(a.browser_download_url, downloadPrefix)) { dropped.push(a.name); continue; }
     assets[a.name] = { name: a.name, url: a.browser_download_url, size: typeof a.size === 'number' ? a.size : undefined };
   }
+  if (dropped.length) logErr(`update: ignored release asset(s) whose download URL is outside this build's release repo: ${dropped.join(', ')}`);
   return { version: tag, notes: releaseNotes(j.body), headline: releaseHeadline(j.body), assets };
 }
 
-export async function fetchRelease(api: string = releasesApi()): Promise<Release> {
-  const buf = await httpGet(api, {
+// `get` is a test seam (a fake transport); production always uses httpGet.
+export async function fetchRelease(api: string = releasesApi(), get: typeof httpGet = httpGet): Promise<Release> {
+  const buf = await get(api, {
     maxBytes: RELEASE_MAX_BYTES,
     timeoutMs: MANIFEST_TIMEOUT_MS,
     headers: { accept: 'application/vnd.github+json' },

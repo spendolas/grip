@@ -113,6 +113,31 @@ assert.deepEqual(leaks, [], `public identity strings in an acme build:\n${leaks.
         assert.equal(u.releasesApi(), alt.releasesApi, 'acme: the override URL is ignored');
         assert.deepEqual(keys, [body(alt.releaseKeys[0])], 'acme: the override key is ignored');
         assert.equal(u.hostAllowed(new URL('http://127.0.0.1:9/x')), false, 'acme: no override origin is allowed');
+        // the download pin, end to end through fetchRelease (a fake transport stands in
+        // for the network): the locked flavour's own releases URL gives the pin, an asset
+        // outside it is dropped, one inside survives (owner/repo compared case-insensitively),
+        // and the one stderr line names the dropped asset, never its URL.
+        assert.equal(alt.releasesApi, 'https://api.github.com/repos/acme-example/acme/releases/latest');
+        const outside = 'https://github.com/someone-else/acme/releases/download/v9.0.0/grip-bridge.mjs';
+        let askedFor = null;
+        const fakeGet = async (url) => {
+          askedFor = url;
+          return Buffer.from(JSON.stringify({ tag_name: 'v9.0.0', body: '', assets: [
+            { name: 'grip-bridge.mjs', browser_download_url: outside, size: 1 },
+            { name: 'compat.json', browser_download_url: 'https://github.com/Acme-Example/ACME/releases/download/v9.0.0/compat.json', size: 1 },
+            { name: 'SHA256SUMS.txt', browser_download_url: 'https://github.com/acme-example/acme/releases/download/v9.0.0/SHA256SUMS.txt', size: 1 },
+          ] }));
+        };
+        const lines = [];
+        const write = process.stderr.write;
+        process.stderr.write = (chunk, ...rest) => { lines.push(String(chunk)); return true; };
+        let rel;
+        try { rel = await u.fetchRelease(undefined, fakeGet); } finally { process.stderr.write = write; }
+        assert.equal(askedFor, alt.releasesApi, 'acme: the release is read from the flavour URL');
+        assert.deepEqual(Object.keys(rel.assets).sort(), ['SHA256SUMS.txt', 'compat.json'], 'acme: the asset outside the pin is dropped');
+        const dropped = lines.filter((l) => /grip-bridge\.mjs/.test(l));
+        assert.equal(dropped.length, 1, `one stderr line names the dropped asset: ${lines.join('')}`);
+        assert.ok(!lines.join('').includes('someone-else') && !lines.join('').includes('https://'), 'the URL text never reaches the log');
       } else {
         assert.equal(u.releasesApi(), 'http://127.0.0.1:9/x', 'public: the override URL still applies');
         assert.deepEqual(keys, [body(THROWAWAY)], 'public: the test key still applies');
