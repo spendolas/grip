@@ -40,6 +40,8 @@ export interface WSHello {
   // The oldest bridge this plugin works with (informational; plugin 0.8.0+).
   minBridge?: string;
   capabilities?: string[];
+  // Build flavour of the plugin (absent: a plugin that predates flavours, the public 'grip').
+  flavour?: string;
   fileKey: string;
   // Per-file unique id from the plugin's document plugin data (capability fileUid;
   // absent when it cannot be written, e.g. view-only). It identifies a file only

@@ -10,9 +10,10 @@
 // Model:
 //   - The bridge keeps tokens {id, secret} in <GRIP_HOME>/pairing.json (mode 0600).
 //   - Every connection gets a fresh bridge nonce in its welcome frame. A paired plugin
-//     answers with HMAC(secret, "grip-auth|plugin|<bridgeNonce>|<pluginNonce>"); the bridge
+//     answers with HMAC(secret, "<label>|plugin|<bridgeNonce>|<pluginNonce>"); the bridge
 //     verifies it and answers with the "bridge" proof, which the plugin verifies BEFORE it
 //     sends a hello or obeys one request. A squatter without the secret cannot produce it.
+//     <label> is authLabel(flavour): "grip-auth" for the public build, "grip-auth:<slug>" else.
 //   - First pairing is trust-on-first-use: while no token exists, the first plugin that asks
 //     gets one. From then on the bridge enforces: unpaired clients are refused. Another
 //     plugin install (another Figma profile) is paired by opening a window on the machine:
@@ -48,11 +49,18 @@ export function parsePairingMode(v: string | undefined): PairingMode {
 
 export function newNonce(): string { return randomBytes(PAIR_NONCE_BYTES).toString('hex'); }
 
+// The label that starts every proof. It names the build flavour, so a proof made for one
+// flavour never verifies on a bridge of another. The public flavour keeps the legacy label,
+// which keeps every proof an already-published plugin makes byte-identical.
+export function authLabel(slug: string): string {
+  return slug === 'grip' ? 'grip-auth' : `grip-auth:${slug}`;
+}
+
 // The proof one side shows the other. `role` says who is proving ('plugin' or 'bridge'), so a
 // proof can never be replayed in the other direction. The key is the secret string itself
 // (its UTF-8 bytes), which keeps the plugin side a few lines of plain JS.
-export function authProof(secret: string, role: 'plugin' | 'bridge', bridgeNonce: string, pluginNonce: string): string {
-  return createHmac('sha256', secret).update(`grip-auth|${role}|${bridgeNonce}|${pluginNonce}`).digest('hex');
+export function authProof(secret: string, role: 'plugin' | 'bridge', bridgeNonce: string, pluginNonce: string, slug = 'grip'): string {
+  return createHmac('sha256', secret).update(`${authLabel(slug)}|${role}|${bridgeNonce}|${pluginNonce}`).digest('hex');
 }
 
 function sameHex(a: string, b: string): boolean {
@@ -165,10 +173,11 @@ export class PairingStore {
   }
 
   // Verify a plugin's proof for a token. Returns the token on success.
-  verify(tokenId: unknown, bridgeNonce: string, pluginNonce: unknown, proof: unknown): PairToken | null {
+  // `slug` is the bridge's flavour: the proof must carry its label.
+  verify(tokenId: unknown, bridgeNonce: string, pluginNonce: unknown, proof: unknown, slug = 'grip'): PairToken | null {
     const t = this.find(tokenId);
     if (!t || typeof pluginNonce !== 'string' || pluginNonce.length < 8 || pluginNonce.length > 128 || typeof proof !== 'string') return null;
-    return sameHex(proof, authProof(t.secret, 'plugin', bridgeNonce, pluginNonce)) ? t : null;
+    return sameHex(proof, authProof(t.secret, 'plugin', bridgeNonce, pluginNonce, slug)) ? t : null;
   }
 
   openWindow(ms = PAIR_WINDOW_MS): number {

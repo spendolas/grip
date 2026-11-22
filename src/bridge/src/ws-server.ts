@@ -9,6 +9,7 @@ import type {
 import { BRIDGE_VERSION } from './types.js';
 import { compareSemver, isSemver } from './update.js';
 import { authProof, newNonce, type PairingStore } from './pairing.js';
+import { FLAVOUR } from './flavour.gen.js';
 import { isRetrySafe, causesEvents, serializedByPlugin } from './methods.js';
 
 interface Pending {
@@ -144,6 +145,8 @@ interface Session {
   reserved?: boolean;
   tokenId?: string;
   connectedAt: number;
+  // Closed for a flavour mismatch (see refuseFlavour): no later frame is looked at.
+  flavourRefused?: boolean;
 }
 
 // Remote-supplied text (file and page names, versions) ends up in logs and tool results:
@@ -370,6 +373,9 @@ export class PluginBridge extends EventEmitter {
   private wss6?: WebSocketServer;
   private sessions = new Map<string, Session>();
   private pairing?: PairingStore;
+  // This bridge's build flavour (FLAVOUR.slug unless a test says otherwise). A plugin of
+  // another flavour is closed 4409 before it is registered or answered (see refuseFlavour).
+  private flavour: string;
   private refusedLog = { at: 0, suppressed: 0 };
   private lastLegacyToast = 0;
   private pending = new Map<string, Pending>();
@@ -405,9 +411,10 @@ export class PluginBridge extends EventEmitter {
   private closedFiles = new Map<string, { uid: string; name: string; at: number }>();
   private static helloCounter = 0;
 
-  constructor(port: number, opts: { pairing?: PairingStore } = {}) {
+  constructor(port: number, opts: { pairing?: PairingStore; flavour?: string } = {}) {
     super();
     this.pairing = opts.pairing;
+    this.flavour = opts.flavour ?? FLAVOUR.slug;
     // 10 MB cap — accommodates large export payloads but bounds OOM risk
     // from a misbehaving peer / runaway run_script result.
     // Loopback only. The plugin has no authentication, so the socket must not be reachable
@@ -477,9 +484,9 @@ export class PluginBridge extends EventEmitter {
       this.sessions.set(id, session);
       // Hand the plugin its session id; plugin replies with a hello
       // carrying file metadata. With pairing on, the welcome also carries the
-      // challenge (see pairing.ts).
+      // challenge (see pairing.ts). `flavour` lets the plugin see which build it reached.
       ws.send(JSON.stringify({
-        kind: 'welcome', sessionId: id, bridgeVersion: BRIDGE_VERSION,
+        kind: 'welcome', sessionId: id, bridgeVersion: BRIDGE_VERSION, flavour: this.flavour,
         ...(session.authNonce ? { nonce: session.authNonce, pairing: this.pairing?.enforced() ? 'enforced' : 'open' } : {}),
       }));
       // A peer that never says hello is not a plugin: do not keep its socket.
@@ -1657,11 +1664,20 @@ export class PluginBridge extends EventEmitter {
     // Pairing handshake and gate (pairing.ts). Nothing but these two frames is looked at
     // until the connection has proven itself, so an unpaired peer can neither say hello
     // (be routed to), answer a request, nor inject an event.
+    const gate = this.sessions.get(sessionId);
+    if (!gate || gate.flavourRefused) return;
     const frameType = (msg as { type?: unknown }).type;
+    // Flavour check (see refuseFlavour): every frame that asks to be let in (pair_request,
+    // auth, hello) names the flavour of the plugin build, and one of another flavour is closed
+    // here, before the pairing gate and in every pairing mode. So it can neither take a pairing
+    // token (trust on first use), nor prove itself, nor be registered. Nothing about the files
+    // is sent: the refusal is only the close code.
+    if (frameType === 'pair_request' || frameType === 'auth' || (msg as { kind?: unknown }).kind === 'hello') {
+      const theirs = PluginBridge.frameFlavour(msg as unknown as Record<string, unknown>);
+      if (theirs !== this.flavour) { this.refuseFlavour(gate, theirs); return; }
+    }
     if (frameType === 'pair_request') { this.onPairRequest(sessionId); return; }
     if (frameType === 'auth') { this.onAuth(sessionId, msg as unknown as Record<string, unknown>); return; }
-    const gate = this.sessions.get(sessionId);
-    if (!gate) return;
     if (!gate.authed) { this.refuseUnauthed(gate, msg as unknown as Record<string, unknown>); return; }
 
     if ('kind' in msg && msg.kind === 'hello') {
@@ -1787,7 +1803,7 @@ export class PluginBridge extends EventEmitter {
     const sess = this.sessions.get(sessionId);
     const pairing = this.pairing;
     if (!sess || !pairing?.active() || sess.authNonce === '') return;
-    const t = pairing.verify(msg.tokenId, sess.authNonce, msg.nonce, msg.proof);
+    const t = pairing.verify(msg.tokenId, sess.authNonce, msg.nonce, msg.proof, this.flavour);
     if (!t) {
       process.stderr.write(`[grip] pairing: ${sessionId.slice(0, 8)} failed to prove itself (origin ${sess.origin ?? 'none'})\n`);
       this.sendTo(sessionId, { type: 'auth_failed' });
@@ -1796,7 +1812,24 @@ export class PluginBridge extends EventEmitter {
     }
     sess.authed = true;
     sess.tokenId = t.id;
-    this.sendTo(sessionId, { type: 'auth_ok', proof: authProof(t.secret, 'bridge', sess.authNonce, msg.nonce as string) });
+    this.sendTo(sessionId, { type: 'auth_ok', proof: authProof(t.secret, 'bridge', sess.authNonce, msg.nonce as string, this.flavour) });
+  }
+
+  // The flavour a frame claims. A frame without one comes from a plugin that predates
+  // flavours: that is the public build, 'grip'. A value that is not a string is no flavour
+  // (null: it can never equal a slug).
+  private static frameFlavour(msg: Record<string, unknown>): string | null {
+    const f = msg.flavour;
+    if (f === undefined) return 'grip';
+    return typeof f === 'string' ? f : null;
+  }
+
+  // A plugin of another flavour reached this bridge (two builds on one machine, or a port
+  // collision). Close it with 4409 so its strip can say so, and never look at it again.
+  private refuseFlavour(sess: Session, theirs: string | null): void {
+    sess.flavourRefused = true;
+    this.logRefused(`session ${sess.id.slice(0, 8)}: plugin flavour ${theirs === null ? '(invalid)' : clip(theirs, 32)} does not match bridge flavour ${this.flavour}, closing`);
+    try { sess.ws.close(4409, 'flavour mismatch'); } catch {}
   }
 
   // A frame from a socket that has not proven itself. A plugin that predates pairing says

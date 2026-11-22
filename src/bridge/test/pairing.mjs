@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:net';
 import { WebSocket } from 'ws';
 import { PluginBridge } from '../dist/ws-server.js';
-import { PairingStore, authProof, parsePairingMode, prepareInstall } from '../dist/pairing.js';
+import { PairingStore, authProof, authLabel, parsePairingMode, prepareInstall } from '../dist/pairing.js';
 delete process.env.GRIP_PAIRING;   // the file decides in these tests
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -31,6 +31,25 @@ const freePort = () => new Promise((res) => { const s = createServer().listen(0,
   for (const [k, m] of cases) assert.equal(ctx.hmacHex(k, m), createHmac('sha256', k).update(m).digest('hex'), `hmac parity for key length ${k.length}, message length ${m.length}`);
   assert.equal(ctx.hmacHex('abcd', 'grip-auth|plugin|1|2'), authProof('abcd', 'plugin', '1', '2'), 'the plugin and bridge build the same proof');
   assert.notEqual(authProof('s', 'plugin', 'a', 'b'), authProof('s', 'bridge', 'a', 'b'), 'a proof cannot be reflected in the other direction');
+  // the proof label follows the flavour on both halves; the public one keeps the legacy label
+  assert.match(script, /^\s*const FLAVOUR = '[a-z][a-z0-9-]*';/m, 'the page names its flavour on one line');
+  for (const slug of ['grip', 'acme']) {
+    assert.equal(ctx.authLabel(slug), authLabel(slug), `page and bridge agree on the label for ${slug}`);
+    for (const role of ['plugin', 'bridge']) {
+      assert.equal(ctx.hmacHex('abcd', ctx.authLabel(slug) + '|' + role + '|1|2'), authProof('abcd', role, '1', '2', slug), `the plugin and bridge build the same ${role} proof for ${slug}`);
+    }
+  }
+  assert.equal(ctx.authLabel('grip'), 'grip-auth');
+  assert.equal(ctx.hmacHex('abcd', ctx.authLabel('grip') + '|plugin|1|2'), ctx.hmacHex('abcd', 'grip-auth|plugin|1|2'), 'the public proof is unchanged');
+  assert.notEqual(authProof('abcd', 'plugin', '1', '2', 'acme'), authProof('abcd', 'plugin', '1', '2', 'grip'));
+  // the public page sends its frames unchanged (no flavour = grip); another flavour names itself
+  assert.deepEqual(JSON.parse(JSON.stringify(ctx.withFlavour({ type: 'pair_request' }))), { type: 'pair_request' }, 'public frames are unchanged');
+  const acmeCtx = vm.createContext({ document: { getElementById: () => stripEl }, WebSocket: NoWS, parent: { postMessage() {} }, window: {}, setTimeout, clearTimeout, JSON, TextEncoder, crypto: webcrypto });
+  vm.runInContext(script.replace(/^(\s*)const FLAVOUR = '[a-z][a-z0-9-]*';/m, "$1const FLAVOUR = 'acme';"), acmeCtx);
+  assert.deepEqual(JSON.parse(JSON.stringify(acmeCtx.withFlavour({ type: 'pair_request' }))), { type: 'pair_request', flavour: 'acme' }, 'another flavour names itself');
+  assert.match(script, /AUTH_LABEL \+ '\|plugin\|'/, 'the plugin proof uses the flavour label');
+  assert.match(script, /AUTH_LABEL \+ '\|bridge\|'/, 'the bridge proof is checked with the flavour label');
+  assert.doesNotMatch(script, /'grip-auth\|/, 'no hard-coded legacy label left in a proof');
 }
 
 // ---- 2. protocol, enforcement, windows

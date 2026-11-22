@@ -52,6 +52,15 @@
     <div id="state"></div>
     <script>
       const URL = 'ws://localhost:7777';
+      // Build flavour of this plugin (the bridge refuses another flavour with close 4409).
+      const FLAVOUR = 'grip';
+      // Label that starts every pairing proof; same rule as authLabel in the bridge's
+      // pairing.ts. The public flavour keeps the legacy label.
+      function authLabel(slug) { return slug === 'grip' ? 'grip-auth' : 'grip-auth:' + slug; }
+      const AUTH_LABEL = authLabel(FLAVOUR);
+      // Frames that ask the bridge to let us in (pair_request, auth, hello) name the flavour.
+      // The public build sends them exactly as before: no flavour means 'grip' to the bridge.
+      function withFlavour(frame) { return FLAVOUR === 'grip' ? frame : Object.assign({}, frame, { flavour: FLAVOUR }); }
       const el = document.getElementById('state');
       let ws = null;
       let backoff = 500;
@@ -167,9 +176,9 @@
           if (!welcomeMsg || !ws || ws.readyState !== 1) return;
           if (tok) {
             noncePlugin = randomHex(16);
-            send({ type: 'auth', tokenId: tok.id, nonce: noncePlugin, proof: hmacHex(tok.secret, 'grip-auth|plugin|' + nonceBridge + '|' + noncePlugin) });
+            send(withFlavour({ type: 'auth', tokenId: tok.id, nonce: noncePlugin, proof: hmacHex(tok.secret, AUTH_LABEL + '|plugin|' + nonceBridge + '|' + noncePlugin) }));
           } else {
-            send({ type: 'pair_request' });
+            send(withFlavour({ type: 'pair_request' }));
           }
         });
       }
@@ -184,7 +193,7 @@
         if (msg.type === 'auth_ok') {
           const tok = storedToken;
           if (!tok || !welcomeMsg) return;
-          if (!sameString(msg.proof, hmacHex(tok.secret, 'grip-auth|bridge|' + nonceBridge + '|' + noncePlugin))) { refuseBridge('unverified'); return; }
+          if (!sameString(msg.proof, hmacHex(tok.secret, AUTH_LABEL + '|bridge|' + nonceBridge + '|' + noncePlugin))) { refuseBridge('unverified'); return; }
           trusted = true; pairIssue = ''; sayHello(); render();
         } else if (msg.type === 'auth_failed') {
           refuseBridge('lost');
@@ -481,12 +490,13 @@
         } else if (msg.kind === 'hello') {
           // Forward every field the plugin set (including `version`, `minBridge`
           // and any future additions). An earlier allow-list dropped fields
-          // silently and led to a long false-positive Figma-cache hunt.
+          // silently and led to a long false-positive Figma-cache hunt. The flavour is
+          // this page's (withFlavour): it is the one the pairing proof was made with.
           const { pluginMessage: _drop, ...rest } = msg;
           if (typeof msg.version === 'string') pluginVersion = msg.version;
           if (typeof msg.minBridge === 'string') minBridge = msg.minBridge;
           render();
-          send({ ...rest, kind: 'hello' });
+          send(withFlavour({ ...rest, kind: 'hello' }));
         } else if (msg.kind === 'busy') {
           if (msg.busy) busyCount++;
           else busyCount = Math.max(0, busyCount - 1);
