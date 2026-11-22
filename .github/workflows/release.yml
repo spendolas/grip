@@ -25,7 +25,7 @@ on:
     paths:
       - 'src/**'
       - 'scripts/**'
-      - 'figma-plugin/**'
+      - 'flavour/**'
       - CHANGELOG.md
       - package.json
       - .github/workflows/release.yml
@@ -150,15 +150,16 @@ jobs:
         run: |
           set -euo pipefail
           S="$RUNNER_TEMP/smoke"
+          HD="$(node -p "require('./flavour/flavour.json').homeDirName")"
           rm -rf "$S"; mkdir -p "$S/extract" "$S/home"
           unzip -q dist/grip-install.zip -d "$S/extract"
-          HOME="$S/home" GRIP_HOME="$S/home/.grip" GRIP_STATUS_PATH="$S/status.json" node "$S/extract/grip/bridge/install.mjs"
-          test -f "$S/home/.grip/grip-bridge.mjs"
-          test -f "$S/home/.grip/figma-plugin/manifest.json"
-          test -f "$S/home/.grip/figma-plugin/code.js"
+          HOME="$S/home" GRIP_HOME="$S/home/$HD" GRIP_STATUS_PATH="$S/status.json" node "$S/extract/grip/bridge/install.mjs"
+          test -f "$S/home/$HD/grip-bridge.mjs"
+          test -f "$S/home/$HD/figma-plugin/manifest.json"
+          test -f "$S/home/$HD/figma-plugin/code.js"
           test -f "$S/extract/grip/THIRD-PARTY-NOTICES.txt"
-          node -e "const j=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')); if(j.source!=='release'||j.version!==process.argv[2]) { console.error('bad install.json', j); process.exit(1); }" "$S/home/.grip/install.json" "$V"
-          cmp "$S/home/.grip/grip-bridge.mjs" dist/grip-bridge.mjs
+          node -e "const j=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')); if(j.source!=='release'||j.version!==process.argv[2]) { console.error('bad install.json', j); process.exit(1); }" "$S/home/$HD/install.json" "$V"
+          cmp "$S/home/$HD/grip-bridge.mjs" dist/grip-bridge.mjs
 
       # Ed25519 signature over SHA256SUMS.txt (dist/SHA256SUMS.txt.sig). The
       # bridge only trusts a release whose signature verifies against the public
