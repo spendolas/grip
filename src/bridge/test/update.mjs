@@ -1169,9 +1169,9 @@ const OLD_PLUGIN = [{ pluginVersion: '0.5.0', fileName: 'Old file', wsReady: tru
   JSON.parse(texts(h1)[0]);   // first block is still plain JSON
   const hu = JSON.parse(texts(h1)[0]).update;
   assert.deepStrictEqual(
-    Object.keys(hu).sort(), ['available', 'checkedAt', 'current', 'latest', 'minPlugin', 'signalled'],
+    Object.keys(hu).sort(), ['available', 'checkedAt', 'current', 'latest', 'minPlugin', 'minPluginProtocol', 'signalled'],
     'grip_health.update always reports available, latest, minPlugin, signalled (+ blockedReason when withheld)');
-  assert.deepStrictEqual([hu.latest, hu.available, hu.minPlugin, hu.signalled], [NEWER, true, '0.7.0', true]);
+  assert.deepStrictEqual([hu.latest, hu.available, hu.minPlugin, hu.minPluginProtocol, hu.signalled], [NEWER, true, '0.7.0', null, true]);
   const h2 = await a.client.callTool({ name: 'grip_health', arguments: {} });
   assert.strictEqual(h2.content.length, 1, 'only once per session');
 
@@ -1498,6 +1498,7 @@ const OLD_PLUGIN = [{ pluginVersion: '0.5.0', fileName: 'Old file', wsReady: tru
   assert.match(chk.note, /NOT offered.*Do not install/);
   const hl = JSON.parse(texts(await c.client.callTool({ name: 'grip_health', arguments: {} }))[0]);
   assert.match(hl.update.signatureError, /unsigned/, 'grip_health.update surfaces signatureError');
+  assert.strictEqual(hl.update.trustCode, 'signature_missing', 'grip_health.update names the trust code next to signatureError');
   assert.strictEqual(hl.update.signalled, false);
   const ins = await c.client.callTool({ name: 'grip_update', arguments: { action: 'install', version: NEWER } });
   assert.ok(ins.isError);

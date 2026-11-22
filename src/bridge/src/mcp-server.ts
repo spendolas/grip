@@ -815,10 +815,14 @@ function updateSummary(s: UpdateState | null = getUpdateState(), plugins: Plugin
     available: s?.available ?? false,
     checkedAt: s?.checkedAt ?? null,
     minPlugin: s?.minPlugin ?? null,
+    // The oldest plugin protocol the release works with (compat.json minPluginProtocol); null = the
+    // minPlugin version rule decides. A plugin that reports its protocol is judged by this instead.
+    minPluginProtocol: s?.minPluginProtocol ?? null,
     // The latest release failed a trust check (isTrustFailure): its SHA256SUMS.txt.sig is missing or does not
     // verify against the pinned release key, or its signed compat.json is for another flavour. It is not offered
-    // and cannot be installed (nothing overrides this).
-    ...(s?.signatureError ? { signatureError: s.signatureError } : {}),
+    // and cannot be installed (nothing overrides this). `trustCode` is the code behind it
+    // (signature_missing | signature_invalid | flavour_mismatch).
+    ...(s?.signatureError ? { signatureError: s.signatureError, ...(s.trustCode ? { trustCode: s.trustCode } : {}) } : {}),
     signalled: sig.signal && !updatesDisabled(),
     ...(sig.blockedReason ? { blockedReason: sig.blockedReason } : {}),
     ...(sig.staleWindows ? { staleWindows: sig.staleWindows } : {}),

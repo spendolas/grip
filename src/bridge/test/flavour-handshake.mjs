@@ -107,6 +107,13 @@ assert.notEqual(authProof('s', 'plugin', 'a', 'b', 'acme'), authProof('s', 'plug
     const events = [];
     bridge.on('update-request', (r) => requests.push(r));
     bridge.on('event', (e) => events.push(e));
+    // an event before hello is normal (ui.html forwards selectionchange while the hello
+    // is still on its way): dropped without a log line
+    const e0 = await client(port);
+    e0.send({ event: 'selectionchange', data: { ids: ['1:1'] } });
+    await sleep(1100);   // past the 1s log rate limit, so a line here would show
+    assert.equal(events.length, 0, 'unhelloed event is not processed');
+    assert.equal(lines.filter((l) => /before hello|selectionchange/.test(l)).length, 0, 'no log line for an event before hello');
     const c = await client(port);
     c.send({ type: 'update_request', version: '9.9.9' });
     c.send({ event: 'selectionchange', data: { ids: ['1:1'] } });
@@ -115,9 +122,11 @@ assert.notEqual(authProof('s', 'plugin', 'a', 'b', 'acme'), authProof('s', 'plug
     assert.equal(events.length, 0, 'unhelloed event is not processed');
     assert.ok(!c.frames.some((f) => f.type === 'update_result'), 'no update_result for an unhelloed peer');
     assert.equal(c.closed, null, 'the peer is not closed for it');
-    const ignored = lines.filter((l) => /ignored before hello/.test(l));
-    assert.equal(ignored.length, 1, 'one ignore line (rate-limited)');
-    assert.ok(!ignored[0].includes('9.9.9'), 'the ignore line carries no peer text');
+    const ignored = lines.filter((l) => /before hello/.test(l));
+    assert.equal(ignored.length, 1, 'one line, for the update_request only');
+    assert.match(ignored[0], /update_request arrived before hello; not acted on/, 'neutral wording');
+    assert.ok(!/refused|ignored/.test(ignored[0]), 'no alarm words: a real window can be mid-connect');
+    assert.ok(!ignored[0].includes('9.9.9'), 'the line carries no peer text');
     c.hello('Late', 'acme');
     await waitFor(() => helloed(bridge, 'Late'));
     c.send({ type: 'update_request', version: '9.9.9' });
