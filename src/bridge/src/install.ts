@@ -28,18 +28,30 @@ import { INSTALL_WINDOW_MS, prepareInstall } from './pairing.js';
 import { BRIDGE_VERSION } from './types.js';
 import { FLAVOUR } from './flavour.gen.js';
 import { liveIdentity } from './identity.js';
-import { chooseMcpName, type McpTarget } from './mcp-name.js';
+import { chooseMcpName, validMcpName, type McpTarget } from './mcp-name.js';
 
 const args = new Set(process.argv.slice(2));
 const wantHttp = args.has('--http');
 const noRegister = args.has('--no-register');
 const printConfig = args.has('--print-config');
-const mcpNameFlag = (() => {
+// --mcp-name <name> | --mcp-name=<name>: present means a value is required (a missing,
+// empty or flag-looking value is an error, never silently the default), trimmed, and
+// held to MCP_NAME_RE. The trimmed value is the one used everywhere after this.
+const mcpNameFlag = ((): string | undefined => {
   const argv = process.argv.slice(2);
+  let raw: string | undefined;
+  let present = false;
   const i = argv.indexOf('--mcp-name');
-  if (i >= 0) return argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : undefined;
-  const eq = argv.find((a) => a.startsWith('--mcp-name='));
-  return eq ? eq.slice('--mcp-name='.length) || undefined : undefined;
+  if (i >= 0) { present = true; raw = argv[i + 1]; }
+  else {
+    const eq = argv.find((a) => a.startsWith('--mcp-name='));
+    if (eq !== undefined) { present = true; raw = eq.slice('--mcp-name='.length); }
+  }
+  if (!present) return undefined;
+  const v = (raw ?? '').trim();
+  if (!v || v.startsWith('-')) die('--mcp-name needs a value');
+  if (!validMcpName(v)) die(`--mcp-name "${v}" is not a valid name (letters, digits, ".", "-", "_"; must start with a letter or digit; at most 64 characters)`);
+  return v;
 })();
 const HOME = homedir();
 // Platform seam so the test suite can exercise win32/linux branches anywhere.
@@ -205,30 +217,30 @@ function registerViaJson(name: string) {
 // Examples only: a client's config format can change, so its own docs win.
 function connectionDetails(): string {
   const stdioArgs = JSON.stringify([ENTRY]);
+  const name = mcpNameFlag ?? FLAVOUR.mcpName;
   return [
     'Connect Grip to your MCP client (any client works):',
     `  HTTP (recommended; needs the always-on daemon, install with --http):  ${HTTP_URL}`,
     `  stdio (on demand, nothing stays running):                            ${process.execPath} ${ENTRY}`,
     '',
     'Examples (check your client\'s docs if its format differs):',
-    '  Claude Code:  claude mcp add -s user grip ' + process.execPath + ' ' + ENTRY,
+    `  Claude Code:  claude mcp add -s user ${name} ` + process.execPath + ' ' + ENTRY,
     '  Cursor (~/.cursor/mcp.json):',
-    '    ' + JSON.stringify({ mcpServers: { grip: { command: process.execPath, args: [ENTRY] } } }),
+    '    ' + JSON.stringify({ mcpServers: { [name]: { command: process.execPath, args: [ENTRY] } } }),
     '  Codex (~/.codex/config.toml):',
-    '    [mcp_servers.grip]',
+    `    [mcp_servers.${name}]`,
     '    command = ' + JSON.stringify(process.execPath),
     '    args = ' + stdioArgs,
   ].join('\n');
 }
 
-function registerMcp() {
-  if (noRegister) {
+function registerMcp(name: string | null) {
+  if (noRegister || name === null) {
     step(2, 'Not registering (--no-register)');
     log(connectionDetails());
     return;
   }
   step(2, `Registering with your agent (${wantHttp ? 'http' : 'stdio'})`);
-  const name = resolveMcpName();
   if (hasClaudeCli() && registerViaCli(name)) ok(`registered via 'claude mcp add'`);
   else {
     warn('claude CLI not found (or add failed) — writing config directly');
@@ -354,9 +366,11 @@ if (printConfig) {
 log();
 log('\x1b[1mGrip — installing the local bridge\x1b[0m');
 log();
+// Decided before anything is written, so a refusal leaves the disk untouched.
+const mcpName = noRegister ? null : resolveMcpName();
 installBridge();
 const pluginInstalled = installPlugin();
-registerMcp();
+registerMcp(mcpName);
 preparePairing();
 replaceRunningDaemon();
 if (wantHttp) installPersistentDaemon();

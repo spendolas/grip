@@ -5,6 +5,11 @@
 // name that points at something else would silently repoint another install's agents,
 // so that is refused unless the user chose a name with --mcp-name.
 
+// A name the CLI and every config format accept as a plain key: letters, digits, '.', '-', '_',
+// starting with a letter or digit, at most 64 characters.
+export const MCP_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export function validMcpName(name: string): boolean { return MCP_NAME_RE.test(name); }
+
 export interface McpTarget { command?: string; url?: string; args?: string[] }
 
 function sameTarget(a: McpTarget, b: McpTarget): boolean {
@@ -24,6 +29,7 @@ export function chooseMcpName(
   const where = existing.url ?? [existing.command, ...(existing.args ?? [])].filter(Boolean).join(' ');
   return {
     refuse: `an MCP server named "${name}" is already registered and points somewhere else (${where || 'unknown target'}); ` +
-      `registering would repoint it. Re-run with --mcp-name <name> to register under a different name.`,
+      `registering would repoint it. Re-run with --mcp-name <name> to register under a different name, ` +
+      `or, if that entry is stale, remove it with \`claude mcp remove -s user ${name}\` and re-run.`,
   };
 }

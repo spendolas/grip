@@ -97,4 +97,59 @@ const fresh = () => ({ home: mkdtempSync(join(tmpdir(), 'grip-reg-home-')), gh: 
   assert.match(calls, /mcp add -s user grip-x /);
   assert.ok(!/ grip\n|user grip /.test(calls), 'never touched the default name');
 }
+{ // --mcp-name: value required, validated, trimmed; refusals exit before any file is written
+  const { validMcpName, chooseMcpName } = await import('../dist/mcp-name.js');
+  for (const ok of ['grip', 'grip-alt', 'a', 'A.b_c-1', 'x'.repeat(64)]) assert.ok(validMcpName(ok), ok);
+  for (const bad of ['', ' ', '-x', '.x', '_x', 'a b', 'a/b', 'a"b', "a'b", 'a$b', 'x'.repeat(65), 'a\nb']) assert.ok(!validMcpName(bad), JSON.stringify(bad));
+  // (d) the refusal names the stale-entry remedy
+  const ref = chooseMcpName('grip', undefined, { url: 'http://127.0.0.1:9/mcp' }, { command: '/n', args: ['/a'] }).refuse;
+  assert.match(ref, /claude mcp remove -s user grip/);
+  assert.match(ref, /re-run/i);
+
+  const noClaude = (flags, home, gh) => spawnSync(process.execPath, [INSTALLER, ...flags], {
+    env: { ...process.env, HOME: home, USERPROFILE: home, GRIP_HOME: gh, GRIP_STATUS_PATH: join(gh, 'nostatus.json'), PATH: '/nonexistent' },
+    encoding: 'utf8',
+  });
+  const nothingWritten = (home, gh, what) => {
+    assert.ok(!existsSync(join(gh, 'grip-bridge.mjs')), `${what}: no bridge written`);
+    assert.ok(!existsSync(join(gh, 'figma-plugin')), `${what}: no plugin written`);
+  };
+  // (a) a missing, empty or flag-looking value is an error, not ignored
+  for (const flags of [['--mcp-name'], ['--mcp-name', ''], ['--mcp-name', '--http'], ['--mcp-name', '-x'], ['--mcp-name='], ['--no-register', '--mcp-name']]) {
+    const { home, gh } = fresh();
+    const r = noClaude(flags, home, gh);
+    assert.notStrictEqual(r.status, 0, JSON.stringify(flags));
+    assert.match(r.stderr, /--mcp-name needs a value/, JSON.stringify(flags));
+    nothingWritten(home, gh, JSON.stringify(flags));
+    assert.ok(!existsSync(join(home, '.claude.json')), 'no agent config');
+  }
+  // (b) an invalid name is refused right after parsing
+  for (const bad of ['bad name', 'a/b', '.x', 'a"b']) {
+    const { home, gh } = fresh();
+    const r = noClaude(['--mcp-name', bad], home, gh);
+    assert.notStrictEqual(r.status, 0, bad);
+    assert.match(r.stderr, /--mcp-name/, bad);
+    nothingWritten(home, gh, bad);
+  }
+  { // (b) the value is trimmed and the trimmed name is what the guard looks up and registers
+    let { home, gh } = fresh();
+    let r = noClaude(['--mcp-name', '  grip-t  '], home, gh);
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert.deepStrictEqual(Object.keys(JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8')).mcpServers), ['grip-t']);
+    ({ home, gh } = fresh());
+    writeFileSync(join(home, '.claude.json'), JSON.stringify({ mcpServers: { 'grip-t': { type: 'http', url: 'http://127.0.0.1:1/mcp' } } }));
+    r = noClaude(['--mcp-name= grip-t '], home, gh);
+    assert.notStrictEqual(r.status, 0, 'a padded name still hits the guard for the trimmed name');
+    assert.strictEqual(JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8')).mcpServers['grip-t'].url, 'http://127.0.0.1:1/mcp');
+  }
+  { // (c)+(d) a refusal exits before installBridge/installPlugin write anything
+    const { home, gh } = fresh();
+    writeFileSync(join(home, '.claude.json'), JSON.stringify({ mcpServers: { grip: { type: 'http', url: 'http://127.0.0.1:1/mcp' } } }));
+    const r = noClaude([], home, gh);
+    assert.notStrictEqual(r.status, 0);
+    assert.match(r.stderr, /claude mcp remove -s user grip/);
+    nothingWritten(home, gh, 'refusal');
+    assert.ok(!existsSync(join(gh, 'pairing.json')), 'refusal: no pairing set up');
+  }
+}
 console.log('install-register.mjs OK');
