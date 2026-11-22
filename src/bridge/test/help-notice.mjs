@@ -13,7 +13,8 @@ import { BRIDGE_VERSION } from '../dist/types.js';
 import { createSession } from '../dist/mcp-server.js';
 
 const tmp = (p) => mkdtempSync(join(tmpdir(), p));
-const ID = '1234567890';
+import { FLAVOUR } from '../dist/flavour.gen.js';
+const ID = FLAVOUR.pluginId;   // the updater pins the plugin id to the flavour
 const manifest = (o = {}) => JSON.stringify({ name: 'Grip', id: ID, main: 'code.js', ui: 'ui.html', ...o });
 function mkPlugin(dir, ver, o = {}) {
   mkdirSync(dir, { recursive: true });

@@ -600,8 +600,10 @@ function readJson(path: string): any { try { return JSON.parse(readFileSync(path
 function scanPluginCopies(settingsPath: string | null, home: string): PluginCopies {
   const none: PluginCopies = { known: false, copies: [] };
   const installed = installedPluginVersion();
-  const myId = readJson(join(home, 'manifest.json'))?.id;
-  if (!settingsPath || !installed || typeof myId !== 'string') return none;
+  // The id is the flavour's own, never read from disk: an edited ~/.grip manifest must not
+  // be able to aim the updater at another plugin's folder.
+  const myId = FLAVOUR.pluginId;
+  if (!settingsPath || !installed || typeof myId !== 'string' || !myId) return none;
   const settings = readJson(settingsPath);
   if (!settings || !Array.isArray(settings.localFileExtensions)) return none;   // only this one list is ever read
   let homeReal = home;
@@ -1217,7 +1219,12 @@ export async function installUpdate(o: InstallOptions): Promise<InstallResult> {
     const bridgeBuf = await downloadVerified(rel, ASSET_BRIDGE, sums);
     const pluginBufs: Array<[string, Buffer]> = [];
     for (const [assetName, localName] of Object.entries(PLUGIN_ASSETS)) {
-      pluginBufs.push([localName, await downloadVerified(rel, assetName, sums)]);
+      const buf = await downloadVerified(rel, assetName, sums);
+      if (localName === 'manifest.json') {
+        let id: unknown; try { id = JSON.parse(buf.toString('utf8'))?.id; } catch { id = undefined; }
+        if (id !== FLAVOUR.pluginId) throw new UpdateError(`release ${rel.version} has a plugin manifest with a different plugin id; not installing it`, 'install_failed');
+      }
+      pluginBufs.push([localName, buf]);
     }
 
     // 2. the new bridge must run (and say its own version) before anything is replaced

@@ -28,11 +28,19 @@ import { INSTALL_WINDOW_MS, prepareInstall } from './pairing.js';
 import { BRIDGE_VERSION } from './types.js';
 import { FLAVOUR } from './flavour.gen.js';
 import { liveIdentity } from './identity.js';
+import { chooseMcpName, type McpTarget } from './mcp-name.js';
 
 const args = new Set(process.argv.slice(2));
 const wantHttp = args.has('--http');
 const noRegister = args.has('--no-register');
 const printConfig = args.has('--print-config');
+const mcpNameFlag = (() => {
+  const argv = process.argv.slice(2);
+  const i = argv.indexOf('--mcp-name');
+  if (i >= 0) return argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : undefined;
+  const eq = argv.find((a) => a.startsWith('--mcp-name='));
+  return eq ? eq.slice('--mcp-name='.length) || undefined : undefined;
+})();
 const HOME = homedir();
 // Platform seam so the test suite can exercise win32/linux branches anywhere.
 const PLAT = process.env.GRIP_FAKE_PLATFORM ?? platform();
@@ -143,13 +151,34 @@ function hasClaudeCli(): boolean {
   catch { return false; }
 }
 
-function registerViaCli(): boolean {
-  try { execFileSync('claude', ['mcp', 'remove', '-s', 'user', 'grip'], { stdio: 'ignore' }); }
+// The entry this install would write, and whether an existing one is already this install's
+// (either transport: switching --http on or off must not be refused).
+function oursTarget(): McpTarget { return wantHttp ? { url: HTTP_URL } : { command: process.execPath, args: [ENTRY] }; }
+function isOurs(e: McpTarget): boolean { return e.url === HTTP_URL || (Array.isArray(e.args) && e.args.includes(ENTRY)); }
+
+function userConfigPath() { return join(HOME, '.claude.json'); }
+function readUserConfig(): Record<string, any> | null {
+  try { return JSON.parse(readFileSync(userConfigPath(), 'utf8')); } catch { return null; }
+}
+
+// Decide the registration name once, from the user config (the file the CLI writes), or exit.
+function resolveMcpName(): string {
+  const raw = readUserConfig()?.mcpServers?.[mcpNameFlag ?? FLAVOUR.mcpName];
+  const existing: McpTarget | undefined = raw && typeof raw === 'object'
+    ? { command: raw.command, url: raw.url, args: Array.isArray(raw.args) ? raw.args : undefined } : undefined;
+  const ours = oursTarget();
+  const r = chooseMcpName(FLAVOUR.mcpName, mcpNameFlag, existing, existing && isOurs(existing) ? existing : ours);
+  if ('refuse' in r) die(r.refuse);
+  return r.name;
+}
+
+function registerViaCli(name: string): boolean {
+  try { execFileSync('claude', ['mcp', 'remove', '-s', 'user', name], { stdio: 'ignore' }); }
   catch { /* wasn't registered — fine */ }
   try {
     const add = wantHttp
-      ? ['mcp', 'add', '--transport', 'http', '-s', 'user', 'grip', HTTP_URL]
-      : ['mcp', 'add', '-s', 'user', 'grip', process.execPath, ENTRY];
+      ? ['mcp', 'add', '--transport', 'http', '-s', 'user', name, HTTP_URL]
+      : ['mcp', 'add', '-s', 'user', name, process.execPath, ENTRY];
     execFileSync('claude', add, { stdio: 'ignore' });
     return true;
   } catch { return false; }
@@ -157,19 +186,19 @@ function registerViaCli(): boolean {
 
 // Fallback: write ~/.claude.json directly (the file the CLI actually uses —
 // NOT ~/.claude/mcp.json, which Claude Code does not read).
-function registerViaJson() {
-  const cfgPath = join(HOME, '.claude.json');
+function registerViaJson(name: string) {
+  const cfgPath = userConfigPath();
   let cfg: Record<string, any> = {};
   if (existsSync(cfgPath)) {
     try { cfg = JSON.parse(readFileSync(cfgPath, 'utf8')); }
     catch { die(`~/.claude.json exists but isn't valid JSON — fix or remove it, then re-run.`); }
   }
   cfg.mcpServers ??= {};
-  cfg.mcpServers.grip = wantHttp
+  cfg.mcpServers[name] = wantHttp
     ? { type: 'http', url: HTTP_URL }
     : { command: process.execPath, args: [ENTRY] };
   writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
-  ok(`wrote grip server to ${cfgPath}`);
+  ok(`wrote ${name} server to ${cfgPath}`);
 }
 
 // What ANY MCP client needs to reach Grip, plus examples for common clients.
@@ -199,10 +228,11 @@ function registerMcp() {
     return;
   }
   step(2, `Registering with your agent (${wantHttp ? 'http' : 'stdio'})`);
-  if (hasClaudeCli() && registerViaCli()) ok(`registered via 'claude mcp add'`);
+  const name = resolveMcpName();
+  if (hasClaudeCli() && registerViaCli(name)) ok(`registered via 'claude mcp add'`);
   else {
     warn('claude CLI not found (or add failed) — writing config directly');
-    registerViaJson();
+    registerViaJson(name);
   }
 }
 

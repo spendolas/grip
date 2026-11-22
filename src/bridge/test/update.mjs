@@ -17,6 +17,7 @@ import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import { BRIDGE_VERSION, MIN_PLUGIN_VERSION } from '../dist/types.js';
 import * as U from '../dist/update.js';
+import { FLAVOUR } from '../dist/flavour.gen.js';
 import { createSession } from '../dist/mcp-server.js';
 import { PluginBridge, originAllowedForUpdate } from '../dist/ws-server.js';
 import { TOOLS } from '../dist/tools.js';
@@ -63,7 +64,7 @@ function freshRelease(over = {}) {
   const files = {
     'code.js': Buffer.from('// plugin code\n'),
     'ui.html': Buffer.from('<html>ui</html>\n'),
-    'manifest.json': Buffer.from('{"name":"Grip"}\n'),
+    'manifest.json': Buffer.from(JSON.stringify({ name: 'Grip', id: FLAVOUR.pluginId }) + '\n'),
   };
   release = {
     version: NEWER,
@@ -465,7 +466,7 @@ assert.strictEqual(U.releaseNotes('short'), 'short');
   env(home);
   const mk = (dir, ver, extra = {}) => {
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ id: '777', main: 'code.js', ui: 'ui.html', ...extra }));
+    writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ id: FLAVOUR.pluginId, main: 'code.js', ui: 'ui.html', ...extra }));
     writeFileSync(join(dir, 'code.js'), `const PLUGIN_VERSION = '${ver}';`);
     writeFileSync(join(dir, 'ui.html'), 'OLD UI');
   };
@@ -481,7 +482,7 @@ assert.strictEqual(U.releaseNotes('short'), 'short');
   freshRelease({ files: {
     'code.js': Buffer.from(`const PLUGIN_VERSION = '${NEWER}';`),
     'ui.html': Buffer.from('NEW UI'),
-    'manifest.json': Buffer.from(JSON.stringify({ id: '777', main: 'code.js', ui: 'ui.html' })),
+    'manifest.json': Buffer.from(JSON.stringify({ id: FLAVOUR.pluginId, main: 'code.js', ui: 'ui.html' })),
   } });
   writeFileSync(join(home, 'grip-bridge.mjs'), 'OLD BRIDGE');
   const r = await inst();
@@ -494,6 +495,37 @@ assert.strictEqual(U.releaseNotes('short'), 'short');
   assert.ok(!snapshotDir(picked).includes('.tmp-'), 'no temp files left in the imported folder');
   const mk2 = JSON.parse(readFileSync(join(home, 'update-done.json'), 'utf8'));
   assert.deepStrictEqual([mk2.version, mk2.from, mk2.refreshed], [NEWER, BRIDGE_VERSION, 1], 'the update leaves a marker for the restarted bridge');
+  delete process.env.GRIP_FIGMA_SETTINGS;
+}
+
+// ---------------------------------------------------------------- 2b2. the plugin id is pinned to the flavour
+{
+  const home = tmp('grip-upd-home-');
+  env(home);
+  const root = tmp('grip-pin-');
+  const other = join(root, 'other'); mkdirSync(other, { recursive: true });
+  writeFileSync(join(other, 'manifest.json'), JSON.stringify({ id: '999', main: 'code.js', ui: 'ui.html' }));
+  writeFileSync(join(other, 'code.js'), "const PLUGIN_VERSION = '0.8.0';");
+  writeFileSync(join(other, 'ui.html'), 'OTHER UI');
+  const settings = join(root, 'settings.json');
+  writeFileSync(settings, JSON.stringify({ localFileExtensions: [{ id: 1, manifestPath: join(other, 'manifest.json'), fileMetadata: { type: 'manifest' } }] }));
+  process.env.GRIP_FIGMA_SETTINGS = settings;
+  // an installed manifest edited to the other plugin's id must not redirect the updater
+  mkdirSync(join(home, 'figma-plugin'), { recursive: true });
+  writeFileSync(join(home, 'figma-plugin', 'manifest.json'), JSON.stringify({ id: '999', main: 'code.js', ui: 'ui.html' }));
+  writeFileSync(join(home, 'figma-plugin', 'code.js'), `const PLUGIN_VERSION = '${NEWER}';`);
+  writeFileSync(join(home, 'figma-plugin', 'ui.html'), 'NEW UI');
+  assert.deepStrictEqual(U.findPluginCopies(true).copies, [], 'a folder with another plugin id is not a copy');
+  assert.deepStrictEqual(U.syncPluginCopies().updated, [], 'nothing written');
+  assert.strictEqual(readFileSync(join(other, 'ui.html'), 'utf8'), 'OTHER UI');
+  // a downloaded manifest with another id is rejected before anything is written
+  freshRelease({ files: {
+    'code.js': Buffer.from('// plugin code\n'), 'ui.html': Buffer.from('<html>ui</html>\n'),
+    'manifest.json': Buffer.from(JSON.stringify({ id: '999' })),
+  } });
+  writeFileSync(join(home, 'grip-bridge.mjs'), 'OLD BRIDGE');
+  await assert.rejects(inst(), /different plugin id/);
+  assert.strictEqual(readFileSync(join(home, 'grip-bridge.mjs'), 'utf8'), 'OLD BRIDGE', 'nothing changed');
   delete process.env.GRIP_FIGMA_SETTINGS;
 }
 
