@@ -209,7 +209,7 @@ Before you begin, read these rules. They apply to every step below.
 ## What's in here
 
 ```
-figma-plugin/     the plugin: manifest.json and ui.html are hand-written; code.js is build output (not in git). The installer copies it to ~/.grip/figma-plugin
+figma-plugin/     the plugin: manifest.json, ui.html and code.js are build output (not in git; the first two are rendered from src/plugin/templates/). The installer copies it to ~/.grip/figma-plugin
 bridge/           local build output only (not in git): the bridge + installer, single self-contained files. Release downloads contain them
 scripts/          release packaging, the release gate, bundle hygiene and license notices (used by CI)
 src/              source for both halves (ignore unless you're changing Grip)
@@ -280,7 +280,7 @@ node bridge/install.mjs        # try that build: install it into ~/.grip (a "dev
 npm test                       # builds first, then the bridge suites and the release gate, packager, hygiene and notices tests
 ```
 
-**Nothing generated is committed.** The release bundles are built only by CI, from source, and published as release assets; `bridge/` and `figma-plugin/code.js` are gitignored build output that `npm run build` writes locally. Only the hand-written `figma-plugin/manifest.json` and `figma-plugin/ui.html` are in git. A clone must be built before you import the plugin from `figma-plugin/` or run `node bridge/install.mjs` (the installer warns, and does not copy the plugin, if `code.js` is missing). Use `npm run setup` (`npm ci`), never a bare `npm install`, so your dependencies are exactly the lockfile's, as in CI.
+**Nothing generated is committed.** The release bundles are built only by CI, from source, and published as release assets; `bridge/`, `figma-plugin/code.js`, `figma-plugin/manifest.json` and `figma-plugin/ui.html` are gitignored build output that `npm run build` writes locally (the manifest and page are rendered from `src/plugin/templates/` by `scripts/gen-flavour.mjs`). A clone must be built before you import the plugin from `figma-plugin/` or run `node bridge/install.mjs` (the installer warns, and does not copy the plugin, if `code.js` is missing). Use `npm run setup` (`npm ci`), never a bare `npm install`, so your dependencies are exactly the lockfile's, as in CI.
 
 A clone install is recorded in `~/.grip/install.json` (`{"source":"clone"}`), which is why the in-place updater leaves it alone: update with `git pull && npm run build && node bridge/install.mjs`.
 

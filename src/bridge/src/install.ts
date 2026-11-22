@@ -168,7 +168,11 @@ function hasClaudeCli(): boolean {
 function oursTarget(): McpTarget { return wantHttp ? { url: HTTP_URL } : { command: process.execPath, args: [ENTRY] }; }
 function isOurs(e: McpTarget): boolean { return e.url === HTTP_URL || (Array.isArray(e.args) && e.args.includes(ENTRY)); }
 
-function userConfigPath() { return join(HOME, '.claude.json'); }
+// The file the Claude CLI uses: $CLAUDE_CONFIG_DIR/.claude.json when that is set, else ~/.claude.json.
+function userConfigPath() {
+  const dir = process.env.CLAUDE_CONFIG_DIR;
+  return dir ? join(dir, '.claude.json') : join(HOME, '.claude.json');
+}
 function readUserConfig(): Record<string, any> | null {
   try { return JSON.parse(readFileSync(userConfigPath(), 'utf8')); } catch { return null; }
 }
@@ -203,7 +207,7 @@ function registerViaJson(name: string) {
   let cfg: Record<string, any> = {};
   if (existsSync(cfgPath)) {
     try { cfg = JSON.parse(readFileSync(cfgPath, 'utf8')); }
-    catch { die(`~/.claude.json exists but isn't valid JSON — fix or remove it, then re-run.`); }
+    catch { die(`${cfgPath} exists but isn't valid JSON — fix or remove it, then re-run.`); }
   }
   cfg.mcpServers ??= {};
   cfg.mcpServers[name] = wantHttp

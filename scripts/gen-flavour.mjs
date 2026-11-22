@@ -14,7 +14,7 @@
 //                                [--out-plugin-dir <dir>]
 //
 // Default dir: env GRIP_FLAVOUR_DIR, else <repo>/flavour. No dependencies.
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -138,9 +138,13 @@ function main(argv) {
     mkdirSync(dirname(o), { recursive: true });
     writeFileSync(o, text);
   }
+  for (const [o] of outputs) {
+    if (!existsSync(o)) throw new Error(`gen-flavour: expected output missing after generation: ${o}`);
+  }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+const real = (p) => { try { return realpathSync(p); } catch { return resolve(p); } };
+if (process.argv[1] && real(process.argv[1]) === real(fileURLToPath(import.meta.url))) {
   try {
     main(process.argv.slice(2));
   } catch (e) {

@@ -152,4 +152,22 @@ const fresh = () => ({ home: mkdtempSync(join(tmpdir(), 'grip-reg-home-')), gh: 
     assert.ok(!existsSync(join(gh, 'pairing.json')), 'refusal: no pairing set up');
   }
 }
+{ // CLAUDE_CONFIG_DIR: the guard and the JSON writer use $CLAUDE_CONFIG_DIR/.claude.json
+  const cfgEnv = (home, gh, cdir) => ({ ...process.env, HOME: home, USERPROFILE: home, GRIP_HOME: gh, GRIP_STATUS_PATH: join(gh, 'nostatus.json'), PATH: '/nonexistent', CLAUDE_CONFIG_DIR: cdir });
+  const go = (home, gh, cdir) => spawnSync(process.execPath, [INSTALLER], { env: cfgEnv(home, gh, cdir), encoding: 'utf8' });
+  { // writer
+    const { home, gh } = fresh(); const cdir = mkdtempSync(join(tmpdir(), 'grip-reg-cfg-'));
+    const r = go(home, gh, cdir);
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert.ok(JSON.parse(readFileSync(join(cdir, '.claude.json'), 'utf8')).mcpServers.grip, 'registered in CLAUDE_CONFIG_DIR');
+    assert.ok(!existsSync(join(home, '.claude.json')), 'home config untouched');
+  }
+  { // guard reads the config dir's file
+    const { home, gh } = fresh(); const cdir = mkdtempSync(join(tmpdir(), 'grip-reg-cfg-'));
+    writeFileSync(join(cdir, '.claude.json'), JSON.stringify({ mcpServers: { grip: { type: 'http', url: 'http://127.0.0.1:1/mcp' } } }));
+    const r = go(home, gh, cdir);
+    assert.notStrictEqual(r.status, 0, 'foreign grip entry in CLAUDE_CONFIG_DIR is refused');
+    assert.match(r.stderr, /claude mcp remove -s user grip/);
+  }
+}
 console.log('install-register.mjs OK');

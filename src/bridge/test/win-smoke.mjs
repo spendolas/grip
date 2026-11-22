@@ -67,7 +67,11 @@ console.log('\n1. Static: bundled bridge carries the win32 branches');
 {
   const src = readFileSync(INDEX_JS, 'utf8');
   // Match regardless of backslash-escape depth in the emitted source.
-  check('IPC endpoint uses a named pipe on win32', /\\+\.\\+pipe\\+grip-bridge/.test(src));
+  check('IPC endpoint uses a named pipe prefix on win32', /\\+\.\\+pipe\\+/.test(src));
+  const { makeIdentity } = await import('../dist/identity.js');
+  const { FLAVOUR } = await import('../dist/flavour.gen.js');
+  const id = makeIdentity(FLAVOUR, { env: {}, platform: 'win32', home: 'C:\\Users\\x', tmp: 'C:\\tmp' });
+  check('win32 IPC path is the public named pipe', id.ipcPath === '\\\\.\\pipe\\grip-bridge', id.ipcPath);
   check('detached spawn sets windowsHide', /windowsHide:\s*true/.test(src));
   check('socket-vanished self-heal guarded off win32', /if\s*\(!IS_WIN\)\s*setInterval/.test(src));
 }
