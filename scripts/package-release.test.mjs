@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { inflateRawSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
-import { packageRelease, buildZip, crc32, checkLockstep, readLockstepVersions, readMinPluginVersion, readProtocolConstants, buildCompat, PackageError } from './package-release.mjs';
+import { packageRelease, buildZip, crc32, checkLockstep, readLockstepVersions, readMinPluginVersion, readProtocolConstants, readPluginProtocolConstants, buildCompat, PackageError } from './package-release.mjs';
 import { REQUIRED_ASSETS, INSTALL_MARKER } from './release-gate.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -152,6 +152,26 @@ test('compat.json: the flavour claim and the protocol integers are derived, and 
   assert.equal(JSON.parse(buildCompat(r, '1.2.3')).flavour, 'acme');
   rmSync(join(r, 'flavour'), { recursive: true });
   assert.throws(() => buildCompat(r, '1.2.3'), (e) => e instanceof PackageError && /flavour/.test(e.message));
+});
+
+test('the protocol integers on both sides must fit each other', () => {
+  assert.deepEqual(readPluginProtocolConstants(ROOT), { protocol: 1, minBridgeProtocol: 1 });
+  const r = scratchRoot();
+  const types = join(r, 'src', 'bridge', 'src', 'types.ts');
+  const code = join(r, 'src', 'plugin', 'code.ts');
+  const t0 = readFileSync(types, 'utf8'), c0 = readFileSync(code, 'utf8');
+  // the plugin this release ships speaks a protocol below what the bridge demands of plugins
+  writeFileSync(types, t0.replace(/PROTOCOL_VERSION = \d+;/, 'PROTOCOL_VERSION = 2;').replace(/MIN_PLUGIN_PROTOCOL = \d+;/, 'MIN_PLUGIN_PROTOCOL = 2;'));
+  assert.throws(() => buildCompat(r, '1.2.3'), (e) => e instanceof PackageError && /plugin PROTOCOL_VERSION 1/.test(e.message) && /MIN_PLUGIN_PROTOCOL 2/.test(e.message));
+  writeFileSync(types, t0);
+  // the bridge this release ships speaks a protocol below what the plugin demands of bridges
+  writeFileSync(code, c0.replace(/const PROTOCOL_VERSION = \d+;/, 'const PROTOCOL_VERSION = 2;').replace(/const MIN_BRIDGE_PROTOCOL = \d+;/, 'const MIN_BRIDGE_PROTOCOL = 2;'));
+  assert.throws(() => buildCompat(r, '1.2.3'), (e) => e instanceof PackageError && /bridge PROTOCOL_VERSION 1/.test(e.message) && /MIN_BRIDGE_PROTOCOL 2/.test(e.message));
+  // a plugin constant that cannot be found
+  writeFileSync(code, c0.replace(/const MIN_BRIDGE_PROTOCOL = \d+;/, ''));
+  assert.throws(() => buildCompat(r, '1.2.3'), (e) => e instanceof PackageError && /MIN_BRIDGE_PROTOCOL in src\/plugin\/code\.ts/.test(e.message));
+  writeFileSync(code, c0);
+  assert.equal(JSON.parse(buildCompat(r, '1.2.3')).protocol, 1);
 });
 
 test('grip-install.zip has the install layout, contents and modes', () => {

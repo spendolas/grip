@@ -87,6 +87,27 @@ export function readProtocolConstants(root) {
   return { protocol, minPluginProtocol };
 }
 
+// The plugin's PROTOCOL_VERSION / MIN_BRIDGE_PROTOCOL from src/plugin/code.ts.
+export function readPluginProtocolConstants(root) {
+  const text = readFileSync(join(root, 'src', 'plugin', 'code.ts'), 'utf8');
+  const protocol = Number(matchOrThrow(text, /^const PROTOCOL_VERSION = (\d+);/m, 'PROTOCOL_VERSION in src/plugin/code.ts'));
+  const minBridgeProtocol = Number(matchOrThrow(text, /^const MIN_BRIDGE_PROTOCOL = (\d+);/m, 'MIN_BRIDGE_PROTOCOL in src/plugin/code.ts'));
+  return { protocol, minBridgeProtocol };
+}
+
+// The bridge and the plugin of one release must accept each other by protocol: the
+// plugin it ships must meet the bridge's MIN_PLUGIN_PROTOCOL, and the bridge must meet
+// the plugin's MIN_BRIDGE_PROTOCOL.
+function checkProtocolPair(root, bridge) {
+  const plugin = readPluginProtocolConstants(root);
+  if (plugin.protocol < bridge.minPluginProtocol) {
+    throw new PackageError(`plugin PROTOCOL_VERSION ${plugin.protocol} (src/plugin/code.ts) is below MIN_PLUGIN_PROTOCOL ${bridge.minPluginProtocol} (src/bridge/src/types.ts)`);
+  }
+  if (bridge.protocol < plugin.minBridgeProtocol) {
+    throw new PackageError(`bridge PROTOCOL_VERSION ${bridge.protocol} (src/bridge/src/types.ts) is below MIN_BRIDGE_PROTOCOL ${plugin.minBridgeProtocol} (src/plugin/code.ts)`);
+  }
+}
+
 // The flavour this release is built for (flavour/flavour.json slug). It goes into
 // compat.json, which SHA256SUMS.txt lists and the release key signs: a bridge of
 // another flavour refuses the release.
@@ -112,6 +133,7 @@ export function buildCompat(root, version) {
   }
   const flavour = readFlavourSlug(root);
   const { protocol, minPluginProtocol } = readProtocolConstants(root);
+  checkProtocolPair(root, { protocol, minPluginProtocol });
   return Buffer.from(JSON.stringify({ version, minPlugin, flavour, protocol, minPluginProtocol }, null, 2) + '\n');
 }
 

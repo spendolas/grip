@@ -5064,14 +5064,17 @@ const PLUGIN_VERSION = '0.9.6';
 // version knows IT is the stale side, logs it, shows it in grip_health and counts
 // it as "update recommended". Bridge-side counterpart: MIN_PLUGIN_VERSION in
 // src/bridge/src/types.ts. Raise only when this plugin needs bridge features
-// older bridges lack.
+// older bridges lack. A bridge whose welcome carries `protocol` is judged by
+// MIN_BRIDGE_PROTOCOL below INSTEAD of this line, so a bump that must reach those
+// bridges has to raise MIN_BRIDGE_PROTOCOL too.
 const MIN_BRIDGE_VERSION = '0.8.0';
 
 // The wire protocol integer this plugin speaks, and the oldest bridge protocol it
 // works with. Both go in `hello`; the bridge's own PROTOCOL_VERSION arrives in its
 // welcome (bridge counterparts: PROTOCOL_VERSION / MIN_PLUGIN_PROTOCOL in
-// src/bridge/src/types.ts). A bridge whose welcome has no protocol is judged by
-// MIN_BRIDGE_VERSION alone. Raise only when the bridge <-> plugin contract changes.
+// src/bridge/src/types.ts). When both sides say an integer it alone decides; a
+// bridge whose welcome has no protocol is judged by MIN_BRIDGE_VERSION alone.
+// Raise only when the bridge <-> plugin contract changes.
 const PROTOCOL_VERSION = 1;
 const MIN_BRIDGE_PROTOCOL = 1;
 

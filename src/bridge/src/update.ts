@@ -563,24 +563,35 @@ export function updateSignal(state: UpdateState | null | undefined, plugins: Plu
   return v.kind === 'ok' ? { signal: true, ...(v.stale ? { staleWindows: v.stale } : {}) } : { signal: false, blockedReason: v.reason };
 }
 
-// A plugin needs a NEWER bridge than this one: by version (hello.minBridge) or by
-// protocol (hello.minBridgeProtocol above this bridge's PROTOCOL_VERSION).
+// Why ONE plugin window needs a NEWER bridge than this one (null = it does not).
+// The mirror of pluginIncompatibility: when the plugin names a minimum bridge
+// protocol (hello.minBridgeProtocol), that integer alone decides (this bridge
+// always has PROTOCOL_VERSION), so a flavour bridge numbered below the shared
+// MIN_BRIDGE_VERSION is not flagged. A plugin that predates the integer keeps the
+// version rule (hello.minBridge). The single rule behind needsNewerBridge,
+// bridgeStaleReason and the hello warning in ws-server.ts.
+export function bridgeStaleFor(p: Pick<PluginInfo, 'pluginVersion' | 'fileName' | 'minBridge' | 'minBridgeProtocol'>): string | null {
+  const where = p.fileName ? ` in "${p.fileName}"` : '';
+  if (typeof p.minBridgeProtocol === 'number') {
+    if (p.minBridgeProtocol <= PROTOCOL_VERSION) return null;
+    return `plugin ${p.pluginVersion ?? '?'}${where} needs a Grip bridge with protocol >= ${p.minBridgeProtocol} but this bridge speaks protocol ${PROTOCOL_VERSION}: update the bridge`;
+  }
+  if (p.minBridge && isSemver(p.minBridge) && compareSemver(p.minBridge, BRIDGE_VERSION) > 0) {
+    return `plugin ${p.pluginVersion ?? '?'}${where} needs Grip bridge >= ${p.minBridge} but this bridge is ${BRIDGE_VERSION}: update the bridge`;
+  }
+  return null;
+}
+
 function needsNewerBridge(p: PluginInfo): boolean {
-  return (!!p.minBridge && isSemver(p.minBridge) && compareSemver(p.minBridge, BRIDGE_VERSION) > 0)
-    || (typeof p.minBridgeProtocol === 'number' && p.minBridgeProtocol > PROTOCOL_VERSION);
+  return bridgeStaleFor(p) !== null;
 }
 
 // The reverse direction (informational): a connected plugin that needs a NEWER
 // bridge than this one. Then the bridge is the stale side, an update is recommended.
 export function bridgeStaleReason(plugins: PluginInfo[] | null | undefined): string | undefined {
   for (const p of connectedPlugins(plugins)) {
-    const where = p.fileName ? ` in "${p.fileName}"` : '';
-    if (p.minBridge && isSemver(p.minBridge) && compareSemver(p.minBridge, BRIDGE_VERSION) > 0) {
-      return `plugin ${p.pluginVersion ?? '?'}${where} needs Grip bridge >= ${p.minBridge} but this bridge is ${BRIDGE_VERSION}: update the bridge`;
-    }
-    if (typeof p.minBridgeProtocol === 'number' && p.minBridgeProtocol > PROTOCOL_VERSION) {
-      return `plugin ${p.pluginVersion ?? '?'}${where} needs a Grip bridge with protocol >= ${p.minBridgeProtocol} but this bridge speaks protocol ${PROTOCOL_VERSION}: update the bridge`;
-    }
+    const why = bridgeStaleFor(p);
+    if (why) return why;
   }
   return undefined;
 }

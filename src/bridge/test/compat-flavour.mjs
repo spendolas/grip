@@ -177,6 +177,18 @@ assert.equal(MIN_PLUGIN_PROTOCOL, 1);
 assert.equal(G.bridgeStaleReason([{ pluginVersion: '0.9.6', minBridge: '0.8.0', minBridgeProtocol: 1, wsReady: true, hello: true }]), undefined);
 assert.match(G.bridgeStaleReason([{ pluginVersion: '9.0.0', fileName: 'F', minBridge: '0.8.0', minBridgeProtocol: PROTOCOL_VERSION + 1, wsReady: true, hello: true }]) ?? '',
   new RegExp(`protocol.*${PROTOCOL_VERSION + 1}`));
+// symmetric with pluginIncompatibility: when the plugin names a bridge protocol, the
+// protocol alone decides (the bridge always has one), even where the version rule says stale
+assert.equal(G.bridgeStaleReason([{ pluginVersion: '9.0.0', minBridge: '99.0.0', minBridgeProtocol: PROTOCOL_VERSION, wsReady: true, hello: true }]), undefined,
+  'protocol met: not stale, whatever minBridge says');
+assert.equal(G.bridgeStaleFor({ pluginVersion: '9.0.0', minBridge: '99.0.0', minBridgeProtocol: PROTOCOL_VERSION }), null);
+assert.match(G.bridgeStaleFor({ pluginVersion: '9.0.0', minBridge: '0.0.1', minBridgeProtocol: PROTOCOL_VERSION + 1 }) ?? '', /protocol/,
+  'protocol not met: stale, even where the version rule is met');
+// no minBridgeProtocol (an older plugin): the version rule, as before
+assert.match(G.bridgeStaleReason([{ pluginVersion: '0.9.6', fileName: 'F', minBridge: '99.0.0', wsReady: true, hello: true }]) ?? '', /needs Grip bridge >= 99\.0\.0/);
+assert.equal(G.bridgeStaleReason([{ pluginVersion: '0.9.6', minBridge: '0.8.0', wsReady: true, hello: true }]), undefined);
+assert.equal(G.bridgeStaleFor({ pluginVersion: '0.9.6', minBridge: '99.0.0', minBridgeProtocol: null }) !== null, true);
+assert.equal(G.bridgeStaleFor({ pluginVersion: '0.9.6' }), null, 'nothing asked: never stale');
 
 // ---------------------------------------------------------------- the CLI's view (status file) carries the integers
 {

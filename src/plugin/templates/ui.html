@@ -229,9 +229,10 @@
       const UPDATER_SINCE = '0.8.0';
       function bridgeOutdated() {
         if (current !== 'connected' || updLatest || updClone || updPhase === 'updating') return false;
-        if (!!bridgeVersion && !!minBridge && olderThan(bridgeVersion, minBridge)) return true;
-        // the protocol integer, only when both sides say one
-        return typeof bridgeProtocol === 'number' && typeof minBridgeProtocol === 'number' && bridgeProtocol < minBridgeProtocol;
+        // when both sides say a protocol integer, it alone decides (as on the bridge);
+        // otherwise the version rule
+        if (typeof bridgeProtocol === 'number' && typeof minBridgeProtocol === 'number') return bridgeProtocol < minBridgeProtocol;
+        return !!bridgeVersion && !!minBridge && olderThan(bridgeVersion, minBridge);
       }
       function bridgeHearsUpdates() {
         return !!bridgeVersion && !olderThan(bridgeVersion, UPDATER_SINCE);

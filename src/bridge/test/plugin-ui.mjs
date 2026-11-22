@@ -398,6 +398,34 @@ const CONNECTED_TITLE = 'Connected';
     hello(h, { minBridgeProtocol: undefined });
     assert.ok(h.has('connected') && !purple(h));
   }
+  // both sides report a protocol: it decides even where the version rule says stale
+  // (a flavour bridge numbered below the shared MIN_BRIDGE_VERSION is not outdated)
+  {
+    const h = harness();
+    const ws = h.ws();
+    ws.openWelcomed();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.1.0', protocol: 1 });
+    hello(h);
+    assert.ok(h.has('connected') && !purple(h), `green by protocol: ${h.classes()}`);
+  }
+  // the plugin names no protocol: the version rule decides again (0.1.0 < minBridge 0.8.0)
+  {
+    const h = harness();
+    const ws = h.ws();
+    ws.openWelcomed();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.1.0', protocol: 1 });
+    hello(h, { minBridgeProtocol: undefined });
+    assert.ok(h.has('update') && h.has('connected'), `purple by version: ${h.classes()}`);
+  }
+  // the bridge names no protocol: the version rule
+  {
+    const h = harness();
+    const ws = h.ws();
+    ws.openWelcomed();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.1.0' });
+    hello(h);
+    assert.ok(h.has('update') && h.has('connected'), `purple by version: ${h.classes()}`);
+  }
 }
 
 // ------------------------------------------------------------ the click always asks a bridge that can hear it; only older bridges get the page

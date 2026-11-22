@@ -15,6 +15,9 @@ export const BRIDGE_VERSION = '0.9.6';
 // 0.6.0: the first plugin with the `hello` contract (version + capabilities + fileKey).
 // Plugins 0.6.x can lack newer methods: the bridge then returns a clear "older build"
 // tool error for just those tools (mcp-server.ts), so everything else keeps working.
+// Plugins that report `protocol` in hello (and releases whose compat.json names
+// minPluginProtocol) are judged by MIN_PLUGIN_PROTOCOL below INSTEAD of this line,
+// so a bump that must reach those users has to raise MIN_PLUGIN_PROTOCOL too.
 export const MIN_PLUGIN_VERSION = '0.6.0';
 
 // The wire protocol, as one integer that only goes up when the bridge <-> plugin
@@ -22,7 +25,10 @@ export const MIN_PLUGIN_VERSION = '0.6.0';
 // say that: a flavour's builds can carry any version number). The bridge sends
 // PROTOCOL_VERSION in its welcome; the plugin sends its own in hello (src/plugin/code.ts
 // PROTOCOL_VERSION / MIN_BRIDGE_PROTOCOL). compat.json carries both integers below
-// (scripts/package-release.mjs reads them from these lines). A plugin whose hello
+// (scripts/package-release.mjs reads them from these lines, and refuses a release
+// whose plugin PROTOCOL_VERSION is below MIN_PLUGIN_PROTOCOL or whose bridge
+// PROTOCOL_VERSION is below the plugin's MIN_BRIDGE_PROTOCOL). When both sides
+// report an integer it alone decides, in both directions; a plugin whose hello
 // has no `protocol`, or a compat.json without `minPluginProtocol`, is judged by the
 // MIN_PLUGIN_VERSION rule instead.
 export const PROTOCOL_VERSION = 1;

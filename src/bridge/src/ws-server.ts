@@ -7,7 +7,7 @@ import type {
   BindingState, FileBind, ListedFileInfo, McpSession, PluginSessionInfo, WSEvent, WSHello, WSResponse,
 } from './types.js';
 import { BRIDGE_VERSION, PROTOCOL_VERSION } from './types.js';
-import { compareSemver, isSemver } from './update.js';
+import { bridgeStaleFor } from './update.js';
 import { authProof, newNonce, type PairingStore } from './pairing.js';
 import { FLAVOUR } from './flavour.gen.js';
 import { isRetrySafe, causesEvents, serializedByPlugin } from './methods.js';
@@ -1913,16 +1913,9 @@ export class PluginBridge extends EventEmitter {
     );
     // The plugin needs a NEWER bridge than this one: the bridge is the stale side.
     // Informational (grip_health shows it; it counts as "update recommended").
-    if (sess.minBridge && isSemver(sess.minBridge) && compareSemver(sess.minBridge, BRIDGE_VERSION) > 0) {
-      process.stderr.write(
-        `[grip] WARNING plugin ${sess.pluginVersion} in "${sess.fileName}" needs bridge >= ${sess.minBridge} but this is ${BRIDGE_VERSION}: the bridge is out of date, update it.\n`,
-      );
-    }
-    if (sess.minBridgeProtocol !== undefined && sess.minBridgeProtocol > PROTOCOL_VERSION) {
-      process.stderr.write(
-        `[grip] WARNING plugin ${sess.pluginVersion} in "${sess.fileName}" needs bridge protocol >= ${sess.minBridgeProtocol} but this bridge speaks ${PROTOCOL_VERSION}: the bridge is out of date, update it.\n`,
-      );
-    }
+    // Same rule as grip_health (update.ts bridgeStaleFor: the protocol decides when the plugin names one).
+    const stale = bridgeStaleFor(sess);
+    if (stale) process.stderr.write(`[grip] WARNING ${stale}\n`);
     this.noteHelloRename(sess, prevIdent, prevUid);
     this.refreshBindNames(sess);
     this.adoptQueued(sess);
