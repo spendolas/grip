@@ -48,7 +48,7 @@ cat > "$BUILD/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>${F_APP_NAME}</string>
   <key>CFBundleIdentifier</key><string>${F_BUNDLE_ID}</string>
-  <key>CFBundleExecutable</key><string>grip-daemon</string>
+  <key>CFBundleExecutable</key><string>${F_SLUG}-daemon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>1</string>
   <!-- LSUIElement: no Dock icon, no window — a background agent. -->
@@ -58,7 +58,7 @@ cat > "$BUILD/Contents/Info.plist" <<PLIST
 PLIST
 
 # The bundle executable IS the daemon (exec → the .app process becomes node).
-cat > "$BUILD/Contents/MacOS/grip-daemon" <<LAUNCHER
+cat > "$BUILD/Contents/MacOS/${F_SLUG}-daemon" <<LAUNCHER
 #!/bin/bash
 export GRIP_PERSISTENT=1
 # A daemon may already own the port (e.g. an on-demand shim spawned one);
@@ -66,7 +66,7 @@ export GRIP_PERSISTENT=1
 # fine — steady state is one persistent daemon holding the port.
 exec "$NODE" "$DIST" --daemon
 LAUNCHER
-chmod +x "$BUILD/Contents/MacOS/grip-daemon"
+chmod +x "$BUILD/Contents/MacOS/${F_SLUG}-daemon"
 
 # Place into /Applications, elevating only if the dir isn't user-writable.
 if [[ -w "/Applications" ]]; then
@@ -83,21 +83,21 @@ osascript -e "tell application \"System Events\" to make login item at end with 
 
 echo
 echo "registered login item:"
-osascript -e 'tell application "System Events" to get the name of every login item' 2>/dev/null | tr ',' '\n' | grep -i grip || true
+osascript -e 'tell application "System Events" to get the name of every login item' 2>/dev/null | tr ',' '\n' | grep -iF "${F_APP_NAME}" || true
 
 # --- start it now (frees the port for the persistent daemon first) ---
-lsof -ti:${F_WS_PORT} 2>/dev/null | while read -r pid; do kill "$pid" 2>/dev/null || true; done
+free_own_port
 sleep 1
 open "$APP"
 sleep 2
 echo
 if grep -q '"persistent": true' "$HOME/${F_PREFIX}.status" 2>/dev/null; then
-  echo "grip persistent daemon running:"
+  echo "${F_DISPLAY} persistent daemon running:"
   grep -E '"pid"|"version"|"httpPort"|"persistent"' "$HOME/${F_PREFIX}.status"
 else
   echo "started (check ~/${F_PREFIX}.log); if a non-persistent daemon still holds"
   echo "the port, it's an active stdio shim — resolves once grip is HTTP-only."
 fi
 echo
-echo "Grip will now start at every login. Register it (once) if not already:"
+echo "${F_DISPLAY} will now start at every login. Register it (once) if not already:"
 echo "  claude mcp remove -s user ${F_MCP_NAME}; claude mcp add --transport http -s user ${F_MCP_NAME} http://127.0.0.1:${F_HTTP_PORT}/mcp"

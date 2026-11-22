@@ -1,19 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  grip bridge LaunchAgent (template). install-launchd.sh substitutes
-  __NODE__ and __DIST__ and writes the result to
-  ~/Library/LaunchAgents/com.grip.bridge.plist.
+  Bridge LaunchAgent (template). install-launchd.sh fills the double-underscore
+  placeholders (label, ports, file prefix, home, node, dist) from the flavour
+  file and writes the result to ~/Library/LaunchAgents/<label>.plist.
 
-  Keeps ONE long-lived grip daemon running (WS :7777 for Figma, IPC socket
-  for stdio shims, HTTP :7778 for direct MCP clients). GRIP_PERSISTENT=1
+  Keeps ONE long-lived daemon running (WS :__WS_PORT__ for Figma, IPC socket
+  for stdio shims, HTTP :__HTTP_PORT__ for direct MCP clients). GRIP_PERSISTENT=1
   disables the daemon's idle-exit + lifetime ceiling so launchd owns the
   lifecycle. RunAtLoad + KeepAlive → starts at login, respawns on crash.
 -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.grip.bridge</string>
+  <string>__LABEL__</string>
 
   <key>ProgramArguments</key>
   <array>
@@ -34,8 +34,8 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>__HOME__/.grip-bridge.log</string>
+  <string>__HOME__/__FILE_PREFIX__.log</string>
   <key>StandardErrorPath</key>
-  <string>__HOME__/.grip-bridge.log</string>
+  <string>__HOME__/__FILE_PREFIX__.log</string>
 </dict>
 </plist>

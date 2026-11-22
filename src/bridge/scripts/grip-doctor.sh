@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Capture forensics on a wedged grip bridge.
+# Capture forensics on a wedged bridge.
 # Use when `grip_diagnose` over MCP can't get through (bridge unresponsive).
-# Output goes to ~/.grip-doctor-<ts>.txt.
+# Output goes to ~/<home dir name>-doctor-<ts>.txt (e.g. ~/.grip-doctor-<ts>.txt).
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/_flavour.sh"
 TS=$(date +%s)
-OUT="$HOME/.grip-doctor-$TS.txt"
+OUT="$HOME/${F_HOME_DIR}-doctor-$TS.txt"
 {
-  echo "=== grip-doctor $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+  echo "=== ${F_SLUG}-doctor $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
   echo
   echo "=== port :${F_WS_PORT} owner ==="
   lsof -i:${F_WS_PORT} -P 2>&1 | grep -v -i figma || true
@@ -19,10 +19,10 @@ OUT="$HOME/.grip-doctor-$TS.txt"
     ps -p "$PID" -o pid,ppid,pcpu,etime,time,rss,command
     echo
     echo "=== sample(5s) ==="
-    sample "$PID" 5 -file "/tmp/grip-sample-$TS.txt" >/dev/null 2>&1 && \
-      grep -E "v8::|RegExp::|Builtins_|JSON|net::|uv_|Parser" "/tmp/grip-sample-$TS.txt" \
+    sample "$PID" 5 -file "/tmp/${F_SLUG}-sample-$TS.txt" >/dev/null 2>&1 && \
+      grep -E "v8::|RegExp::|Builtins_|JSON|net::|uv_|Parser" "/tmp/${F_SLUG}-sample-$TS.txt" \
         | sort | uniq -c | sort -rn | head -25
-    echo "  (full sample: /tmp/grip-sample-$TS.txt)"
+    echo "  (full sample: /tmp/${F_SLUG}-sample-$TS.txt)"
   else
     echo "no bridge listening on :${F_WS_PORT}"
   fi
@@ -36,8 +36,8 @@ OUT="$HOME/.grip-doctor-$TS.txt"
   echo "=== last 60 log lines ==="
   tail -60 "$HOME/${F_PREFIX}.log" 2>&1 || echo "(no log)"
   echo
-  echo "=== claude mcp list grip ==="
-  claude mcp list 2>&1 | grep -i grip || true
+  echo "=== claude mcp list ${F_MCP_NAME} ==="
+  claude mcp list 2>&1 | grep -iF "${F_MCP_NAME}" || true
   echo
   echo "=== latest forensic dumps ==="
   ls -lt "$HOME"/${F_PREFIX}.dump-*.json 2>/dev/null | head -3 || echo "(none)"
