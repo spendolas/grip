@@ -264,8 +264,8 @@
       function tooltip(offered, needsSetup) {
         if (updPhase === 'updating') return current === 'connected' ? 'Updating…' : 'Restarting…';
         if (pairIssue === 'flavour') return 'Wrong Grip build: this plugin is ' + FLAVOUR + ', the bridge is ' + bridgeFlavour;
-        if (pairIssue === 'raced') return 'Another client paired first. If that was not you, run "node ~/.grip/grip-bridge.mjs pair --reset", then "pair"';
-        if (pairIssue === 'needs') return 'Not paired. Run "node ~/.grip/grip-bridge.mjs pair", then click here';
+        if (pairIssue === 'raced') return 'Another client paired first. If that was not you, run "node __HOME_LABEL__/grip-bridge.mjs pair --reset", then "pair"';
+        if (pairIssue === 'needs') return 'Not paired. Run "node __HOME_LABEL__/grip-bridge.mjs pair", then click here';
         if (pairIssue === 'lost') return 'Pairing lost. Click to pair again';
         if (pairIssue === 'unverified') return 'This bridge could not prove who it is. Click to forget the pairing';
         if (needsSetup) return 'Bridge not running. Click for setup';

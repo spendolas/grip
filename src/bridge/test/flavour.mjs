@@ -41,6 +41,20 @@ rejects('keys-not-array', (f) => { f.releaseKeys = 'x'; }, 'releaseKeys');
 rejects('key-not-pem', (f) => { f.releaseKeys = ['not a pem']; }, 'releaseKeys');
 rejects('key-rsa', (f) => { f.releaseKeys = [generateKeyPairSync('rsa', { modulusLength: 2048 }).publicKey.export({ type: 'spki', format: 'pem' })]; }, 'releaseKeys');
 assert.equal(loadFlavour(altDir).releaseKeys.length, 1);
+// exactly ONE public PEM block per entry: no private key, second block or junk riding along
+{ const pub = (generateKeyPairSync('ed25519').publicKey).export({ type: 'spki', format: 'pem' });
+  const priv = generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' });
+  rejects('key-public-then-private', (f) => { f.releaseKeys = [pub + priv]; }, 'releaseKeys');
+  rejects('key-two-public', (f) => { f.releaseKeys = [pub + pub]; }, 'releaseKeys');
+  rejects('key-trailing-junk', (f) => { f.releaseKeys = [pub + 'junk\n']; }, 'releaseKeys');
+  rejects('key-leading-junk', (f) => { f.releaseKeys = ['junk\n' + pub]; }, 'releaseKeys');
+  assert.equal(loadFlavour(variant('key-padded', (f) => { f.releaseKeys = ['\n' + pub + '\n']; })).releaseKeys.length, 1, 'surrounding whitespace is fine'); }
+{ // the generator's copy of the MCP name rule must equal the installer's
+  const { MCP_NAME_RE } = await import('../dist/mcp-name.js');
+  const gen = readFileSync(script, 'utf8').match(/const MCP_NAME_RE = (\/.*\/);/)[1];
+  assert.equal(gen, String(MCP_NAME_RE), 'gen-flavour MCP_NAME_RE matches mcp-name.ts'); }
+rejects('mcp-name-space', (f) => { f.mcpName = 'a b'; }, 'mcpName');
+rejects('plugin-id-letters', (f) => { f.pluginId = 'abc'; }, 'pluginId');
 { const kp = generateKeyPairSync('ed25519');
   rejects('key-private', (f) => { f.releaseKeys = [kp.privateKey.export({ type: 'pkcs8', format: 'pem' })]; }, 'releaseKeys');
   rejects('key-object', (f) => { f.releaseKeys = [{ key: kp.publicKey.export({ type: 'spki', format: 'pem' }), format: 'pem' }]; }, 'releaseKeys');

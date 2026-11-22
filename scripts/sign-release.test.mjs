@@ -95,6 +95,12 @@ test('fails when there is nothing to sign, or no pinned key to check against', (
     assert.throws(() => signSums({ root: bare, dir, keyPem: TEST_PRIV }), (e) => e instanceof SignError && /flavour\.json/.test(e.message), JSON.stringify(bad));
   }
   const ed = generateKeyPairSync('ed25519');
+  const edPriv = ed.privateKey.export({ type: 'pkcs8', format: 'pem' });
+  // one public PEM block only: a private key, a second block or junk riding along is refused
+  for (const bad of [TEST_PUB + edPriv, TEST_PUB + TEST_PUB, TEST_PUB + 'junk\n']) {
+    writeFileSync(flavourFile, JSON.stringify({ releaseKeys: [bad] }));
+    assert.throws(() => signSums({ root: bare, dir, keyPem: TEST_PRIV }), (e) => e instanceof SignError && /flavour\.json/.test(e.message), 'not exactly one public PEM block');
+  }
   for (const bad of [ed.privateKey.export({ type: 'pkcs8', format: 'pem' }), { key: TEST_PUB, format: 'pem' }, ed.publicKey.export({ format: 'jwk' })]) {
     writeFileSync(flavourFile, JSON.stringify({ releaseKeys: [bad] }));
     assert.throws(() => signSums({ root: bare, dir, keyPem: TEST_PRIV }), (e) => e instanceof SignError && /flavour\.json/.test(e.message), 'non-public-key-PEM entry');

@@ -95,6 +95,38 @@ assert.notEqual(authProof('s', 'plugin', 'a', 'b', 'acme'), authProof('s', 'plug
   assert.ok(helloed(bridge, 'Legacy') && helloed(bridge, 'Explicit'), 'the refusal touches no other window');
 }
 
+// ---- a peer that has not said hello is not processed past the flavour check: update_request
+// and event frames are ignored (one rate-limited stderr line); after a valid hello they work.
+{
+  const lines = [];
+  const realWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk, ...rest) => { lines.push(String(chunk)); return realWrite(chunk, ...rest); };
+  try {
+    const { bridge, port } = await startBridge({ flavour: 'acme' });
+    const requests = [];
+    const events = [];
+    bridge.on('update-request', (r) => requests.push(r));
+    bridge.on('event', (e) => events.push(e));
+    const c = await client(port);
+    c.send({ type: 'update_request', version: '9.9.9' });
+    c.send({ event: 'selectionchange', data: { ids: ['1:1'] } });
+    await sleep(300);
+    assert.equal(requests.length, 0, 'unhelloed update_request is not processed');
+    assert.equal(events.length, 0, 'unhelloed event is not processed');
+    assert.ok(!c.frames.some((f) => f.type === 'update_result'), 'no update_result for an unhelloed peer');
+    assert.equal(c.closed, null, 'the peer is not closed for it');
+    const ignored = lines.filter((l) => /ignored before hello/.test(l));
+    assert.equal(ignored.length, 1, 'one ignore line (rate-limited)');
+    assert.ok(!ignored[0].includes('9.9.9'), 'the ignore line carries no peer text');
+    c.hello('Late', 'acme');
+    await waitFor(() => helloed(bridge, 'Late'));
+    c.send({ type: 'update_request', version: '9.9.9' });
+    c.send({ event: 'selectionchange', data: { ids: ['1:1'] } });
+    await waitFor(() => requests.length === 1 && events.length === 1);
+    assert.equal(requests[0].version, '9.9.9', 'after hello the update_request is processed as before');
+  } finally { process.stderr.write = realWrite; }
+}
+
 // ---- pairing store in mode off (GRIP_PAIRING=off)
 {
   const dir = mkdtempSync(join(tmpdir(), 'grip-flavour-')); dirs.push(dir);

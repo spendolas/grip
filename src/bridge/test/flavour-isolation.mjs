@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { createServer } from 'node:net';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { flavourBundler } from './_bundle.mjs';
@@ -45,6 +45,38 @@ for (const entry of ['src/index.ts', 'src/install.ts']) {
   }
 }
 assert.deepEqual(leaks, [], `public identity strings in an acme build:\n${leaks.join('\n')}`);
+
+// ---- (a2) the rendered plugin UI names the flavour's own home dir, and the MCP server its own name
+{
+  const ui = readFileSync(join(tmp, 'figma-plugin', 'ui.html'), 'utf8');
+  assert.ok(ui.includes('~/.acme/grip-bridge.mjs') || ui.includes('~/.acme'), 'acme ui.html names ~/.acme');
+  assert.ok(!ui.includes('~/.grip'), 'acme ui.html has no ~/.grip');
+  const pubTmp = mkdtempSync(join(tmpdir(), 'flavour-isolation-pub-'));
+  const pubB = flavourBundler(join(repo, 'flavour'), pubTmp);
+  assert.ok(readFileSync(join(pubTmp, 'figma-plugin', 'ui.html'), 'utf8').includes('~/.grip'), 'public ui.html keeps ~/.grip');
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+  const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+  const freeP = () => new Promise((res) => { const s = createServer().listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
+  for (const [what, b, dir, want] of [['acme', { bundle: bundle }, tmp, 'acme'], ['public', pubB, pubTmp, 'grip']]) {
+    const entry = join(dir, `entry-${what}.ts`);
+    writeFileSync(entry, `export { PluginBridge } from ${JSON.stringify(join(bridgeDir, 'src', 'ws-server.ts'))};\nexport { createSession, destroySession } from ${JSON.stringify(join(bridgeDir, 'src', 'mcp-server.ts'))};\n`);
+    const file = join(dir, `session-${what}.mjs`);
+    // the ESM bundle holds CommonJS dependencies (ws), which need a require
+    writeFileSync(file, "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\n" + await b.bundle(relative(bridgeDir, entry)));
+    const m = await import(pathToFileURL(file).href);
+    const bridge = new m.PluginBridge(await freeP());
+    await new Promise((r) => bridge.once('listening', r));
+    const live = m.createSession(bridge);
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await live.server.connect(st);
+    const client = new Client({ name: 't', version: '0' }, { capabilities: {} });
+    await client.connect(ct);
+    assert.equal(client.getServerVersion().name, want, `${what}: MCP serverInfo.name`);
+    await client.close();
+    m.destroySession(live);
+    bridge.close();
+  }
+}
 
 // ---- (c) identities share no path or port
 {

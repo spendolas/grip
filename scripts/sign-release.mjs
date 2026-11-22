@@ -22,6 +22,7 @@ import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isSinglePublicPem } from './gen-flavour.mjs';
 
 export class SignError extends Error {}
 
@@ -39,7 +40,7 @@ export function readPinnedKeys(root) {
   const pems = Array.isArray(raw?.releaseKeys) ? raw.releaseKeys : [];
   if (pems.length === 0) throw new SignError('releaseKeys in flavour/flavour.json holds no public key');
   return pems.map((pem) => {
-    if (typeof pem !== 'string' || !pem.includes('-----BEGIN PUBLIC KEY-----')) throw new SignError('a pinned release public key in flavour/flavour.json is not a public key PEM string');
+    if (!isSinglePublicPem(pem)) throw new SignError('a pinned release public key in flavour/flavour.json is not exactly one public key PEM block');
     let k;
     try { k = createPublicKey(pem); } catch { throw new SignError('a pinned release public key in flavour/flavour.json is not a valid public key'); }
     if (k.asymmetricKeyType !== 'ed25519') throw new SignError('a pinned release public key is not an Ed25519 key');

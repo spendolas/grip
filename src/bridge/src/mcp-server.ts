@@ -8,6 +8,7 @@ import {
 import { randomUUID as uuid } from 'node:crypto';
 import { writeFile, stat, open, mkdir } from 'node:fs/promises';
 import { IDENTITY, liveIdentity } from './identity.js';
+import { FLAVOUR } from './flavour.gen.js';
 import { join } from 'node:path';
 import {
   TOOLS, toolInputSchema, resolveToolScope, mergeToolScope, toolInScope, toolCategorySummary, toolDetail,
@@ -252,7 +253,7 @@ export function createSession(bridge: PluginBridge): LiveSession {
   // plainly, and the distinction it draws is factual: Grip is a live link to
   // the open canvas, REST integrations read published file data.
   const server = new Server(
-    { name: 'grip', version: BRIDGE_VERSION },
+    { name: FLAVOUR.mcpName, version: BRIDGE_VERSION },
     {
       capabilities: { tools: { listChanged: true }, logging: {} },
       instructions:

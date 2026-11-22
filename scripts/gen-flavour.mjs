@@ -7,7 +7,7 @@
 //                                  code.js (outFile), which Figma runs as a plain script
 //   figma-plugin/ui.html, figma-plugin/manifest.json
 //                                  rendered from src/plugin/templates/ (placeholders
-//                                  __WS_PORT__ __FLAVOUR__ __PLUGIN_ID__ __PLUGIN_NAME__;
+//                                  __WS_PORT__ __FLAVOUR__ __PLUGIN_ID__ __PLUGIN_NAME__ __HOME_LABEL__;
 //                                  any __X__ left after rendering is an error)
 //
 //   node scripts/gen-flavour.mjs [--dir <path>] [--out-bridge <file>] [--out-plugin <file>]
@@ -28,6 +28,16 @@ const STRINGS = [
 ];
 const PORTS = ['wsPort', 'httpPort'];
 const BOOLS = ['lockOverrides'];
+// The same pattern as src/bridge/src/mcp-name.ts MCP_NAME_RE (the generator cannot import
+// TypeScript; test/flavour.mjs checks the two agree).
+const MCP_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+// Exactly one public-key PEM block: nothing before or after it, no second block, no private key.
+export function isSinglePublicPem(pem) {
+  if (typeof pem !== 'string') return false;
+  const t = pem.trim();
+  return t.startsWith('-----BEGIN PUBLIC KEY-----') && t.endsWith('-----END PUBLIC KEY-----')
+    && t.split('-----BEGIN ').length === 2 && t.split('-----END ').length === 2 && !t.includes('PRIVATE');
+}
 const SAFE_NAMES = ['filePrefix', 'homeDirName', 'ipcName', 'launchLabel', 'daemonBundleId'];
 const FIELDS = ['slug', 'displayName', 'wsPort', 'httpPort', 'homeDirName', 'filePrefix', 'ipcName', 'mcpName', 'daemonAppName', 'daemonBundleId', 'launchLabel', 'pluginId', 'pluginName', 'releasesApi', 'installUrl', 'pagesUrl', 'releaseKeys', 'lockOverrides'];
 
@@ -61,12 +71,15 @@ export function loadFlavour(dir) {
   if (!Array.isArray(raw.releaseKeys) || raw.releaseKeys.length < 1) throw new Error('flavour: field "releaseKeys" must be a non-empty array of Ed25519 public key PEM strings');
   for (const pem of raw.releaseKeys) {
     // createPublicKey also accepts a private-key PEM (it derives the public half) and
-    // objects (JWK, {key,format}), so insist on a string with the public-key header.
-    if (typeof pem !== 'string' || !pem.includes('-----BEGIN PUBLIC KEY-----')) throw new Error('flavour: field "releaseKeys" holds an entry that is not a public key PEM string (a private key must never go here)');
+    // objects (JWK, {key,format}), and reads past a second block, so insist on a string that
+    // is exactly one public-key block.
+    if (!isSinglePublicPem(pem)) throw new Error('flavour: field "releaseKeys" holds an entry that is not a public key PEM string (a private key must never go here)');
     let k;
     try { k = createPublicKey(pem); } catch { throw new Error('flavour: field "releaseKeys" holds an entry that is not a public key PEM'); }
     if (k.asymmetricKeyType !== 'ed25519') throw new Error('flavour: field "releaseKeys" holds a key that is not Ed25519');
   }
+  if (!MCP_NAME_RE.test(raw.mcpName)) throw new Error('flavour: field "mcpName" may only contain letters, digits, ".", "-" and "_", starting with a letter or digit (max 64)');
+  if (!/^\d{10,25}$/.test(raw.pluginId)) throw new Error('flavour: field "pluginId" must be 10 to 25 digits');
   if (raw.wsPort === raw.httpPort) throw new Error('flavour: field "httpPort" must differ from "wsPort"');
   if (!/^[a-z][a-z0-9-]{0,23}$/.test(raw.slug)) throw new Error('flavour: field "slug" must match ^[a-z][a-z0-9-]{0,23}$');
   // These reach AppleScript, plist XML, shell scripts and file paths unescaped, so they
@@ -121,7 +134,7 @@ const TEMPLATES = ['ui.html', 'manifest.json'];
 // already restricted to [a-z0-9-].
 export function renderTemplate(name, text, f) {
   const esc = (v) => JSON.stringify(String(v)).slice(1, -1);
-  const values = { WS_PORT: f.wsPort, FLAVOUR: f.slug, PLUGIN_ID: f.pluginId, PLUGIN_NAME: f.pluginName };
+  const values = { WS_PORT: f.wsPort, FLAVOUR: f.slug, PLUGIN_ID: f.pluginId, PLUGIN_NAME: f.pluginName, HOME_LABEL: '~/' + f.homeDirName };
   const out = text.replace(/__([A-Z][A-Z0-9_]*)__/g, (m, k) => (k in values ? esc(values[k]) : m));
   const left = out.match(/__[A-Z][A-Z0-9_]*__/g);
   if (left) throw new Error(`gen-flavour: placeholder ${[...new Set(left)].join(', ')} left in ${name}`);

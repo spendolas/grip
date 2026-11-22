@@ -1694,6 +1694,14 @@ export class PluginBridge extends EventEmitter {
       return;
     }
 
+    // A peer is flavour-verified only by pair_request / auth / hello, so a socket that has not
+    // said hello gets no update_request or event looked at (it could be any local page or
+    // process of another build). Nothing is sent back; one clipped, rate-limited line.
+    if (gate.helloAt === 0 && ((msg as { type?: unknown }).type === 'update_request' || 'event' in msg)) {
+      this.logRefused(`session ${sessionId.slice(0, 8)}: ${(msg as { type?: unknown }).type === 'update_request' ? 'update_request' : 'event'} ignored before hello`);
+      return;
+    }
+
     // User clicked the purple strip. Older bridges drop this frame (no
     // id/event/kind), older plugins never send it: compatible both ways.
     // `version` is the version the user was shown; the handler installs only if
