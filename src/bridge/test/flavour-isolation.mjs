@@ -11,11 +11,11 @@
 //     only matching pairs register, the others are closed 4409.
 // (c) makeIdentity for both flavours: no shared path or port.
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createServer } from 'node:net';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { flavourBundler } from './_bundle.mjs';
 import { WebSocket } from 'ws';
 import { PluginBridge } from '../dist/ws-server.js';
@@ -61,6 +61,35 @@ assert.deepEqual(leaks, [], `public identity strings in an acme build:\n${leaks.
   for (const p of paths(a)) assert.ok(!paths(g).includes(p), `no path shared: ${p}`);
   const win = { ...ctx, platform: 'win32' };
   assert.notEqual(makeIdentity(alt, win).ipcPath, makeIdentity(FLAVOUR, win).ipcPath, 'windows pipe differs');
+}
+
+// ---- (d) a locked flavour ignores the release-URL and test-key overrides, even in a test run
+{
+  const THROWAWAY = '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEASF7Su4ZqXdmFbDJvwm56w5wBAqqhQ8BcLDwJlGjTneo=\n-----END PUBLIC KEY-----\n';
+  const body = (pem) => pem.replace(/-----[A-Z ]+-----/g, '').replace(/\s+/g, '');
+  const env = { GRIP_RELEASES_API: 'http://127.0.0.1:9/x', GRIP_RELEASE_PUBKEY: THROWAWAY, GRIP_TEST: '1' };
+  const saved = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, env);
+  try {
+    for (const [what, dir, locked] of [['acme', altDir, true], ['public', join(repo, 'flavour'), false]]) {
+      const f = flavourBundler(dir, tmp);
+      const file = join(tmp, `update-${what}.mjs`);
+      writeFileSync(file, await f.bundle('src/update.ts'));
+      const u = await import(pathToFileURL(file).href);
+      const keys = u.trustedReleaseKeys().map((k) => body(k.export({ type: 'spki', format: 'pem' })));
+      if (locked) {
+        assert.equal(u.releasesApi(), alt.releasesApi, 'acme: the override URL is ignored');
+        assert.deepEqual(keys, [body(alt.releaseKeys[0])], 'acme: the override key is ignored');
+        assert.equal(u.hostAllowed(new URL('http://127.0.0.1:9/x')), false, 'acme: no override origin is allowed');
+      } else {
+        assert.equal(u.releasesApi(), 'http://127.0.0.1:9/x', 'public: the override URL still applies');
+        assert.deepEqual(keys, [body(THROWAWAY)], 'public: the test key still applies');
+        assert.equal(u.hostAllowed(new URL('http://127.0.0.1:9/x')), true, 'public: the override origin is allowed');
+      }
+    }
+  } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
 }
 
 // ---- (b) two bridges in one process

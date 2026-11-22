@@ -51,6 +51,7 @@ import { fileURLToPath } from 'node:url';
 import { BRIDGE_VERSION } from './types.js';
 import { FLAVOUR } from './flavour.gen.js';
 import { liveIdentity } from './identity.js';
+import { downloadPrefixFor, overridesAllowed } from './update-policy.js';
 import type { PluginBridge } from './ws-server.js';
 
 export const DEFAULT_RELEASES_API = FLAVOUR.releasesApi;
@@ -125,7 +126,9 @@ export function normalizeUrl(raw: string): string | null {
 
 let warnedApi = false;
 // GRIP_RELEASES_API replaces the whole "latest release" URL (tests, forks).
+// A flavour with lockOverrides ignores it.
 export function releasesApi(): string {
+  if (!overridesAllowed(FLAVOUR)) return DEFAULT_RELEASES_API;
   const raw = process.env.GRIP_RELEASES_API?.trim();
   if (!raw) return DEFAULT_RELEASES_API;
   const norm = normalizeUrl(raw);
@@ -137,6 +140,7 @@ export function releasesApi(): string {
   return DEFAULT_RELEASES_API;
 }
 function overrideOrigin(): string | null {
+  if (!overridesAllowed(FLAVOUR)) return null;
   if (!process.env.GRIP_RELEASES_API?.trim()) return null;
   try { return new URL(releasesApi()).origin; } catch { return null; }
 }
@@ -177,11 +181,21 @@ export function trustedReleaseKeys(): KeyObject[] {
   const override = process.env.GRIP_RELEASE_PUBKEY;
   const overrideSet = override !== undefined && override.trim() !== '';
   const testRun = process.env.GRIP_TEST === '1';
+  if (!overridesAllowed(FLAVOUR)) {
+    if (overrideSet && !pubkeyNoticeShown) {
+      pubkeyNoticeShown = true;
+      process.stderr.write('[grip] GRIP_RELEASE_PUBKEY ignored (this build locks its update overrides)\n');
+    }
+    return pinnedKeys();
+  }
   if (overrideSet && !testRun && !pubkeyNoticeShown) {
     pubkeyNoticeShown = true;
     process.stderr.write('[grip] GRIP_RELEASE_PUBKEY ignored (not a test run: it only works with GRIP_TEST=1)\n');
   }
-  const pems = overrideSet && testRun ? [override!] : RELEASE_PUBLIC_KEYS;
+  return overrideSet && testRun ? parseKeys([override!]) : pinnedKeys();
+}
+function pinnedKeys(): KeyObject[] { return parseKeys(RELEASE_PUBLIC_KEYS); }
+function parseKeys(pems: readonly string[]): KeyObject[] {
   const keys: KeyObject[] = [];
   for (const pem of pems) {
     try {
@@ -361,7 +375,9 @@ export function releaseNotes(body: unknown, max: number = NOTES_MAX_CHARS): stri
   return (nl > max * 0.6 ? cut.slice(0, nl) : cut).trimEnd() + '\n…';
 }
 
-export function parseRelease(buf: Buffer): Release {
+// `downloadPrefix` (see downloadPrefixFor): when set, an asset whose download URL is not
+// under it is treated as absent, so a release cannot point the updater at another repo.
+export function parseRelease(buf: Buffer, downloadPrefix: string | null = null): Release {
   let j: any;
   try { j = JSON.parse(buf.toString('utf8')); } catch { throw new UpdateError('the releases API did not return valid JSON'); }
   if (!j || typeof j !== 'object') throw new UpdateError('the releases API returned an unexpected shape');
@@ -374,6 +390,7 @@ export function parseRelease(buf: Buffer): Release {
   for (const a of list) {
     if (!a || typeof a.name !== 'string' || typeof a.browser_download_url !== 'string') continue;
     if (!/^[A-Za-z0-9._-]{1,100}$/.test(a.name)) continue;
+    if (downloadPrefix && !a.browser_download_url.startsWith(downloadPrefix)) continue;
     assets[a.name] = { name: a.name, url: a.browser_download_url, size: typeof a.size === 'number' ? a.size : undefined };
   }
   return { version: tag, notes: releaseNotes(j.body), headline: releaseHeadline(j.body), assets };
@@ -385,7 +402,7 @@ export async function fetchRelease(api: string = releasesApi()): Promise<Release
     timeoutMs: MANIFEST_TIMEOUT_MS,
     headers: { accept: 'application/vnd.github+json' },
   });
-  return parseRelease(buf);
+  return parseRelease(buf, downloadPrefixFor(api));
 }
 
 // SHA256SUMS.txt: standard `<64 hex>  <name>` lines (`sha256sum` / `shasum -a 256`
