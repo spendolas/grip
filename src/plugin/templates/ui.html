@@ -71,6 +71,8 @@
       let pluginVersion = '';     // from the plugin's own hello (for the tooltip)
       let bridgeVersion = '';     // from the bridge's welcome
       let minBridge = '';         // from the plugin's own hello: the oldest bridge it wants
+      let bridgeProtocol = null;  // from the bridge's welcome (null = a bridge that predates the integer)
+      let minBridgeProtocol = null;   // from the plugin's own hello: the oldest bridge protocol it wants
 
       // Update state. There is no label and no pill: just the purple colour, a
       // tooltip, and one click.
@@ -226,7 +228,10 @@
       // opens the install page.
       const UPDATER_SINCE = '0.8.0';
       function bridgeOutdated() {
-        return current === 'connected' && !updLatest && !updClone && updPhase !== 'updating' && !!bridgeVersion && !!minBridge && olderThan(bridgeVersion, minBridge);
+        if (current !== 'connected' || updLatest || updClone || updPhase === 'updating') return false;
+        if (!!bridgeVersion && !!minBridge && olderThan(bridgeVersion, minBridge)) return true;
+        // the protocol integer, only when both sides say one
+        return typeof bridgeProtocol === 'number' && typeof minBridgeProtocol === 'number' && bridgeProtocol < minBridgeProtocol;
       }
       function bridgeHearsUpdates() {
         return !!bridgeVersion && !olderThan(bridgeVersion, UPDATER_SINCE);
@@ -357,6 +362,7 @@
             if (theirs !== FLAVOUR) { bridgeFlavour = theirs || '?'; refuseBridge('flavour'); return; }
             if (pairIssue === 'flavour') { pairIssue = ''; bridgeFlavour = ''; }
             if (typeof msg.bridgeVersion === 'string') bridgeVersion = msg.bridgeVersion;
+            bridgeProtocol = typeof msg.protocol === 'number' ? msg.protocol : null;
             welcomeMsg = msg;
             render();
             if (typeof msg.nonce === 'string' && msg.nonce.length >= 16) {
@@ -501,6 +507,7 @@
           const { pluginMessage: _drop, ...rest } = msg;
           if (typeof msg.version === 'string') pluginVersion = msg.version;
           if (typeof msg.minBridge === 'string') minBridge = msg.minBridge;
+          minBridgeProtocol = typeof msg.minBridgeProtocol === 'number' ? msg.minBridgeProtocol : null;
           render();
           send(withFlavour({ ...rest, kind: 'hello' }));
         } else if (msg.kind === 'busy') {

@@ -48,7 +48,7 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BRIDGE_VERSION } from './types.js';
+import { BRIDGE_VERSION, PROTOCOL_VERSION } from './types.js';
 import { FLAVOUR } from './flavour.gen.js';
 import { liveIdentity } from './identity.js';
 import { downloadPrefixFor, overridesAllowed } from './update-policy.js';
@@ -61,7 +61,7 @@ export const DEFAULT_RELEASES_API = FLAVOUR.releasesApi;
 export const ASSET_BRIDGE = 'grip-bridge.mjs';
 export const ASSET_SUMS = 'SHA256SUMS.txt';
 export const ASSET_SUMS_SIG = 'SHA256SUMS.txt.sig';   // base64 of the raw 64-byte Ed25519 signature over SHA256SUMS.txt
-export const ASSET_COMPAT = 'compat.json';   // { version, minPlugin }
+export const ASSET_COMPAT = 'compat.json';   // { version, minPlugin, flavour?, protocol?, minPluginProtocol? }
 // release asset name -> file name inside ~/.grip/figma-plugin
 export const PLUGIN_ASSETS: Record<string, string> = {
   'grip-plugin-code.js': 'code.js',
@@ -219,7 +219,13 @@ export function verifySumsSignature(sums: Buffer, sigText: Buffer | string, keys
   return false;
 }
 
-const isSignatureCode = (code?: string) => code === 'signature_missing' || code === 'signature_invalid';
+// A failure of trust in the release itself, not of compatibility: its signature is
+// missing or wrong, or its signed compat.json is for another flavour. Every surface
+// treats these alike (state.signatureError carries the message): never signalled,
+// never installable, and no flag (not --force) overrides them.
+export function isTrustFailure(code: string | undefined | null): boolean {
+  return typeof code === 'string' && (code.startsWith('signature_') || code === 'flavour_mismatch');
+}
 
 // ---------- semver ----------
 
@@ -251,6 +257,7 @@ export function isSemver(v: unknown): v is string {
 //   compat_unverified  the release has no compat.json, or it does not verify
 //   signature_missing  the release has no SHA256SUMS.txt.sig (never bypassed, not even by --force)
 //   signature_invalid  SHA256SUMS.txt.sig does not verify against a pinned release key (same)
+//   flavour_mismatch   the signed compat.json claims another flavour than this build's (same; see isTrustFailure)
 export class UpdateError extends Error {
   constructor(message: string, readonly code?: string) { super(message); }
 }
@@ -473,11 +480,14 @@ export interface PluginInfo {
   wsReady?: boolean;
   hello?: boolean;               // false until the plugin's hello arrived (version not known yet)
   minBridge?: string | null;     // the plugin says: I need a bridge >= this
+  protocol?: number | null;      // the plugin's protocol integer (absent: a plugin that predates it)
+  minBridgeProtocol?: number | null;   // the plugin says: I need a bridge protocol >= this
 }
 
 export function pluginInfos(bridge: { snapshot(): { plugins: any[] } }): PluginInfo[] {
   return bridge.snapshot().plugins.map((p) => ({
     sessionId: p.sessionId, pluginVersion: p.pluginVersion, fileName: p.fileName, fileKey: p.fileKey, wsReady: p.wsReady, hello: p.hello, minBridge: p.minBridge,
+    protocol: p.protocol ?? null, minBridgeProtocol: p.minBridgeProtocol ?? null,
   }));
 }
 
@@ -492,10 +502,17 @@ export type PluginVerdict =
   | { kind: 'incompatible'; reason: string }     // connected plugins exist but none is new enough for this release
   | { kind: 'unverifiable'; reason: string };    // no connected plugin to check against
 
-// Why ONE plugin window cannot work with this release (null = it can). Unknown
-// version = incompatible.
-export function pluginIncompatibility(minPlugin: string, latest: string, p: PluginInfo): string | null {
+// Why ONE plugin window cannot work with this release (null = it can). When the
+// release names a minimum plugin protocol (compat.json minPluginProtocol) and the
+// plugin reports its protocol integer, that integer decides. Otherwise (a plugin
+// that predates the integer, or a release that does not name one) the version
+// rule: unknown version = incompatible.
+export function pluginIncompatibility(minPlugin: string, latest: string, p: PluginInfo, minProtocol?: number | null): string | null {
   const where = p.fileName ? ` in "${p.fileName}"` : '';
+  if (minProtocol != null && typeof p.protocol === 'number') {
+    if (p.protocol >= minProtocol) return null;
+    return `plugin ${p.pluginVersion ?? '?'}${where} speaks protocol ${p.protocol} but ${latest} needs protocol >= ${minProtocol}; update the Grip plugin in Figma first`;
+  }
   const v = p.pluginVersion;
   if (!isSemver(v)) {
     return `a Grip plugin${where} did not report a version, so it cannot be verified against ${latest} (needs >=${minPlugin}); update the Grip plugin in Figma first`;
@@ -511,7 +528,7 @@ export function pluginIncompatibility(minPlugin: string, latest: string, p: Plug
 // plugin is too old is never signalled and never blocks the others; it is
 // reported in `stale` (after an update such a window needs its plugin updated
 // in Figma before it works again). Nothing compatible connected = no signal.
-export function checkPluginCompat(minPlugin: string, latest: string, plugins: PluginInfo[] | null | undefined): PluginVerdict {
+export function checkPluginCompat(minPlugin: string, latest: string, plugins: PluginInfo[] | null | undefined, minProtocol?: number | null): PluginVerdict {
   const live = connectedPlugins(plugins);
   if (live.length === 0) {
     return { kind: 'unverifiable', reason: 'no Grip plugin is connected, so compatibility cannot be verified; open the Grip plugin in Figma first' };
@@ -519,7 +536,7 @@ export function checkPluginCompat(minPlugin: string, latest: string, plugins: Pl
   const stale: string[] = [];
   let ok = 0;
   for (const p of live) {
-    const why = pluginIncompatibility(minPlugin, latest, p);
+    const why = pluginIncompatibility(minPlugin, latest, p, minProtocol);
     if (why) stale.push(why); else ok++;
   }
   if (ok === 0) return { kind: 'incompatible', reason: stale[0] };
@@ -542,16 +559,27 @@ export function updateSignal(state: UpdateState | null | undefined, plugins: Plu
   if (!state.minPlugin) {
     return { signal: false, blockedReason: `Grip ${state.latest} has no verified compatibility info (compat.json)${state.compatError ? ': ' + state.compatError : ''}, so it is not offered` };
   }
-  const v = checkPluginCompat(state.minPlugin, state.latest, plugins);
+  const v = checkPluginCompat(state.minPlugin, state.latest, plugins, state.minPluginProtocol);
   return v.kind === 'ok' ? { signal: true, ...(v.stale ? { staleWindows: v.stale } : {}) } : { signal: false, blockedReason: v.reason };
+}
+
+// A plugin needs a NEWER bridge than this one: by version (hello.minBridge) or by
+// protocol (hello.minBridgeProtocol above this bridge's PROTOCOL_VERSION).
+function needsNewerBridge(p: PluginInfo): boolean {
+  return (!!p.minBridge && isSemver(p.minBridge) && compareSemver(p.minBridge, BRIDGE_VERSION) > 0)
+    || (typeof p.minBridgeProtocol === 'number' && p.minBridgeProtocol > PROTOCOL_VERSION);
 }
 
 // The reverse direction (informational): a connected plugin that needs a NEWER
 // bridge than this one. Then the bridge is the stale side, an update is recommended.
 export function bridgeStaleReason(plugins: PluginInfo[] | null | undefined): string | undefined {
   for (const p of connectedPlugins(plugins)) {
+    const where = p.fileName ? ` in "${p.fileName}"` : '';
     if (p.minBridge && isSemver(p.minBridge) && compareSemver(p.minBridge, BRIDGE_VERSION) > 0) {
-      return `plugin ${p.pluginVersion ?? '?'}${p.fileName ? ` in "${p.fileName}"` : ''} needs Grip bridge >= ${p.minBridge} but this bridge is ${BRIDGE_VERSION}: update the bridge`;
+      return `plugin ${p.pluginVersion ?? '?'}${where} needs Grip bridge >= ${p.minBridge} but this bridge is ${BRIDGE_VERSION}: update the bridge`;
+    }
+    if (typeof p.minBridgeProtocol === 'number' && p.minBridgeProtocol > PROTOCOL_VERSION) {
+      return `plugin ${p.pluginVersion ?? '?'}${where} needs a Grip bridge with protocol >= ${p.minBridgeProtocol} but this bridge speaks protocol ${PROTOCOL_VERSION}: update the bridge`;
     }
   }
   return undefined;
@@ -802,17 +830,25 @@ export function helpNotices(plugins: PluginInfo[] | null | undefined): HelpNotic
     const s = updatesDisabled() ? null : getUpdateState();
     const offered = !!s && updateSignal(s, plugins).signal && readInstallRecord().source !== 'clone';
     if (!offered) {
-      const need = (plugins ?? []).map((p) => p.minBridge).filter((v): v is string => !!v && isSemver(v)).sort(compareSemver).pop() ?? '';
+      const need = (plugins ?? []).map((p) => p.minBridge).filter((v): v is string => !!v && isSemver(v)).sort(compareSemver).pop()
+        ?? `protocol-${Math.max(0, ...(plugins ?? []).map((p) => (typeof p.minBridgeProtocol === 'number' ? p.minBridgeProtocol : 0)))}`;
       out.push({ kind: 'bridge', key: `bridge-behind:${need}`, text: bridgeHelpText(stale) });
     }
   }
   return out;
 }
 
-// compat.json: { "version": "<release version>", "minPlugin": "<x.y.z>" },
-// generated by scripts/package-release.mjs from types.ts. Verified against
-// SHA256SUMS.txt before it is believed.
-async function fetchCompat(rel: Release, sums: Map<string, string>): Promise<{ minPlugin: string }> {
+// The flavour of every release made before compat.json carried a claim: the public one.
+export const UNCLAIMED_FLAVOUR = 'grip';
+
+// compat.json: { "version", "minPlugin", "flavour", "protocol", "minPluginProtocol" },
+// generated by scripts/package-release.mjs from types.ts and flavour/flavour.json.
+// Verified against SHA256SUMS.txt (itself signature-verified) before it is believed,
+// so `flavour` is a signed claim: a release for another flavour throws
+// flavour_mismatch (a trust failure, see isTrustFailure), and a compat.json without
+// the field claims the public flavour, never this build's. A missing
+// minPluginProtocol gives null (the plugin version rule decides).
+export async function fetchCompat(rel: Release, sums: Map<string, string>): Promise<{ minPlugin: string; minPluginProtocol: number | null }> {
   const fail = (why: string): never => {
     throw new UpdateError(`release ${rel.version} has no verifiable compatibility info (${ASSET_COMPAT}): ${why}`, 'compat_unverified');
   };
@@ -825,10 +861,26 @@ async function fetchCompat(rel: Release, sums: Map<string, string>): Promise<{ m
   if (sha256(buf) !== want) return fail(`it does not match ${ASSET_SUMS}`);
   let j: any;
   try { j = JSON.parse(buf.toString('utf8')); } catch { return fail('it is not valid JSON'); }
-  if (!j || j.version !== rel.version) return fail(`it describes version ${j?.version ?? '?'}, not ${rel.version}`);
+  if (!j || typeof j !== 'object') return fail('it is not a JSON object');
+  // The claim first: a release for another flavour is refused as such, before any
+  // other check could turn it into a compat failure that --force overrides.
+  const claimed = j.flavour ?? UNCLAIMED_FLAVOUR;
+  if (claimed !== FLAVOUR.slug) {
+    const shown = typeof claimed === 'string' ? claimed.replace(/[^\x20-\x7e]/g, '').slice(0, 40) : '?';
+    throw new UpdateError(
+      `release ${rel.version} is for the "${shown}" flavour${j.flavour === undefined ? ' (its compat.json makes no flavour claim)' : ''}, not this ${FLAVOUR.displayName} build ("${FLAVOUR.slug}"). Do not install it. Nothing was changed.`,
+      'flavour_mismatch',
+    );
+  }
+  if (j.version !== rel.version) return fail(`it describes version ${j?.version ?? '?'}, not ${rel.version}`);
   if (!isSemver(j.minPlugin)) return fail('minPlugin is not a version');
   if (compareSemver(j.minPlugin, rel.version) > 0) return fail('minPlugin is newer than the release itself');
-  return { minPlugin: j.minPlugin };
+  let minPluginProtocol: number | null = null;
+  if (j.minPluginProtocol !== undefined) {
+    if (!Number.isSafeInteger(j.minPluginProtocol) || j.minPluginProtocol < 0) return fail('minPluginProtocol is not a whole number');
+    minPluginProtocol = j.minPluginProtocol;
+  }
+  return { minPlugin: j.minPlugin, minPluginProtocol };
 }
 
 // SHA256SUMS.txt, trusted only after its signature verified: not one line of it
@@ -866,11 +918,16 @@ export interface UpdateState {
   // verified against SHA256SUMS.txt). null/absent = unknown: the release has no
   // verifiable compat.json, so it is neither signalled nor installable.
   minPlugin?: string | null;
+  // The oldest plugin protocol it works with (compat.json minPluginProtocol); null =
+  // not named, the minPlugin version rule decides.
+  minPluginProtocol?: number | null;
   compatError?: string | null;
-  // Set when the latest release's SHA256SUMS.txt.sig is missing or does not verify
-  // against the pinned release key: the release is then neither signalled nor
-  // installable, and no flag overrides that. Implies minPlugin null.
+  // Set when the latest release fails a trust check (isTrustFailure): its
+  // SHA256SUMS.txt.sig is missing or does not verify against the pinned release key,
+  // or its signed compat.json is for another flavour. The release is then neither
+  // signalled nor installable, and no flag overrides that. Implies minPlugin null.
   signatureError?: string | null;
+  trustCode?: string | null;  // the UpdateError code behind signatureError (signature_* | flavour_mismatch)
   error?: string;             // set when the latest attempt failed (state is carried over)
 }
 
@@ -888,6 +945,7 @@ export function resetUpdateState(): void { state = null; noticeMemo.clear(); las
 function setState(next: UpdateState) {
   const changed = !state || state.available !== next.available || state.latest !== next.latest
     || (state.minPlugin ?? null) !== (next.minPlugin ?? null)
+    || (state.minPluginProtocol ?? null) !== (next.minPluginProtocol ?? null)
     || (state.signatureError ?? null) !== (next.signatureError ?? null);
   state = next;
   if (changed) {
@@ -910,6 +968,7 @@ function writeCache(s: UpdateState) {
     writeFileSync(cachePath(), JSON.stringify({
       current: s.current, latest: s.latest, available: s.available, checkedAt: s.checkedAt,
       headline: s.headline ?? null, notes: s.notes ?? null, minPlugin: s.minPlugin ?? null,
+      minPluginProtocol: s.minPlugin ? (s.minPluginProtocol ?? null) : null,
       // minPlugin is only ever set after a verified signature; an older bridge's cache lacks this flag and is not believed
       signed: !!s.minPlugin,
       // the notice throttle lives in the same file: carry it over
@@ -931,6 +990,7 @@ export function readCache(): UpdateState | null {
     headline: typeof j.headline === 'string' ? j.headline : null,
     notes: typeof j.notes === 'string' ? j.notes : null,
     minPlugin: isSemver(j.minPlugin) && j.signed === true ? j.minPlugin : null,
+    minPluginProtocol: isSemver(j.minPlugin) && j.signed === true && Number.isSafeInteger(j.minPluginProtocol) && j.minPluginProtocol >= 0 ? j.minPluginProtocol : null,
   };
 }
 
@@ -964,13 +1024,15 @@ export function claimNotice(version: string, now: number = Date.now()): boolean 
 async function stateFromRelease(r: Release): Promise<UpdateState> {
   const available = compareSemver(r.version, BRIDGE_VERSION) > 0;
   let minPlugin: string | null = null;
+  let minPluginProtocol: number | null = null;
   let compatError: string | null = null;
   let signatureError: string | null = null;
+  let trustCode: string | null = null;
   if (available) {
-    try { minPlugin = (await fetchCompat(r, await fetchSums(r))).minPlugin; }
+    try { ({ minPlugin, minPluginProtocol } = await fetchCompat(r, await fetchSums(r))); }
     catch (err) {
       const msg = (err as Error).message;
-      if (err instanceof UpdateError && isSignatureCode(err.code)) signatureError = msg; else compatError = msg;
+      if (err instanceof UpdateError && isTrustFailure(err.code)) { signatureError = msg; trustCode = err.code!; } else compatError = msg;
       logErr(`update: ${r.version} will not be offered: ${msg}`);
     }
   }
@@ -982,8 +1044,10 @@ async function stateFromRelease(r: Release): Promise<UpdateState> {
     headline: r.headline || null,
     notes: r.notes || null,
     minPlugin,
+    minPluginProtocol,
     compatError,
     signatureError,
+    trustCode,
   };
 }
 
@@ -1009,8 +1073,10 @@ export async function checkForUpdate(api: string = releasesApi()): Promise<Updat
       headline: state?.headline ?? null,
       notes: state?.notes ?? null,
       minPlugin: state?.minPlugin ?? null,
+      minPluginProtocol: state?.minPluginProtocol ?? null,
       compatError: state?.compatError ?? null,
       signatureError: state?.signatureError ?? null,
+      trustCode: state?.trustCode ?? null,
       error: msg,
     };
   }
@@ -1190,27 +1256,33 @@ export async function installUpdate(o: InstallOptions): Promise<InstallResult> {
 
     // The signature first: an unsigned or wrongly signed release is refused before
     // anything else about it is believed, and --force does not change that.
-    let sums: Map<string, string>;
-    try { sums = await fetchSums(rel); }
-    catch (err) {
-      if (err instanceof UpdateError && isSignatureCode(err.code)) {
+    const refuseTrust = (err: unknown): never => {
+      if (err instanceof UpdateError && isTrustFailure(err.code)) {
         setState({
           current: BRIDGE_VERSION, latest: rel.version, available, checkedAt: new Date().toISOString(),
-          headline: rel.headline || null, notes: rel.notes || null, minPlugin: null, compatError: null, signatureError: err.message,
+          headline: rel.headline || null, notes: rel.notes || null, minPlugin: null, compatError: null, signatureError: err.message, trustCode: err.code,
         });
       }
       throw err;
-    }
+    };
+    let sums: Map<string, string>;
+    try { sums = await fetchSums(rel); }
+    catch (err) { return refuseTrust(err); }
 
     // compat.json: verified, or the release is not installable (CLI --force excepted).
+    // Its flavour claim is a trust check like the signature: never overridden.
     let minPlugin: string | null = null;
+    let minPluginProtocol: number | null = null;
     let compatError: string | null = null;
-    try { minPlugin = (await fetchCompat(rel, sums)).minPlugin; }
-    catch (err) { compatError = (err as Error).message; }
+    try { ({ minPlugin, minPluginProtocol } = await fetchCompat(rel, sums)); }
+    catch (err) {
+      if (err instanceof UpdateError && isTrustFailure(err.code)) return refuseTrust(err);
+      compatError = (err as Error).message;
+    }
     // Keep the shared state (and with it the strip / notices) honest.
     setState({
       current: BRIDGE_VERSION, latest: rel.version, available, checkedAt: new Date().toISOString(),
-      headline: rel.headline || null, notes: rel.notes || null, minPlugin, compatError, signatureError: null,
+      headline: rel.headline || null, notes: rel.notes || null, minPlugin, minPluginProtocol, compatError, signatureError: null,
     });
 
     if (o.version !== rel.version) {
@@ -1221,10 +1293,15 @@ export async function installUpdate(o: InstallOptions): Promise<InstallResult> {
     let staleWindows: string[] | undefined;
     if (!minPlugin) {
       if (!o.force) throw new UpdateError(compatError ?? `release ${rel.version} has no verifiable compatibility info`, 'compat_unverified');
+      // Without a verified compat.json there is no flavour claim, and an absent claim is the
+      // public flavour's: --force may skip the plugin check, never install another flavour's release.
+      if (FLAVOUR.slug !== UNCLAIMED_FLAVOUR) {
+        throw new UpdateError(`${compatError}. This ${FLAVOUR.displayName} build installs only releases whose signed compat.json names it, and --force does not override that.`, 'flavour_mismatch');
+      }
       compatWarning = `WARNING: ${compatError}. Installing anyway because of --force: nothing checked that your Figma plugin works with ${rel.version}.`;
       logErr(`update: ${compatWarning}`);
     } else {
-      const verdict = checkPluginCompat(minPlugin, rel.version, o.plugins);
+      const verdict = checkPluginCompat(minPlugin, rel.version, o.plugins, minPluginProtocol);
       if (verdict.kind === 'incompatible') return { status: 'incompatible_plugin', from: BRIDGE_VERSION, to: rel.version, reason: verdict.reason };
       if (verdict.kind === 'ok' && verdict.stale) staleWindows = verdict.stale;
       if (verdict.kind === 'unverifiable' && !(o.acceptUnverified || o.force)) {
@@ -1371,6 +1448,9 @@ export function readDaemonPlugins(): PluginInfo[] | null {
       wsReady: p?.wsReady !== false,
       hello: p?.hello !== false,
       minBridge: typeof p?.minBridge === 'string' ? p.minBridge : null,
+      // only from a daemon whose plugins report them (absent = the version rule)
+      ...(Number.isSafeInteger(p?.protocol) ? { protocol: p.protocol } : {}),
+      ...(Number.isSafeInteger(p?.minBridgeProtocol) ? { minBridgeProtocol: p.minBridgeProtocol } : {}),
     }));
   } catch { return null; }
 }
@@ -1414,7 +1494,7 @@ export function stopRunningDaemon(): { stopped: boolean; note: string } {
 //   {type:'update_result', status, from?, to?, restart?, next?, code?, message?, latest?}
 // (status 'updated' | 'up_to_date' | 'already_installing' | 'clone_install' |
 // 'error'; on 'error' `code` is version_changed | incompatible_plugin |
-// plugins_unverifiable | compat_unverified | signature_missing | signature_invalid | selftest_failed | version_required |
+// plugins_unverifiable | compat_unverified | signature_missing | signature_invalid | flavour_mismatch | selftest_failed | version_required |
 // origin | install_failed). Older plugins ignore all of this.
 // The click is for the plugin-copy refresh when its version is the installed plugin's, no bridge
 // update has that version, and an imported copy really is behind.
@@ -1441,7 +1521,7 @@ export function wireUpdateToBridge(bridge: PluginBridge): () => void {
     const eligible = (sessionId: string) => {
       if (!s?.minPlugin || !s.latest) return false;
       const p = plugins.find((x) => x.sessionId === sessionId);
-      return !!p && connectedPlugins([p]).length === 1 && pluginIncompatibility(s.minPlugin, s.latest, p) === null;
+      return !!p && connectedPlugins([p]).length === 1 && pluginIncompatibility(s.minPlugin, s.latest, p, s.minPluginProtocol) === null;
     };
     // No bridge update to offer, but an imported plugin copy is behind the installed one: the same
     // purple strip offers to refresh it (one click). Only windows older than the installed plugin are told.
@@ -1510,7 +1590,7 @@ export function wireUpdateToBridge(bridge: PluginBridge): () => void {
       let early: Record<string, unknown> | null = null;
       if (ver === LATEST_REQUEST) {
         const me = pluginInfos(bridge).find((x) => x.sessionId === e.sessionId);
-        if (!me?.minBridge || !isSemver(me.minBridge) || compareSemver(me.minBridge, BRIDGE_VERSION) <= 0) {
+        if (!me || !needsNewerBridge(me)) {
           early = { type: 'update_result', status: 'error', code: 'version_required', message: 'only a plugin that needs a newer bridge can ask for the latest release; reload the plugin in Figma and try again' };
         } else if (updatesDisabled()) {
           early = { type: 'update_result', status: 'error', code: 'install_failed', message: 'automatic update checks are off (GRIP_NO_UPDATE_CHECK); update the bridge yourself' };
@@ -1539,7 +1619,7 @@ export function wireUpdateToBridge(bridge: PluginBridge): () => void {
         // The click comes from ONE window: that window's plugin must be compatible.
         const me = plugins.find((x) => x.sessionId === e.sessionId);
         const s0 = getUpdateState();
-        const why = me && s0?.minPlugin && s0.latest ? pluginIncompatibility(s0.minPlugin, s0.latest, me) : null;
+        const why = me && s0?.minPlugin && s0.latest ? pluginIncompatibility(s0.minPlugin, s0.latest, me, s0.minPluginProtocol) : null;
         if (why) {
           bridge.sendTo(e.sessionId, { type: 'update_result', status: 'error', code: 'incompatible_plugin', message: why });
           bridge.pushUpdate(e.sessionId, true);

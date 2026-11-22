@@ -5067,6 +5067,14 @@ const PLUGIN_VERSION = '0.9.6';
 // older bridges lack.
 const MIN_BRIDGE_VERSION = '0.8.0';
 
+// The wire protocol integer this plugin speaks, and the oldest bridge protocol it
+// works with. Both go in `hello`; the bridge's own PROTOCOL_VERSION arrives in its
+// welcome (bridge counterparts: PROTOCOL_VERSION / MIN_PLUGIN_PROTOCOL in
+// src/bridge/src/types.ts). A bridge whose welcome has no protocol is judged by
+// MIN_BRIDGE_VERSION alone. Raise only when the bridge <-> plugin contract changes.
+const PROTOCOL_VERSION = 1;
+const MIN_BRIDGE_PROTOCOL = 1;
+
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
 // if two builds share a number). 'nodeBudget' = bounded serialize is live.
@@ -5140,6 +5148,8 @@ function sendHello() {
     kind: 'hello',
     version: PLUGIN_VERSION,
     minBridge: MIN_BRIDGE_VERSION,
+    protocol: PROTOCOL_VERSION,
+    minBridgeProtocol: MIN_BRIDGE_PROTOCOL,
     capabilities: PLUGIN_CAPABILITIES,
     fileKey: figma.fileKey ?? figma.root.id,
     ...(uid ? { fileUid: uid } : {}),

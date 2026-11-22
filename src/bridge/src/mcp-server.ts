@@ -814,8 +814,9 @@ function updateSummary(s: UpdateState | null = getUpdateState(), plugins: Plugin
     available: s?.available ?? false,
     checkedAt: s?.checkedAt ?? null,
     minPlugin: s?.minPlugin ?? null,
-    // The latest release's SHA256SUMS.txt.sig is missing or does not verify against the pinned release key:
-    // it is not offered and cannot be installed (nothing overrides this).
+    // The latest release failed a trust check (isTrustFailure): its SHA256SUMS.txt.sig is missing or does not
+    // verify against the pinned release key, or its signed compat.json is for another flavour. It is not offered
+    // and cannot be installed (nothing overrides this).
     ...(s?.signatureError ? { signatureError: s.signatureError } : {}),
     signalled: sig.signal && !updatesDisabled(),
     ...(sig.blockedReason ? { blockedReason: sig.blockedReason } : {}),

@@ -17,6 +17,18 @@ export const BRIDGE_VERSION = '0.9.6';
 // tool error for just those tools (mcp-server.ts), so everything else keeps working.
 export const MIN_PLUGIN_VERSION = '0.6.0';
 
+// The wire protocol, as one integer that only goes up when the bridge <-> plugin
+// contract changes in a way the other side must know about (versions alone cannot
+// say that: a flavour's builds can carry any version number). The bridge sends
+// PROTOCOL_VERSION in its welcome; the plugin sends its own in hello (src/plugin/code.ts
+// PROTOCOL_VERSION / MIN_BRIDGE_PROTOCOL). compat.json carries both integers below
+// (scripts/package-release.mjs reads them from these lines). A plugin whose hello
+// has no `protocol`, or a compat.json without `minPluginProtocol`, is judged by the
+// MIN_PLUGIN_VERSION rule instead.
+export const PROTOCOL_VERSION = 1;
+// The oldest plugin protocol this bridge works with (never above PROTOCOL_VERSION).
+export const MIN_PLUGIN_PROTOCOL = 1;
+
 export interface WSRequest {
   id: string;
   method: string;
@@ -39,6 +51,10 @@ export interface WSHello {
   version?: string;
   // The oldest bridge this plugin works with (informational; plugin 0.8.0+).
   minBridge?: string;
+  // Protocol integers (see PROTOCOL_VERSION): what this plugin speaks, and the
+  // oldest bridge protocol it works with. Absent in plugins that predate them.
+  protocol?: number;
+  minBridgeProtocol?: number;
   capabilities?: string[];
   // Build flavour of the plugin (absent: a plugin that predates flavours, the public 'grip').
   flavour?: string;

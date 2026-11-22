@@ -10,14 +10,17 @@
 // connected. A KNOWN-incompatible plugin always refuses. When no plugin can be
 // checked it says so and needs an explicit --yes (or --force, or a typed "y").
 // A release without a verifiable compat.json is not installed unless --force.
-// A release whose signature (SHA256SUMS.txt.sig) is missing or invalid is never
-// installed: --force does not override that.
+// A release whose signature (SHA256SUMS.txt.sig) is missing or invalid, or whose
+// signed compat.json is for another flavour, is never installed: --force does not
+// override that.
 
 import { createInterface } from 'node:readline';
 import { BRIDGE_VERSION } from './types.js';
 import { IDENTITY } from './identity.js';
+import { FLAVOUR } from './flavour.gen.js';
 import {
-  CLONE_NEXT_STEPS, checkForUpdate, checkPluginCompat, gripHome, installUpdate, readDaemonPlugins, readInstallRecord, releasesApi,
+  CLONE_NEXT_STEPS, checkForUpdate, checkPluginCompat, gripHome, installUpdate, isTrustFailure, readDaemonPlugins, readInstallRecord, releasesApi,
+  UNCLAIMED_FLAVOUR,
   rollbackBridge, stopRunningDaemon,
 } from './update.js';
 
@@ -78,13 +81,14 @@ export async function runUpdateCli(argv: string[]): Promise<number> {
   const plugins = readDaemonPlugins();
   let unverifiable = false;
   if (s.signatureError) {
+    const what = s.trustCode === 'flavour_mismatch' ? 'a flavour mismatch' : 'a signature failure';
     out(`Not installing: ${s.signatureError}`);
-    out(force ? '--force does not override a signature failure.' : 'Nothing overrides a signature failure: do not install this release, and report it.');
+    out(force ? `--force does not override ${what}.` : `Nothing overrides ${what}: do not install this release, and report it.`);
     return checkOnly ? 0 : 1;
   }
   if (s.minPlugin) {
     out(`Grip ${s.latest} needs a Figma plugin >= ${s.minPlugin}.`);
-    const v = checkPluginCompat(s.minPlugin, s.latest!, plugins);
+    const v = checkPluginCompat(s.minPlugin, s.latest!, plugins, s.minPluginProtocol);
     if (v.kind === 'incompatible') {
       out(`Not installing: ${v.reason}.`);
       return checkOnly ? 0 : 1;
@@ -98,6 +102,11 @@ export async function runUpdateCli(argv: string[]): Promise<number> {
       out(`Could not verify your plugin: ${plugins === null ? 'no running Grip bridge to ask (or one older than 0.8.0)' : v.reason}.`);
       out('To have it checked, open the Grip plugin in Figma (with the bridge running) and re-run. Otherwise confirm with --yes that your plugin is current.');
     }
+  } else if (FLAVOUR.slug !== UNCLAIMED_FLAVOUR) {
+    // No verified compat.json = no flavour claim, and an absent claim is the public flavour's.
+    out(`Not installing: ${s.latest} has no verified compatibility info (${s.compatError ?? 'compat.json missing'}), so nothing says it is a ${FLAVOUR.displayName} release.`);
+    out(force ? '--force does not override a flavour mismatch.' : 'Nothing overrides that: do not install this release.');
+    return checkOnly ? 0 : 1;
   } else {
     out(`WARNING: Grip ${s.latest} has no verified compatibility info (${s.compatError ?? 'compat.json missing'}).`);
     out(`It is not offered to agents or the plugin, and it is not installed${force ? ' ... except that --force was given: nothing will check that your plugin works with it.' : ' (--force overrides, at your own risk).'}`);
@@ -154,6 +163,8 @@ export async function runUpdateCli(argv: string[]): Promise<number> {
     return 0;
   } catch (err) {
     process.stderr.write(`Update failed: ${(err as Error).message}\n`);
+    const code = (err as { code?: string }).code;
+    if (force && isTrustFailure(code)) process.stderr.write(`--force does not override ${code === 'flavour_mismatch' ? 'a flavour mismatch' : 'a signature failure'}.\n`);
     return 1;
   }
 }

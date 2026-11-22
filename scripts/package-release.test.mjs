@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { inflateRawSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
-import { packageRelease, buildZip, crc32, checkLockstep, readLockstepVersions, readMinPluginVersion, buildCompat, PackageError } from './package-release.mjs';
+import { packageRelease, buildZip, crc32, checkLockstep, readLockstepVersions, readMinPluginVersion, readProtocolConstants, buildCompat, PackageError } from './package-release.mjs';
 import { REQUIRED_ASSETS, INSTALL_MARKER } from './release-gate.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -108,9 +108,11 @@ test('compat.json is generated from types.ts, and listed in SHA256SUMS.txt', () 
   const out = tmp('grip-pkg-');
   const r = packageRelease({ root: ROOT, out });
   const compat = JSON.parse(readFileSync(join(out, 'compat.json'), 'utf8'));
-  assert.deepEqual(Object.keys(compat), ['version', 'minPlugin']);
+  assert.deepEqual(Object.keys(compat), ['version', 'minPlugin', 'flavour', 'protocol', 'minPluginProtocol']);
   assert.equal(compat.version, r.version);
   assert.equal(compat.minPlugin, readMinPluginVersion(ROOT));
+  assert.equal(compat.flavour, JSON.parse(readFileSync(join(ROOT, 'flavour', 'flavour.json'), 'utf8')).slug);
+  assert.deepEqual(readProtocolConstants(ROOT), { protocol: compat.protocol, minPluginProtocol: compat.minPluginProtocol });
   assert.match(compat.minPlugin, /^\d+\.\d+\.\d+$/);
   assert.ok(readFileSync(join(out, 'compat.json'), 'utf8').endsWith('\n'));
   const sums = readFileSync(join(out, 'SHA256SUMS.txt'), 'utf8');
@@ -129,7 +131,27 @@ test('compat.json: refuses a missing or nonsensical MIN_PLUGIN_VERSION', () => {
   assert.throws(() => packageRelease({ root: r, out: tmp('grip-pkg-') }), /newer than this release/);
   writeFileSync(t, orig.replace(/MIN_PLUGIN_VERSION = '[^']+'/, "MIN_PLUGIN_VERSION = 'soon'"));
   assert.throws(() => packageRelease({ root: r, out: tmp('grip-pkg-') }), /not major\.minor\.patch/);
-  assert.deepEqual(JSON.parse(buildCompat(ROOT, '1.2.3')), { version: '1.2.3', minPlugin: readMinPluginVersion(ROOT) });
+  assert.deepEqual(JSON.parse(buildCompat(ROOT, '1.2.3')), { version: '1.2.3', minPlugin: readMinPluginVersion(ROOT), flavour: 'grip', protocol: 1, minPluginProtocol: 1 });
+});
+
+test('compat.json: the flavour claim and the protocol integers are derived, and required', () => {
+  assert.deepEqual(JSON.parse(buildCompat(ROOT, '1.2.3')), { version: '1.2.3', minPlugin: '0.6.0', flavour: 'grip', protocol: 1, minPluginProtocol: 1 });
+  const r = scratchRoot();
+  const t = join(r, 'src', 'bridge', 'src', 'types.ts');
+  const orig = readFileSync(t, 'utf8');
+  writeFileSync(t, orig.replace(/export const PROTOCOL_VERSION = \d+;/, ''));
+  assert.throws(() => buildCompat(r, '1.2.3'), (e) => e instanceof PackageError && /PROTOCOL_VERSION/.test(e.message));
+  writeFileSync(t, orig.replace(/export const MIN_PLUGIN_PROTOCOL = \d+;/, ''));
+  assert.throws(() => buildCompat(r, '1.2.3'), (e) => e instanceof PackageError && /MIN_PLUGIN_PROTOCOL/.test(e.message));
+  writeFileSync(t, orig.replace(/MIN_PLUGIN_PROTOCOL = \d+/, 'MIN_PLUGIN_PROTOCOL = 2'));
+  assert.throws(() => buildCompat(r, '1.2.3'), /MIN_PLUGIN_PROTOCOL 2 is newer than PROTOCOL_VERSION 1/);
+  writeFileSync(t, orig);
+  // the claim is the flavour file's slug (another flavour's release claims that flavour)
+  const f = join(r, 'flavour', 'flavour.json');
+  writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, 'utf8')), slug: 'acme' }));
+  assert.equal(JSON.parse(buildCompat(r, '1.2.3')).flavour, 'acme');
+  rmSync(join(r, 'flavour'), { recursive: true });
+  assert.throws(() => buildCompat(r, '1.2.3'), (e) => e instanceof PackageError && /flavour/.test(e.message));
 });
 
 test('grip-install.zip has the install layout, contents and modes', () => {
@@ -218,7 +240,7 @@ test('asset names agree with the updater (src/bridge/dist/update.js)', async (t)
 function scratchRoot() {
   const r = tmp('grip-root-');
   for (const rel of ['bridge/grip-bridge.mjs', 'bridge/install.mjs', 'bridge/THIRD-PARTY-NOTICES.txt', 'figma-plugin/manifest.json', 'figma-plugin/code.js', 'figma-plugin/ui.html',
-    'src/bridge/src/types.ts', 'src/bridge/package.json', 'src/plugin/package.json', 'src/plugin/code.ts']) {
+    'src/bridge/src/types.ts', 'src/bridge/package.json', 'src/plugin/package.json', 'src/plugin/code.ts', 'flavour/flavour.json']) {
     mkdirSync(join(r, dirname(rel)), { recursive: true });
     cpSync(join(ROOT, rel), join(r, rel));
   }

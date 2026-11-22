@@ -356,6 +356,50 @@ const CONNECTED_TITLE = 'Connected';
   }
 }
 
+// ------------------------------------------------------------ the protocol integer: a bridge below the plugin's MIN_BRIDGE_PROTOCOL is outdated
+{
+  const hello = (h, extra) => h.fromMain({ kind: 'hello', version: '0.9.6', minBridge: '0.8.0', protocol: 1, minBridgeProtocol: 1, capabilities: [], fileKey: 'k', fileName: 'f', currentPageId: '0:1', currentPageName: 'P', ...extra });
+  // welcome protocol 0, plugin needs 1: bridge-outdated even though the version rule is met
+  {
+    const h = harness();
+    const ws = h.ws();
+    ws.openWelcomed();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.9.6', protocol: 0 });
+    hello(h);
+    assert.ok(h.has('update') && h.has('connected'), `purple: ${h.classes()}`);
+    assert.strictEqual(h.title(), 'Bridge update needed. Click to update');
+    assert.strictEqual(ws.sent.at(-1).minBridgeProtocol, 1, 'the hello forwards the protocol fields');
+    assert.strictEqual(ws.sent.at(-1).protocol, 1);
+  }
+  // a welcome with no protocol (a bridge that predates it): the version rule alone, no nag
+  {
+    const h = harness();
+    const ws = h.ws();
+    ws.openWelcomed();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.9.6' });
+    hello(h);
+    assert.ok(h.has('connected') && !purple(h), `green: ${h.classes()}`);
+  }
+  // the same protocol: green
+  {
+    const h = harness();
+    const ws = h.ws();
+    ws.openWelcomed();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.9.6', protocol: 1 });
+    hello(h);
+    assert.ok(h.has('connected') && !purple(h));
+  }
+  // a plugin whose hello has no minBridgeProtocol (an older plugin): never outdated by protocol
+  {
+    const h = harness();
+    const ws = h.ws();
+    ws.openWelcomed();
+    ws.deliver({ kind: 'welcome', sessionId: 's1', bridgeVersion: '0.9.6', protocol: 0 });
+    hello(h, { minBridgeProtocol: undefined });
+    assert.ok(h.has('connected') && !purple(h));
+  }
+}
+
 // ------------------------------------------------------------ the click always asks a bridge that can hear it; only older bridges get the page
 {
   const hello = (h, minBridge) => h.fromMain({ kind: 'hello', version: '0.9.0', minBridge, capabilities: [], fileKey: 'k', fileName: 'f', currentPageId: '0:1', currentPageName: 'P' });

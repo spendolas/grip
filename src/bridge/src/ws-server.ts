@@ -6,7 +6,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type {
   BindingState, FileBind, ListedFileInfo, McpSession, PluginSessionInfo, WSEvent, WSHello, WSResponse,
 } from './types.js';
-import { BRIDGE_VERSION } from './types.js';
+import { BRIDGE_VERSION, PROTOCOL_VERSION } from './types.js';
 import { compareSemver, isSemver } from './update.js';
 import { authProof, newNonce, type PairingStore } from './pairing.js';
 import { FLAVOUR } from './flavour.gen.js';
@@ -114,6 +114,9 @@ interface Session {
   pluginVersion?: string;
   // Oldest bridge the plugin says it works with (hello.minBridge, plugin 0.8.0+).
   minBridge?: string;
+  // Protocol integers from the hello (absent: a plugin that predates them; see PROTOCOL_VERSION).
+  protocol?: number;
+  minBridgeProtocol?: number;
   capabilities?: string[];
   lastPong: number;
   pingTimer?: NodeJS.Timeout;
@@ -153,6 +156,12 @@ interface Session {
 // strip control characters (a newline would forge log lines) and bound the length.
 export function clip(v: unknown, max: number): string {
   return typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').slice(0, max) : '';
+}
+
+// A protocol integer from a peer (hello.protocol / hello.minBridgeProtocol): a whole
+// number 0..65535, else undefined (treated as absent: the version rule applies).
+export function protocolInt(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 0xffff ? v : undefined;
 }
 
 // Unauthenticated-peer limits: a page that opens sockets in a loop must not be able to
@@ -486,7 +495,7 @@ export class PluginBridge extends EventEmitter {
       // carrying file metadata. With pairing on, the welcome also carries the
       // challenge (see pairing.ts). `flavour` lets the plugin see which build it reached.
       ws.send(JSON.stringify({
-        kind: 'welcome', sessionId: id, bridgeVersion: BRIDGE_VERSION, flavour: this.flavour,
+        kind: 'welcome', sessionId: id, bridgeVersion: BRIDGE_VERSION, protocol: PROTOCOL_VERSION, flavour: this.flavour,
         ...(session.authNonce ? { nonce: session.authNonce, pairing: this.pairing?.enforced() ? 'enforced' : 'open' } : {}),
       }));
       // A peer that never says hello is not a plugin: do not keep its socket.
@@ -1880,6 +1889,8 @@ export class PluginBridge extends EventEmitter {
     sess.pluginVersion = ver || 'unknown';
     const minB = clip(hello.minBridge, 32);
     sess.minBridge = minB !== '' ? minB : undefined;
+    sess.protocol = protocolInt(hello.protocol);
+    sess.minBridgeProtocol = protocolInt(hello.minBridgeProtocol);
     sess.capabilities = Array.isArray(hello.capabilities)
       ? hello.capabilities.slice(0, 200).map((c) => clip(c, 64)).filter((c) => c !== '')
       : [];
@@ -1897,6 +1908,11 @@ export class PluginBridge extends EventEmitter {
     if (sess.minBridge && isSemver(sess.minBridge) && compareSemver(sess.minBridge, BRIDGE_VERSION) > 0) {
       process.stderr.write(
         `[grip] WARNING plugin ${sess.pluginVersion} in "${sess.fileName}" needs bridge >= ${sess.minBridge} but this is ${BRIDGE_VERSION}: the bridge is out of date, update it.\n`,
+      );
+    }
+    if (sess.minBridgeProtocol !== undefined && sess.minBridgeProtocol > PROTOCOL_VERSION) {
+      process.stderr.write(
+        `[grip] WARNING plugin ${sess.pluginVersion} in "${sess.fileName}" needs bridge protocol >= ${sess.minBridgeProtocol} but this bridge speaks ${PROTOCOL_VERSION}: the bridge is out of date, update it.\n`,
       );
     }
     this.noteHelloRename(sess, prevIdent, prevUid);
@@ -2135,6 +2151,8 @@ export class PluginBridge extends EventEmitter {
         currentPageName: s.currentPageName,
         pluginVersion: s.pluginVersion ?? 'unknown',
         minBridge: s.minBridge ?? null,
+        protocol: s.protocol ?? null,
+        minBridgeProtocol: s.minBridgeProtocol ?? null,
         // false until the plugin's hello arrives (version/file not known yet)
         hello: s.helloAt > 0,
         // pairing: this socket proved itself / queued in the reserved pool (its connect URL carried a valid ticket)

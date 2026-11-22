@@ -241,6 +241,7 @@ async function runDaemon(bridge: PluginBridge) {
         // plugin versions from here to check compatibility before installing.
         plugins: snap.plugins.map((p) => ({
           pluginVersion: p.pluginVersion, fileName: p.fileName, wsReady: p.wsReady, hello: p.hello, minBridge: p.minBridge,
+          protocol: p.protocol, minBridgeProtocol: p.minBridgeProtocol,
         })),
         pendingCount: snap.pendingCount,
       }, null, 2), { mode: 0o600 });
