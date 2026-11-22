@@ -35,6 +35,17 @@ rejects('str-ws', (f) => { f.wsPort = '7777'; }, 'wsPort');
 rejects('same-port', (f) => { f.httpPort = f.wsPort; }, 'httpPort');
 rejects('bad-slug', (f) => { f.slug = 'Bad Slug'; }, 'slug');
 rejects('extra', (f) => { f.bogusKey = 1; }, 'bogusKey');
+// names that reach AppleScript, plist XML, shell and paths: safe characters only
+for (const k of ['filePrefix', 'homeDirName', 'ipcName', 'launchLabel', 'daemonBundleId']) {
+  for (const [tag, bad] of [['quote', 'a"b'], ['squote', "a'b"], ['space', 'a b'], ['slash', 'a/b'], ['lt', 'a<b'], ['amp', 'a&b'], ['dollar', 'a$b'], ['backslash', 'a\\b'], ['newline', 'a\nb'], ['dotdot', '..'], ['dot', '.']]) {
+    rejects(`${k}-${tag}`, (f) => { f[k] = bad; }, k);
+  }
+}
+for (const [tag, bad] of [['quote', 'Grip "D"'], ['squote', "Grip's"], ['slash', 'a/b'], ['lt', 'a<b'], ['amp', 'a&b'], ['backslash', 'a\\b'], ['newline', 'a\nb'], ['dotdot', '..'], ['lead-space', ' Grip'], ['trail-space', 'Grip ']]) {
+  rejects(`daemonAppName-${tag}`, (f) => { f.daemonAppName = bad; }, 'daemonAppName');
+}
+// the allowed shapes still load
+assert.equal(loadFlavour(variant('ok-names', (f) => { f.daemonAppName = 'My App_2.0-x'; f.homeDirName = '.my_home-2'; f.launchLabel = 'com.x-y.z_1'; })).daemonAppName, 'My App_2.0-x');
 
 const outB = join(tmp, 'out', 'bridge.gen.ts');
 const outP = join(tmp, 'out', 'plugin.gen.ts');

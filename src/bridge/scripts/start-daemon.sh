@@ -64,5 +64,5 @@ else
 fi
 echo
 echo "Register grip by URL (replaces the stdio entry):"
-echo "  claude mcp remove -s user grip"
+echo "  claude mcp remove -s user ${F_MCP_NAME}"
 echo "  claude mcp add --transport http -s user ${F_MCP_NAME} http://127.0.0.1:${F_HTTP_PORT}/mcp"

@@ -27,6 +27,7 @@ const STRINGS = [
 ];
 const PORTS = ['wsPort', 'httpPort'];
 const BOOLS = ['lockOverrides'];
+const SAFE_NAMES = ['filePrefix', 'homeDirName', 'ipcName', 'launchLabel', 'daemonBundleId'];
 const FIELDS = ['slug', 'displayName', 'wsPort', 'httpPort', 'homeDirName', 'filePrefix', 'ipcName', 'mcpName', 'daemonAppName', 'daemonBundleId', 'launchLabel', 'pluginId', 'pluginName', 'releasesApi', 'installUrl', 'pagesUrl', 'lockOverrides'];
 
 export function loadFlavour(dir) {
@@ -56,6 +57,16 @@ export function loadFlavour(dir) {
   }
   if (raw.wsPort === raw.httpPort) throw new Error('flavour: field "httpPort" must differ from "wsPort"');
   if (!/^[a-z][a-z0-9-]{0,23}$/.test(raw.slug)) throw new Error('flavour: field "slug" must match ^[a-z][a-z0-9-]{0,23}$');
+  // These reach AppleScript, plist XML, shell scripts and file paths unescaped, so they
+  // are held to characters that are inert in all of them.
+  for (const k of SAFE_NAMES) {
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(raw[k]) || /^\.+$/.test(raw[k])) {
+      throw new Error(`flavour: field "${k}" may only contain letters, digits, ".", "-" and "_" (not only dots)`);
+    }
+  }
+  if (!/^[A-Za-z0-9._-](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9._-])?$/.test(raw.daemonAppName) || /^\.+$/.test(raw.daemonAppName)) {
+    throw new Error('flavour: field "daemonAppName" may only contain letters, digits, spaces, ".", "-" and "_" (no leading or trailing space, not only dots)');
+  }
   const out = {};
   for (const k of FIELDS) out[k] = raw[k];
   return out;
