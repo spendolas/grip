@@ -2,7 +2,7 @@
 // from this flavour's own daemon. Dry-run only: GRIP_DRYRUN=1 prints the plist and the
 // planned actions and runs no launchctl and no kill; HOME is a temp dir, lsof is a stub.
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -80,6 +80,49 @@ try {
   assert.equal(r.status, 0, r.stdout + r.stderr);
   for (const s of ['com.grip.bridge', '7777', '7778', '.grip-bridge.log']) assert.ok(r.stdout.includes(s), `public output lacks ${s}`);
   assert.match(r.stdout, /^kill 4242$/m);
+
+  // free_own_port itself (start-daemon.sh and install-loginitem.sh call it under
+  // `set -euo pipefail`): it must return 0 whatever holds the port, so the caller
+  // goes on, and stop only our own pid. `kill` is a builtin, so the harness turns the
+  // builtin off (enable -n) and a stub on PATH records each call instead.
+  writeFileSync(join(bin, 'kill'), ['#!/bin/sh', 'echo "kill $*" >> "$KILL_LOG"', 'exit 0', ''].join('\n'));
+  chmodSync(join(bin, 'kill'), 0o755);
+  const helper = resolve(here, '../scripts/_flavour.sh');
+  const freePort = (stubPid, statusPid) => {
+    const home = mkdtempSync(join(tmp, 'home-'));
+    const killLog = join(home, 'kill.log');
+    writeFileSync(killLog, '');
+    if (statusPid != null) writeFileSync(join(home, '.acme-bridge.status'), JSON.stringify({ pid: statusPid }));
+    const res = spawnSync('bash', ['-c', `set -euo pipefail; enable -n kill; . "$1"; free_own_port; echo "continued rc=$?"`, 'x', helper], {
+      encoding: 'utf8',
+      env: { PATH: `${bin}:${process.env.PATH}`, HOME: home, GRIP_FLAVOUR_FILE: acmeFlavour, STUB_LSOF_PID: stubPid ?? '', KILL_LOG: killLog },
+    });
+    return { ...res, kills: readFileSync(killLog, 'utf8') };
+  };
+  // a foreign listener only (our status file names another pid): returns 0, kills nothing, says so
+  let f = freePort('4343', 4242);
+  assert.equal(f.status, 0, f.stdout + f.stderr);
+  assert.match(f.stdout, /continued rc=0/);
+  assert.equal(f.kills, '', 'must not signal a foreign pid');
+  assert.match(f.stderr, /port 7877 is held by another program \(pid 4343\), not stopping it/);
+  // a foreign listener and no status file at all: same
+  f = freePort('4343', null);
+  assert.equal(f.status, 0, f.stdout + f.stderr);
+  assert.match(f.stdout, /continued rc=0/);
+  assert.equal(f.kills, '');
+  assert.match(f.stderr, /held by another program \(pid 4343\)/);
+  // our own pid holds the port: it is stopped, and the caller goes on
+  f = freePort('4242', 4242);
+  assert.equal(f.status, 0, f.stdout + f.stderr);
+  assert.match(f.stdout, /continued rc=0/);
+  assert.equal(f.kills, 'kill 4242\n');
+  assert.ok(!/held by another program/.test(f.stderr));
+  // nobody on the port
+  f = freePort('', 4242);
+  assert.equal(f.status, 0, f.stdout + f.stderr);
+  assert.match(f.stdout, /continued rc=0/);
+  assert.equal(f.kills, '');
+  assert.equal(f.stderr, '');
   console.log('launchd-render: ok');
 } finally {
   rmSync(tmp, { recursive: true, force: true });

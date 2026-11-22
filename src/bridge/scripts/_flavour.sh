@@ -25,12 +25,18 @@ own_pid() {
   ' "$HOME/${F_PREFIX}.status" 2>/dev/null || true
 }
 
-# Stop our own daemon if it holds the WS port; leave any other holder alone.
+# Stop our own daemon if it holds the WS port; leave any other holder alone (and
+# say so on stderr). Always returns 0: the callers run under `set -e`, and a port
+# held by someone else is not a reason to stop the script.
 free_own_port() {
   local own pid
   own="$(own_pid)"
-  [[ -z "$own" ]] && return 0
   for pid in $(lsof -tiTCP:"${F_WS_PORT}" -sTCP:LISTEN 2>/dev/null || true); do
-    [[ "$pid" == "$own" ]] && { kill "$pid" 2>/dev/null || true; }
+    if [[ -n "$own" && "$pid" == "$own" ]]; then
+      kill "$pid" 2>/dev/null || true
+    else
+      echo "port ${F_WS_PORT} is held by another program (pid $pid), not stopping it" >&2
+    fi
   done
+  return 0
 }
