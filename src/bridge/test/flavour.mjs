@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, symlinkSync } from 'node:fs';
+import { generateKeyPairSync } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +35,12 @@ rejects('missing-ws', (f) => { delete f.wsPort; }, 'wsPort');
 rejects('str-ws', (f) => { f.wsPort = '7777'; }, 'wsPort');
 rejects('same-port', (f) => { f.httpPort = f.wsPort; }, 'httpPort');
 rejects('bad-slug', (f) => { f.slug = 'Bad Slug'; }, 'slug');
+rejects('missing-keys', (f) => { delete f.releaseKeys; }, 'releaseKeys');
+rejects('empty-keys', (f) => { f.releaseKeys = []; }, 'releaseKeys');
+rejects('keys-not-array', (f) => { f.releaseKeys = 'x'; }, 'releaseKeys');
+rejects('key-not-pem', (f) => { f.releaseKeys = ['not a pem']; }, 'releaseKeys');
+rejects('key-rsa', (f) => { f.releaseKeys = [generateKeyPairSync('rsa', { modulusLength: 2048 }).publicKey.export({ type: 'spki', format: 'pem' })]; }, 'releaseKeys');
+assert.equal(loadFlavour(altDir).releaseKeys.length, 1);
 rejects('extra', (f) => { f.bogusKey = 1; }, 'bogusKey');
 // names that reach AppleScript, plist XML, shell and paths: safe characters only
 for (const k of ['filePrefix', 'homeDirName', 'ipcName', 'launchLabel', 'daemonBundleId']) {

@@ -25,15 +25,11 @@ MCowBQYDK2VwAyEAYzUJAvV8Ujs7QnT17B1NgfGdwdYhuANZVsIJJncasD0=
 `;
 const SUMS = `${'a'.repeat(64)}  compat.json\n${'b'.repeat(64)}  grip-bridge.mjs\n`;
 
-// A scratch repo root whose update.ts pins `pems`, and a dist dir holding SUMS.
+// A scratch repo root whose flavour/flavour.json pins `pems`, and a dist dir holding SUMS.
 function scratch(pems = [TEST_PUB]) {
   const root = tmp('grip-sign-root-');
-  mkdirSync(join(root, 'src', 'bridge', 'src'), { recursive: true });
-  const keys = pems.map((p) => '  `' + p + '`,').join('\n');
-  writeFileSync(join(root, 'src', 'bridge', 'src', 'update.ts'),
-    '// mentions RELEASE_PUBLIC_KEYS in a comment first, as the real file does\n'
-    + `export const RELEASE_PUBLIC_KEYS: readonly string[] = [\n${keys}\n];\n`
-    + 'const other = `-----BEGIN PUBLIC KEY-----\nnot a pinned key\n-----END PUBLIC KEY-----`;\n');
+  mkdirSync(join(root, 'flavour'), { recursive: true });
+  writeFileSync(join(root, 'flavour', 'flavour.json'), JSON.stringify({ slug: 'test', releaseKeys: pems }));
   const dir = tmp('grip-sign-dist-');
   writeFileSync(join(dir, SUMS_NAME), SUMS);
   return { root, dir };
@@ -92,12 +88,20 @@ test('fails when there is nothing to sign, or no pinned key to check against', (
   const dir = tmp('grip-sign-dist-');
   writeFileSync(join(dir, SUMS_NAME), SUMS);
   assert.throws(() => signSums({ root: bare, dir, keyPem: TEST_PRIV }), /pinned release public key/);
-  mkdirSync(join(bare, 'src', 'bridge', 'src'), { recursive: true });
-  writeFileSync(join(bare, 'src', 'bridge', 'src', 'update.ts'), 'export const RELEASE_PUBLIC_KEYS: readonly string[] = [\n];\n');
-  assert.throws(() => signSums({ root: bare, dir, keyPem: TEST_PRIV }), /holds no public key/);
+  mkdirSync(join(bare, 'flavour'), { recursive: true });
+  const flavourFile = join(bare, 'flavour', 'flavour.json');
+  for (const bad of [{ releaseKeys: [] }, {}, { releaseKeys: 'x' }, { releaseKeys: ['not a pem'] }]) {
+    writeFileSync(flavourFile, JSON.stringify(bad));
+    assert.throws(() => signSums({ root: bare, dir, keyPem: TEST_PRIV }), (e) => e instanceof SignError && /flavour\.json/.test(e.message), JSON.stringify(bad));
+  }
+  writeFileSync(flavourFile, '{ not json');
+  assert.throws(() => signSums({ root: bare, dir, keyPem: TEST_PRIV }), SignError);
+  const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 }).publicKey.export({ type: 'spki', format: 'pem' });
+  writeFileSync(flavourFile, JSON.stringify({ releaseKeys: [rsa] }));
+  assert.throws(() => signSums({ root: bare, dir, keyPem: TEST_PRIV }), /not an Ed25519/);
 });
 
-test('the pinned keys are read from the real bridge source, and are Ed25519', () => {
+test('the pinned keys are read from the real flavour file, and are Ed25519', () => {
   const keys = readPinnedKeys(ROOT);
   assert.ok(keys.length >= 1);
   for (const k of keys) assert.equal(k.asymmetricKeyType, 'ed25519');

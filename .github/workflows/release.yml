@@ -162,7 +162,7 @@ jobs:
 
       # Ed25519 signature over SHA256SUMS.txt (dist/SHA256SUMS.txt.sig). The
       # bridge only trusts a release whose signature verifies against the public
-      # key pinned in src/bridge/src/update.ts, so a compromised repo or release
+      # key pinned in flavour/flavour.json, so a compromised repo or release
       # alone cannot make anyone install code. The private key (PKCS8 PEM) is the
       # repository secret GRIP_RELEASE_SIGNING_KEY; the script also checks the
       # signature against the pinned key, so a wrong secret fails here. A real

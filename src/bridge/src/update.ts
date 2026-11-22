@@ -28,7 +28,7 @@
 // exact bytes of SHA256SUMS.txt, made in CI with a key that lives only in a
 // repository secret. The bridge trusts the sums (and so every file and
 // compat.json they vouch for) only when that signature verifies against
-// RELEASE_PUBLIC_KEYS, which are pinned in this file. A missing or invalid
+// RELEASE_PUBLIC_KEYS, which the flavour file pins. A missing or invalid
 // signature fails closed and NOTHING, not even --force, bypasses it.
 //
 // The Figma plugin's networkAccess is localhost-only, so the plugin never
@@ -158,17 +158,13 @@ export function hostAllowed(u: URL): boolean {
 // ---------- release signature ----------
 
 // The Ed25519 public keys (SPKI PEM) whose signature over SHA256SUMS.txt makes a
-// release trustworthy. An ARRAY so a key can be rotated: ship a bridge that
-// trusts the old and the new key, then sign with the new one. The matching
+// release trustworthy. Pinned in the flavour file (flavour/flavour.json releaseKeys),
+// so each flavour trusts only its own. An ARRAY so a key can be rotated: ship a bridge
+// that trusts the old and the new key, then sign with the new one. The matching
 // private key lives only in the GRIP_RELEASE_SIGNING_KEY repository secret
 // (see .github/workflows/release.yml, scripts/sign-release.mjs). Public keys are
 // not secrets, so scripts/bundle-hygiene.mjs lets this one through.
-export const RELEASE_PUBLIC_KEYS: readonly string[] = [
-  `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEASF7Su4ZqXdmFbDJvwm56w5wBAqqhQ8BcLDwJlGjTneo=
------END PUBLIC KEY-----
-`,
-];
+export const RELEASE_PUBLIC_KEYS: readonly string[] = FLAVOUR.releaseKeys;
 
 // GRIP_RELEASE_PUBKEY (PEM text) REPLACES the pinned list, but ONLY in a test run
 // (GRIP_TEST=1): tests sign fake releases with their own key. Without the flag it is

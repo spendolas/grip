@@ -11,13 +11,12 @@
 //     only matching pairs register, the others are closed 4409.
 // (c) makeIdentity for both flavours: no shared path or port.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
-import { build } from 'esbuild';
+import { flavourBundler } from './_bundle.mjs';
 import { WebSocket } from 'ws';
 import { PluginBridge } from '../dist/ws-server.js';
 import { makeIdentity } from '../dist/identity.js';
@@ -32,27 +31,13 @@ const alt = JSON.parse(readFileSync(join(altDir, 'flavour.json'), 'utf8'));
 const tmp = mkdtempSync(join(tmpdir(), 'flavour-isolation-'));
 
 // ---- (a) bundle with the fixture flavour
-const genFile = join(tmp, 'flavour.gen.ts');
-execFileSync('node', [join(repo, 'scripts', 'gen-flavour.mjs'), '--dir', altDir,
-  '--out-bridge', genFile, '--out-plugin', join(tmp, 'plugin.gen.ts'), '--out-plugin-dir', join(tmp, 'figma-plugin')], { stdio: 'pipe' });
+const { genFile, bundle } = flavourBundler(altDir, tmp);
 assert.match(readFileSync(genFile, 'utf8'), /slug: 'acme'/);
 
-const swapFlavour = {
-  name: 'swap-flavour',
-  setup(b) {
-    b.onResolve({ filter: /^\.\/flavour\.gen(\.js)?$/ }, () => ({ path: genFile }));
-  },
-};
 const FORBIDDEN = ['7777', '7778', '.grip-bridge', 'Grip Daemon', 'com.grip.', '1682868744739448629', 'spendolas', '~/.grip'];
 const leaks = [];
 for (const entry of ['src/index.ts', 'src/install.ts']) {
-  const r = await build({
-    entryPoints: [join(bridgeDir, entry)],
-    bundle: true, platform: 'node', target: 'node18', format: 'esm',
-    write: false, logLevel: 'silent',
-    plugins: [swapFlavour],
-  });
-  const text = r.outputFiles[0].text;
+  const text = await bundle(entry);
   assert.ok(text.includes("slug: \"acme\"") || text.includes("slug: 'acme'"), `${entry}: bundle carries the fixture flavour`);
   const lines = text.split('\n');
   for (const s of FORBIDDEN) {
