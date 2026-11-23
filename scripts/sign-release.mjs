@@ -22,7 +22,7 @@ import { createHash, createPrivateKey, createPublicKey, sign, verify } from 'nod
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isSinglePublicPem } from './gen-flavour.mjs';
+import { flavourFile, isSinglePublicPem } from './gen-flavour.mjs';
 import { PAYLOAD_NAME, verifyEnvelope } from './payload.mjs';
 
 export class SignError extends Error {}
@@ -34,7 +34,7 @@ export const KEY_ENV = 'GRIP_RELEASE_SIGNING_KEY';
 // The pinned public key(s): the releaseKeys array in flavour/flavour.json (the single
 // source of truth, no second copy; the bridge reads the same list via flavour.gen.ts).
 export function readPinnedKeys(root) {
-  const file = join(root, 'flavour', 'flavour.json');
+  const file = flavourFile(root);
   let raw;
   try { raw = JSON.parse(readFileSync(file, 'utf8')); }
   catch { throw new SignError(`cannot read ${file} to find the pinned release public key(s)`); }
@@ -76,8 +76,9 @@ export function signSums({ root, dir, keyPem }) {
     throw new SignError(`the signature made with ${KEY_ENV} does not verify against the public key(s) pinned in flavour/flavour.json: the secret is the wrong key`);
   }
   // ---- payload loader begin (phase 3): a loader flavour's release must carry a SIGNED payload ----
-  let flavour = {};
-  try { flavour = JSON.parse(readFileSync(join(root, 'flavour', 'flavour.json'), 'utf8')); } catch { /* readPinnedKeys already succeeded */ }
+  let flavour;
+  try { flavour = JSON.parse(readFileSync(flavourFile(root), 'utf8')); }
+  catch { throw new SignError(`cannot read ${flavourFile(root)} to tell whether this flavour ships a payload`); }   // fail closed
   if (flavour.payloadLoader === true) {
     let env;
     try { env = JSON.parse(readFileSync(join(dir, PAYLOAD_NAME), 'utf8')); }

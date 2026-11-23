@@ -3,7 +3,7 @@
 // Needs `npm run build` first for the public cases (the root `npm test` builds).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, cpSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, cpSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createHash, createPublicKey, generateKeyPairSync } from 'node:crypto';
@@ -216,4 +216,45 @@ test('release.yml smoke test checks payload.json for a loader flavour', () => {
   const smoke = yml.slice(yml.indexOf('- name: Smoke test the packaged install'), yml.indexOf('- name: Sign SHA256SUMS.txt'));
   assert.match(smoke, /payloadLoader === true/);
   assert.ok(smoke.includes('test -f "$S/home/$HD/figma-plugin/payload.json"'));
+});
+
+// ---- fail closed and GRIP_FLAVOUR_DIR ----
+
+test('package-release: an unreadable flavour file is an error, not "public"', () => {
+  const r = scratchRoot();
+  writeFileSync(join(r, 'flavour', 'flavour.json'), '{broken');
+  assert.throws(() => packageRelease({ root: r, out: tmp('grip-pkg-') }), PackageError);
+  const r2 = scratchRoot();
+  rmSync(join(r2, 'flavour', 'flavour.json'));
+  assert.throws(() => packageRelease({ root: r2, out: tmp('grip-pkg-') }), PackageError);
+});
+
+test('package-release and sign-release honour GRIP_FLAVOUR_DIR like gen-flavour', () => {
+  const r = loaderRoot();                                  // flavour/ in the repo root is the acme loader ...
+  const pubDir = tmp('grip-fdir-');
+  writeFileSync(join(pubDir, 'flavour.json'), readFileSync(join(ROOT, 'flavour', 'flavour.json')));   // ... but the env points at the public one
+  const prev = process.env.GRIP_FLAVOUR_DIR;
+  process.env.GRIP_FLAVOUR_DIR = pubDir;
+  try {
+    assert.throws(() => packageRelease({ root: r, out: tmp('grip-pkg-') }), /does not contain version/, 'judged as the public flavour (a shell code.js carries no version)');
+    const s = signScratch();
+    writeFileSync(join(s.dir, PAYLOAD_NAME), 'not json');
+    const keyDir = tmp('grip-fdir-');
+    writeFileSync(join(keyDir, 'flavour.json'), JSON.stringify({ slug: 'x', payloadLoader: false, releaseKeys: JSON.parse(readFileSync(join(s.root, 'flavour', 'flavour.json'), 'utf8')).releaseKeys }));
+    process.env.GRIP_FLAVOUR_DIR = keyDir;
+    assert.doesNotThrow(() => signSums({ root: s.root, dir: s.dir, keyPem: s.key }), 'the env flavour (not a loader) decides: the broken payload is not looked at');
+  } finally {
+    if (prev === undefined) delete process.env.GRIP_FLAVOUR_DIR; else process.env.GRIP_FLAVOUR_DIR = prev;
+  }
+});
+
+test('sign-release: an unreadable flavour file fails closed', () => {
+  const s = signScratch();
+  rmSync(join(s.root, 'flavour', 'flavour.json'));
+  assert.throws(() => signSums({ root: s.root, dir: s.dir, keyPem: s.key }), SignError);
+});
+
+test('assemble.mjs loads esbuild lazily (the public plugin build must not need it)', () => {
+  const text = readFileSync(join(ROOT, 'src', 'plugin', 'shell', 'assemble.mjs'), 'utf8');
+  assert.ok(!/^import .*esbuild/m.test(text), 'no top-level esbuild import');
 });

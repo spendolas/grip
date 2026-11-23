@@ -27,7 +27,7 @@ export function rewritePayloadCode(code) {
     .replace(/\bfigma\.ui\.onmessage\s*=(?!=)/g, '__shell.ui.onmessage =')
     .replace(/\bfigma\.(on|once|off)\(/g, '__shell.$1(');
   if (!out.includes('__shell.ui.onmessage =')) throw new BuildError('the plugin never assigns figma.ui.onmessage; the payload would have no message handler');
-  if (/\bfigma\.(showUI|on|once|off)\(|\bfigma\.ui\.onmessage\s*=(?!=)/.test(out)) throw new BuildError('a Figma touchpoint was not rewritten');
+  if (/\bfigma\.(showUI|on|once|off)\(|\bfigma\.ui\.(on|once|off)\(|\bfigma\.ui\.onmessage\s*=(?!=)/.test(out)) throw new BuildError('a Figma touchpoint was not rewritten');
   return out;
 }
 

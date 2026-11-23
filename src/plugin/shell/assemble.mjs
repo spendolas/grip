@@ -1,9 +1,9 @@
 // Pure helpers that assemble the shell page (src/plugin/templates/ui.html + verifier + loader).
 // Used by scripts/build-shell.mjs and by the tests.
 import { createPublicKey } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSync } from 'esbuild';
 import { renderTemplate } from '../../../scripts/gen-flavour.mjs';
 import { ed25519KeyProblem } from '../../../scripts/ed25519-check.mjs';
 
@@ -15,6 +15,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 export const ANCHOR = '      // Starting state: disconnected, grey, with the setup tooltip.';
 
 export function bundleVerifier() {
+  // loaded here, not at import: the public plugin build never needs esbuild
+  const { buildSync } = createRequire(import.meta.url)('esbuild');
   const r = buildSync({
     entryPoints: [join(here, 'verify.src.js')],
     bundle: true, write: false, format: 'iife', minify: true, target: 'es2020', platform: 'browser', legalComments: 'none', logLevel: 'silent',

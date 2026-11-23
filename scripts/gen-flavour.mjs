@@ -53,6 +53,12 @@ export function isSinglePublicPem(pem) {
 const SAFE_NAMES = ['filePrefix', 'homeDirName', 'ipcName', 'launchLabel', 'daemonBundleId'];
 const FIELDS = ['slug', 'displayName', 'wsPort', 'httpPort', 'homeDirName', 'filePrefix', 'ipcName', 'mcpName', 'daemonAppName', 'daemonBundleId', 'launchLabel', 'pluginId', 'pluginName', 'releasesApi', 'installUrl', 'pagesUrl', 'releaseKeys', 'lockOverrides', 'payloadLoader'];
 
+// The flavour file the release tooling reads: GRIP_FLAVOUR_DIR (the same switch as this script's
+// default dir) or <root>/flavour. Release scripts must fail CLOSED when it cannot be read.
+export function flavourFile(root) {
+  return join(process.env.GRIP_FLAVOUR_DIR ? resolve(process.env.GRIP_FLAVOUR_DIR) : join(root, 'flavour'), 'flavour.json');
+}
+
 export function loadFlavour(dir) {
   const file = join(dir, 'flavour.json');
   let raw;

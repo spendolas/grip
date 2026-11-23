@@ -49,6 +49,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { deflateRawSync } from 'node:zlib';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { flavourFile } from './gen-flavour.mjs';
 
 export class PackageError extends Error {}
 
@@ -113,7 +114,7 @@ function checkProtocolPair(root, bridge) {
 // another flavour refuses the release.
 function readFlavourSlug(root) {
   let slug;
-  try { slug = JSON.parse(readFileSync(join(root, 'flavour', 'flavour.json'), 'utf8')).slug; }
+  try { slug = JSON.parse(readFileSync(flavourFile(root), 'utf8')).slug; }
   catch (err) { throw new PackageError(`could not read the flavour slug from flavour/flavour.json: ${err.message}`); }
   if (typeof slug !== 'string' || !/^[a-z][a-z0-9-]*$/.test(slug)) throw new PackageError('flavour/flavour.json has no valid slug');
   return slug;
@@ -121,7 +122,9 @@ function readFlavourSlug(root) {
 
 // ---- payload loader begin (phase 3): a loader flavour also ships its signed plugin payload ----
 function isLoaderFlavour(root) {
-  try { return JSON.parse(readFileSync(join(root, 'flavour', 'flavour.json'), 'utf8')).payloadLoader === true; } catch { return false; }
+  // fail closed: an unreadable flavour file must never turn into "public, no payload"
+  try { return JSON.parse(readFileSync(flavourFile(root), 'utf8')).payloadLoader === true; }
+  catch (err) { throw new PackageError(`could not read the flavour file ${flavourFile(root)}: ${err.message}`); }
 }
 // build/payload/payload.json (scripts/payload.mjs) must belong to this release: same version, same flavour.
 function readPayload(root, version) {

@@ -35,6 +35,10 @@ test('rewritePayloadCode rewrites exactly the three Figma touchpoints', () => {
     "if (figma.ui.onmessage == null) {}",
   ].join('\n'));
   assert.throws(() => rewritePayloadCode("figma.showUI(__html__);"), BuildError);
+  // a binding the rewrite does not know must fail the build, not slip through to the shell
+  for (const extra of ["figma.ui.on('message', f);", "figma.ui.once('message', f);", "figma.ui.off('message', f);"]) {
+    assert.throws(() => rewritePayloadCode("figma.ui.onmessage = () => {};\n" + extra), BuildError, extra);
+  }
 });
 
 function fakeRoot(loader) {
