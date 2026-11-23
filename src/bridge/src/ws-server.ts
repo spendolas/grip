@@ -8,6 +8,7 @@ import type {
 } from './types.js';
 import { BRIDGE_VERSION, PROTOCOL_VERSION } from './types.js';
 import { bridgeStaleFor } from './update.js';
+import { payloadReply } from './payload.js';
 import { authProof, newNonce, type PairingStore } from './pairing.js';
 import { FLAVOUR } from './flavour.gen.js';
 import { isRetrySafe, causesEvents, serializedByPlugin } from './methods.js';
@@ -1693,6 +1694,22 @@ export class PluginBridge extends EventEmitter {
       this.applyHello(sessionId, msg);
       return;
     }
+
+    // ---- payload loader begin (phase 3; see payload.ts) ----
+    // A shell plugin asks for its code after the pairing gate. Only a loader flavour answers;
+    // every other bridge treats these like any unknown frame. Neither frame is a hello.
+    if (FLAVOUR.payloadLoader && (frameType === 'payload_have' || frameType === 'payload_report')) {
+      const m = msg as unknown as Record<string, unknown>;
+      if (frameType === 'payload_have') {
+        const theirs = PluginBridge.frameFlavour(m);
+        if (theirs !== this.flavour) { this.refuseFlavour(gate, theirs); return; }
+        this.sendTo(sessionId, payloadReply({ version: typeof m.version === 'string' ? m.version : null }));
+      } else {
+        this.logRefused(`payload ${clip(m.status, 12)} ${clip(m.version, 32)} ${clip(m.code, 24)}`.trim());
+      }
+      return;
+    }
+    // ---- payload loader end ----
 
     // A peer is flavour-verified only by pair_request / auth / hello, so a socket that has not
     // said hello gets no update_request or event looked at (it could be any local page or
