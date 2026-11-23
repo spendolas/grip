@@ -15,7 +15,7 @@
     "build:plugin": "npm --prefix src/plugin run build",
     "build:notices": "node scripts/third-party-notices.mjs --out bridge/THIRD-PARTY-NOTICES.txt",
     "hygiene": "node scripts/bundle-hygiene.mjs",
-    "test": "npm run build && npm --prefix src/bridge test && npm --prefix src/bridge run test:win && node --test scripts/release-gate.test.mjs scripts/package-release.test.mjs scripts/sign-release.test.mjs scripts/bundle-hygiene.test.mjs scripts/third-party-notices.test.mjs scripts/audit-gate.test.mjs scripts/workflow-paths.test.mjs",
+    "test": "npm run build && npm --prefix src/bridge test && npm --prefix src/bridge run test:win && node --test scripts/release-gate.test.mjs scripts/package-release.test.mjs scripts/sign-release.test.mjs scripts/bundle-hygiene.test.mjs scripts/third-party-notices.test.mjs scripts/audit-gate.test.mjs scripts/workflow-paths.test.mjs scripts/public-plugin-pin.test.mjs",
     "grip:install": "node bridge/install.mjs",
     "grip:install:http": "node bridge/install.mjs --http",
     "package": "node scripts/package-release.mjs"

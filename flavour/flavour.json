@@ -15,6 +15,7 @@
   "releasesApi": "https://api.github.com/repos/spendolas/grip/releases/latest",
   "installUrl": "https://github.com/spendolas/grip/releases/latest",
   "pagesUrl": "https://spendolas.github.io/grip/",
+  "payloadLoader": false,
   "releaseKeys": [
     "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEASF7Su4ZqXdmFbDJvwm56w5wBAqqhQ8BcLDwJlGjTneo=\n-----END PUBLIC KEY-----\n"
   ],

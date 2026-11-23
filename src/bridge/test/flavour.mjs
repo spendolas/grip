@@ -111,7 +111,7 @@ const pluginGen = readFileSync(outP, 'utf8');
 assert.ok(!/\b(export|import)\b/.test(pluginGen), 'the plugin flavour file has no module syntax');
 assert.match(pluginGen, /^const FLAVOUR: Flavour = /m);
 // the same values, minus the release keys (the plugin never verifies a release)
-assert.equal(pluginGen.replace(/^interface /m, 'export interface ').replace(/^const FLAVOUR/m, 'export const FLAVOUR'), readFileSync(outB, 'utf8').replace(/^  releaseKeys: .*\n/gm, ''));
+assert.equal(pluginGen.replace(/^interface /m, 'export interface ').replace(/^const FLAVOUR/m, 'export const FLAVOUR'), readFileSync(outB, 'utf8').replace(/^  (releaseKeys|payloadLoader): .*\n/gm, ''));
 // templates rendered, no placeholder left
 for (const n of ['ui.html', 'manifest.json']) assert.ok(!/__[A-Z][A-Z0-9_]*__/.test(readFileSync(join(outDir, n), 'utf8')), n);
 // a placeholder the generator does not know is an error
@@ -125,5 +125,16 @@ assert.equal(renderTemplate('x', 'ws://localhost:__WS_PORT__ __FLAVOUR__', loadF
   const o = mkdtempSync(join(tmpdir(), 'flavour-linkout-'));
   execFileSync(process.execPath, [link, '--dir', altDir, '--out-bridge', join(o, 'b.ts'), '--out-plugin', join(o, 'p.ts'), '--out-plugin-dir', join(o, 'pd')]);
   for (const f of ['b.ts', 'p.ts', 'pd/ui.html', 'pd/manifest.json']) assert.ok(existsSync(join(o, f)), `symlinked run wrote ${f}`);
+}
+// payloadLoader (phase 3)
+rejects('loader-missing', (f) => { delete f.payloadLoader; }, 'payloadLoader');
+rejects('loader-string', (f) => { f.payloadLoader = 'yes'; }, 'payloadLoader');
+rejects('loader-unlocked', (f) => { f.payloadLoader = true; f.lockOverrides = false; }, 'lockOverrides');
+assert.equal(loadFlavour(altDir).payloadLoader, true);
+assert.equal(loadFlavour(realDir).payloadLoader, false);
+{
+  const { renderFlavourGlobal, renderFlavour } = await import(script);
+  assert.ok(!renderFlavourGlobal(loadFlavour(altDir)).includes('payloadLoader'), 'the plugin global FLAVOUR never carries payloadLoader (it is compiled into code.js)');
+  assert.ok(renderFlavour(loadFlavour(altDir)).includes('payloadLoader'), 'the bridge flavour does');
 }
 console.log('flavour: ok');

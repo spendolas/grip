@@ -15,6 +15,7 @@
   "releasesApi": "https://api.github.com/repos/acme-example/acme/releases/latest",
   "installUrl": "https://example.invalid/acme/install",
   "pagesUrl": "https://example.invalid/acme/",
+  "payloadLoader": true,
   "releaseKeys": [
     "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAK0wou07B3THxB1KkLyofMNG7eB9I4lBIIENsuWxBwLM=\n-----END PUBLIC KEY-----\n"
   ],

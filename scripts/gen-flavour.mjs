@@ -27,7 +27,7 @@ const STRINGS = [
   'releasesApi', 'installUrl', 'pagesUrl',
 ];
 const PORTS = ['wsPort', 'httpPort'];
-const BOOLS = ['lockOverrides'];
+const BOOLS = ['lockOverrides', 'payloadLoader'];
 // The same pattern as src/bridge/src/mcp-name.ts MCP_NAME_RE (the generator cannot import
 // TypeScript; test/flavour.mjs checks the two agree).
 const MCP_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -50,7 +50,7 @@ export function isSinglePublicPem(pem) {
     && t.split('-----BEGIN ').length === 2 && t.split('-----END ').length === 2 && !t.includes('PRIVATE');
 }
 const SAFE_NAMES = ['filePrefix', 'homeDirName', 'ipcName', 'launchLabel', 'daemonBundleId'];
-const FIELDS = ['slug', 'displayName', 'wsPort', 'httpPort', 'homeDirName', 'filePrefix', 'ipcName', 'mcpName', 'daemonAppName', 'daemonBundleId', 'launchLabel', 'pluginId', 'pluginName', 'releasesApi', 'installUrl', 'pagesUrl', 'releaseKeys', 'lockOverrides'];
+const FIELDS = ['slug', 'displayName', 'wsPort', 'httpPort', 'homeDirName', 'filePrefix', 'ipcName', 'mcpName', 'daemonAppName', 'daemonBundleId', 'launchLabel', 'pluginId', 'pluginName', 'releasesApi', 'installUrl', 'pagesUrl', 'releaseKeys', 'lockOverrides', 'payloadLoader'];
 
 export function loadFlavour(dir) {
   const file = join(dir, 'flavour.json');
@@ -96,6 +96,11 @@ export function loadFlavour(dir) {
   if (raw.lockOverrides && !isGithubReleasesApi(raw.releasesApi)) {
     throw new Error('flavour: field "releasesApi" must be https://api.github.com/repos/<owner>/<repo>/releases/latest when "lockOverrides" is true (otherwise release downloads would not be pinned to that repo)');
   }
+  // ---- payload loader begin (phase 3) ----
+  if (raw.payloadLoader && !raw.lockOverrides) {
+    throw new Error('flavour: field "payloadLoader" requires "lockOverrides" to be true (a loader flavour runs signed code, so its release source must be locked)');
+  }
+  // ---- payload loader end ----
   // These reach AppleScript, plist XML, shell scripts and file paths unescaped, so they
   // are held to characters that are inert in all of them.
   for (const k of SAFE_NAMES) {
@@ -136,7 +141,7 @@ ${vals}
 // Same values, but a global script: `const FLAVOUR` with no import/export, so a
 // tsc outFile build (module: none) keeps code.js one plain script. The plugin never
 // verifies a release, so its copy leaves the release keys out.
-const PLUGIN_FIELDS = FIELDS.filter((k) => k !== 'releaseKeys');
+const PLUGIN_FIELDS = FIELDS.filter((k) => k !== 'releaseKeys' && k !== 'payloadLoader');
 export function renderFlavourGlobal(f) {
   return renderFlavour(f, PLUGIN_FIELDS)
     .replace('export interface Flavour', 'interface Flavour')
