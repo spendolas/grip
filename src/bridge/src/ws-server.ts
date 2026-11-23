@@ -120,6 +120,8 @@ interface Session {
   minBridgeProtocol?: number;
   // The window runs the loader shell (hello.shellProtocol, payloadLoader flavours).
   shellProtocol?: number;
+  // When this socket's last payload_have was answered (payload loader, see handleMessage): one answer per PAYLOAD_ASK_GAP_MS.
+  payloadAnsweredAt?: number;
   capabilities?: string[];
   lastPong: number;
   pingTimer?: NodeJS.Timeout;
@@ -169,6 +171,8 @@ export function protocolInt(v: unknown): number | undefined {
 
 // Unauthenticated-peer limits: a page that opens sockets in a loop must not be able to
 // grow memory without bound. Env overrides exist for tests.
+// A shell asks for its payload once per connection; a socket that asks again sooner is not answered.
+const PAYLOAD_ASK_GAP_MS = 5_000;
 const MAX_SOCKETS = Number(process.env.GRIP_MAX_SOCKETS ?? 64);
 const MAX_UNHELLOED = Number(process.env.GRIP_MAX_UNHELLOED ?? 16);
 // A real plugin says hello within milliseconds of the welcome (plus one proof round trip).
@@ -1705,6 +1709,9 @@ export class PluginBridge extends EventEmitter {
       if (frameType === 'payload_have') {
         const theirs = PluginBridge.frameFlavour(m);
         if (theirs !== this.flavour) { this.refuseFlavour(gate, theirs); return; }
+        const now = Date.now();
+        if (gate.payloadAnsweredAt !== undefined && now - gate.payloadAnsweredAt < PAYLOAD_ASK_GAP_MS) return;   // each answer can be a few hundred KB
+        gate.payloadAnsweredAt = now;
         this.sendTo(sessionId, payloadReply({ version: typeof m.version === 'string' ? m.version : null }));
       } else {
         this.logRefused(`payload ${clip(m.status, 12)} ${clip(m.version, 32)} ${clip(m.code, 24)}`.trim());

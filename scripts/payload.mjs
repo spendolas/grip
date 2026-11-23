@@ -32,6 +32,9 @@ export const KEY_ENV = 'GRIP_RELEASE_SIGNING_KEY';
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
 const SLUG_RE = /^[a-z][a-z0-9-]{0,23}$/;
 
+// A lone surrogate would be signed as U+FFFD (UTF-8 has no encoding for it) but evaluated as written.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/;
+
 function checkHeader(h) {
   return !!h && typeof h === 'object' && !Array.isArray(h)
     && Number.isInteger(h.shellProtocol) && h.shellProtocol >= 1
@@ -50,12 +53,14 @@ export function signingMessage(header, code, ui) {
 export function buildEnvelope(header, code, ui) {
   if (!checkHeader(header)) throw new PayloadError('payload header needs shellProtocol (integer >= 1), flavour (slug) and version (x.y.z)');
   if (typeof code !== 'string' || code === '' || typeof ui !== 'string') throw new PayloadError('payload code must be a non-empty string and ui a string');
+  if (LONE_SURROGATE.test(code) || LONE_SURROGATE.test(ui)) throw new PayloadError('payload code and ui must be well-formed strings (no lone surrogates)');
   return { layout: PAYLOAD_LAYOUT, header: { shellProtocol: header.shellProtocol, flavour: header.flavour, version: header.version }, code, ui, sig: '' };
 }
 
 function wellFormed(env) {
   return !!env && typeof env === 'object' && !Array.isArray(env) && env.layout === PAYLOAD_LAYOUT
-    && checkHeader(env.header) && typeof env.code === 'string' && typeof env.ui === 'string' && typeof env.sig === 'string';
+    && checkHeader(env.header) && typeof env.code === 'string' && typeof env.ui === 'string' && typeof env.sig === 'string'
+    && !LONE_SURROGATE.test(env.code) && !LONE_SURROGATE.test(env.ui);
 }
 
 function sigBytes(b64) {

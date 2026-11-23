@@ -52,18 +52,20 @@ function harness(src, { cache = null, autoInstall = true } = {}) {
   const posted = [];
   const win = {};
   const store = { token: null, cache };
+  const parentObj = {};
+  const fromParent = (pluginMessage) => win.onmessage({ source: parentObj, data: { pluginMessage } });
   const mainThread = (m) => {
-    if (m.kind === 'pairGet') win.onmessage({ data: { pluginMessage: { kind: 'pairToken', token: store.token } } });
+    if (m.kind === 'pairGet') fromParent({ kind: 'pairToken', token: store.token });
     else if (m.kind === 'pairSet') store.token = m.token;
     else if (m.kind === 'pairClear') store.token = null;
-    else if (m.kind === 'payloadGet') win.onmessage({ data: { pluginMessage: { kind: 'payloadCache', envelope: store.cache } } });
+    else if (m.kind === 'payloadGet') fromParent({ kind: 'payloadCache', envelope: store.cache });
     else if (m.kind === 'payloadDrop') store.cache = null;
-    else if (m.kind === 'payloadInstall' && autoInstall) win.onmessage({ data: { pluginMessage: { kind: 'payloadResult', ok: true, version: m.version } } });
+    else if (m.kind === 'payloadInstall' && autoInstall) fromParent({ kind: 'payloadResult', ok: true, version: m.version });
   };
   const ctx = vm.createContext({
     document: { getElementById: () => strip },
     WebSocket: FakeWS,
-    parent: { postMessage: (m) => { const c = JSON.parse(JSON.stringify(m)); posted.push(c); mainThread(c.pluginMessage); } },
+    parent: Object.assign(parentObj, { postMessage: (m) => { const c = JSON.parse(JSON.stringify(m)); posted.push(c); mainThread(c.pluginMessage); } }),
     window: win,
     setTimeout: (fn, ms) => { const id = ++seq; timers.set(id, { fn, at: now + (ms || 0) }); return id; },
     clearTimeout: (id) => { timers.delete(id); },
@@ -75,7 +77,8 @@ function harness(src, { cache = null, autoInstall = true } = {}) {
     has: (c) => classes.has(c),
     title: () => strip.title,
     ws: () => instances.at(-1),
-    fromMain: (pluginMessage) => win.onmessage({ data: { pluginMessage } }),
+    fromMain: fromParent,
+    fromElsewhere: (pluginMessage) => win.onmessage({ source: {}, data: { pluginMessage } }),
     installs: () => posted.map((p) => p.pluginMessage).filter((m) => m.kind === 'payloadInstall'),
     drops: () => posted.filter((p) => p.pluginMessage.kind === 'payloadDrop').length,
     advance: (ms) => { now += ms; for (const [id, t] of [...timers]) if (t.at <= now) { timers.delete(id); t.fn(); } },
@@ -342,6 +345,89 @@ const page = pageFor([K]);
   ws.deliver({ type: 'payload', envelope: { layout: 1, header: { shellProtocol: 1, flavour: 'acme', version: '1.0.0' }, code: 'evil()', ui: '', sig } });
   assert.equal(h.installs().length, 0, 'the strict verifier refuses a small-order key');
   assert.deepEqual(reports(ws).at(-1), { type: 'payload_report', status: 'rejected', version: '1.0.0', code: 'bad_signature' });
+}
+
+// ---- E: ui patch and failure are tracked per version
+{
+  const h = harness(page, { autoInstall: false });
+  const ws = connect(h);
+  const patch = (t) => `shell.define('tooltip', function () { return '${t}'; });`;
+  ws.deliver({ type: 'payload', envelope: sign(K, '1.0.0', 'c', patch('A')) });
+  ws.deliver({ type: 'payload', envelope: sign(K, '1.1.0', 'c', patch('B')) });
+  h.fromMain({ kind: 'payloadResult', ok: true, version: '9.9.9' });
+  assert.equal(h.title(), 'Loading Grip…', 'a result for a version that was never sent is ignored');
+  h.fromMain({ kind: 'payloadResult', ok: true, version: '1.0.0' });
+  assert.equal(h.title(), 'A', 'the result for 1.0.0 applies the ui patch of 1.0.0, not the later one');
+  h.fromMain({ kind: 'payloadResult', ok: true, version: '1.1.0' });
+  assert.equal(h.title(), 'B');
+  ws.deliver({ type: 'payload', envelope: sign(K, '1.2.0', 'c', patch('C')) });
+  h.fromMain({ kind: 'payloadResult', ok: false, version: '1.2.0', error: 'boom' });
+  assert.equal(h.title(), 'B', 'a failed install leaves the live payload and its patch alone');
+  assert.ok(!h.has('updating'));
+  h.fromMain({ kind: 'payloadResult', ok: true, version: '1.2.0' });
+  assert.notEqual(h.title(), 'C', 'a result for a version that already failed is ignored');
+}
+
+// ---- F: messages that do not come from the plugin main thread (ev.source !== parent) are ignored
+{
+  const h = harness(page, { autoInstall: false });
+  const ws = connect(h);
+  ws.deliver({ type: 'payload', envelope: sign(K, '1.0.0') });
+  h.fromElsewhere({ kind: 'payloadResult', ok: true, version: '1.0.0' });
+  assert.equal(h.title(), 'Loading Grip…', 'a spoofed result changes nothing');
+  h.fromElsewhere({ kind: 'payloadCache', envelope: JSON.stringify(sign(K, '2.0.0')) });
+  assert.equal(h.installs().length, 1);
+  h.fromMain({ kind: 'payloadResult', ok: true, version: '1.0.0' });
+  assert.equal(h.title(), 'Connected');
+}
+
+// ---- H: a string with a lone surrogate is refused (it would be signed as U+FFFD but evaluated as written)
+{
+  const { signingMessage } = await import(join(repo, 'scripts', 'payload.mjs'));
+  const { sign: nodeSign } = await import('node:crypto');
+  const { createPrivateKey } = await import('node:crypto');
+  const header = { shellProtocol: 1, flavour: 'acme', version: '1.0.0' };
+  for (const [code, ui] of [['var a = "\ud800";', ''], ['var a;', 'x = "\udc00";']]) {
+    const sig = nodeSign(null, signingMessage(header, code, ui), createPrivateKey(K.priv)).toString('base64');
+    const h = harness(page);
+    const ws = connect(h);
+    ws.deliver({ type: 'payload', envelope: { layout: 1, header, code, ui, sig } });
+    assert.equal(h.installs().length, 0, 'not installed');
+    assert.deepEqual(reports(ws).at(-1), { type: 'payload_report', status: 'rejected', version: '', code: 'bad_format' });
+  }
+  // a well-formed astral character is fine
+  const h = harness(page);
+  connect(h).deliver({ type: 'payload', envelope: sign(K, '1.0.0', 'var a = "\u{1F600}";') });
+  assert.equal(h.installs().length, 1);
+}
+
+// ---- I: the trust anchors are frozen and the verifier is captured before any payload code runs
+{
+  const h = harness(page);
+  vm.runInContext('try { SHELL_RELEASE_KEYS.push("00"); } catch (e) {}', h.ctx);
+  assert.equal(vm.runInContext('SHELL_RELEASE_KEYS.length', h.ctx), 1);
+  assert.equal(vm.runInContext('Object.isFrozen(SHELL_RELEASE_KEYS)', h.ctx), true);
+  h.ctx.gripEdVerify = () => true;                       // a payload ui patch replacing the global verifier ...
+  const ws = connect(h);
+  const bad = sign(K, '1.0.0'); bad.code += ' ';
+  ws.deliver({ type: 'payload', envelope: bad });
+  assert.equal(h.installs().length, 0, '... does not make a forged payload pass');
+}
+
+// ---- J: nothing over 8MB is parsed or hashed
+{
+  const h = harness(page);
+  const ws = connect(h);
+  const huge = 'x'.repeat(8 * 1024 * 1024 + 1);
+  let calls = 0;
+  const e = sign(K, '1.0.0'); e.code = huge;
+  ws.deliver({ type: 'payload', envelope: e });
+  assert.equal(h.installs().length, 0);
+  assert.deepEqual(reports(ws).at(-1), { type: 'payload_report', status: 'rejected', version: '', code: 'bad_format' });
+  const h2 = harness(page, { cache: huge });
+  assert.equal(h2.installs().length, 0);
+  assert.equal(h2.drops(), 1, 'an oversize cache is dropped');
+  void calls;
 }
 
 console.log('shell-ui.mjs OK');

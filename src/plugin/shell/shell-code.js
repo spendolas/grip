@@ -12,6 +12,12 @@ const SHELL_PROTOCOL = 1;
 const PAIR_STORAGE_KEY = 'grip.pairing';
 const PAYLOAD_STORAGE_KEY = 'grip.payload';
 const TICK_MS = 500;
+// A swap waits for the calls in flight, but never longer than this: one call that never settles
+// must not block updates forever. A call that outlives the swap keeps running on the old
+// payload's closure (and a timed-out bridge request may still complete there); that is the price
+// of liveness, and the next release replaces it anyway.
+const SWAP_DEFER_MAX_MS = 120000;
+const VERSION_RE = /^\d+\.\d+\.\d+$/;
 
 figma.showUI(__html__, { width: 120, height: 32 });
 
@@ -20,6 +26,7 @@ let pending = null;       // { version, code, envelope }   verified, waiting for
 let inflight = 0;         // messages handed to the live handler that have not settled
 let welcomeMsg = null;    // last welcome from the UI, replayed into every new payload
 let ticking = false;
+let pendingSince = 0;       // when something first started waiting for an idle moment
 
 function post(m) { figma.ui.postMessage(m); }
 
@@ -76,9 +83,13 @@ function schedule() {
 
 function tryApply() {
   if (!pending) return;
-  if (inflight > 0) { schedule(); return; }
+  if (inflight > 0) {
+    if (pendingSince === 0) pendingSince = Date.now();
+    if (Date.now() - pendingSince < SWAP_DEFER_MAX_MS) { schedule(); return; }
+  }
   const p = pending;
   pending = null;
+  pendingSince = 0;
   const r = evaluate(p);
   if (!r.ok) { post({ kind: 'payloadResult', ok: false, version: p.version, error: r.error }); return; }
   const old = current;
@@ -122,7 +133,7 @@ figma.ui.onmessage = async (msg) => {
     return;
   }
   if (kind === 'payloadInstall') {
-    if (typeof msg.version !== 'string' || typeof msg.code !== 'string' || msg.code === '' || typeof msg.envelope !== 'string') return;
+    if (typeof msg.version !== 'string' || !VERSION_RE.test(msg.version) || typeof msg.code !== 'string' || msg.code === '' || typeof msg.envelope !== 'string') return;
     pending = { version: msg.version, code: msg.code, envelope: msg.envelope };
     if (inflight > 0) post({ kind: 'payloadPending', version: msg.version });
     tryApply();

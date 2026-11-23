@@ -5,12 +5,13 @@
 // manual re-publish; everything else ships as payload or as a signed `ui` patch.
 // Names here are prefixed shell/SHELL to stay clear of the template's.
 const SHELL_PROTOCOL = 1;
-const SHELL_RELEASE_KEYS = JSON.parse('__RELEASE_KEYS__');   // raw Ed25519 public keys, hex
+const SHELL_RELEASE_KEYS = Object.freeze(JSON.parse('__RELEASE_KEYS__'));   // raw Ed25519 public keys, hex (frozen trust anchor)
+const shellVerify = gripEdVerify;      // captured before any payload code or ui patch can run
+const SHELL_MAX_BYTES = 8 * 1024 * 1024;   // nothing bigger is parsed, hashed or cached (the bridge serves at most 8MB)
 let shellPhase = 'idle';          // idle | installing | ready | outdated
 let shellInstalled = null;        // version of the payload that is live
 let shellNewest = null;           // highest version accepted so far (live or on its way)
-let shellSource = 'bridge';       // where the payload being installed came from
-let shellUi = '';                 // ui patch of the payload being installed
+const shellPending = {};          // version -> { ui, source } of every payload sent to the main thread and not yet answered
 
 // ---- hooks (by reassignment; the template is never edited) --------------------------------
 // Functions a payload ui patch may replace. The globals are dispatchers into shellBase, so the
@@ -60,6 +61,7 @@ function shellReport(status, version, code, message) {
 
 const shellPrevOnMessage = window.onmessage;
 window.onmessage = function (ev) {
+  if (ev && ev.source !== parent) return;      // only the plugin main thread talks to this page
   const m = ev && ev.data && ev.data.pluginMessage;
   if (m && typeof m === 'object') {
     if (m.kind === 'payloadCache') { shellOnCache(m.envelope); return; }
@@ -77,7 +79,10 @@ WebSocket = class extends ShellRealWebSocket {
     super(u);
     this.addEventListener('message', (ev) => {
       if (!trusted || ws !== this) return;       // nothing from a socket that has not proven itself
-      let msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (typeof ev.data !== 'string') return;
+      let msg;
+      if (ev.data.length > SHELL_MAX_BYTES) { shellReject('bad_format', '', 'bridge'); return; }
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
       if (msg && msg.type === 'payload') shellAccept(msg.envelope, 'bridge');
     });
   }
@@ -99,6 +104,8 @@ function shellMessage(h, code, ui) {
   out.set(head, 0); out.set(c, head.length); out.set(u, head.length + c.length);
   return out;
 }
+// A lone surrogate is signed as U+FFFD but would be evaluated as written: refuse such strings.
+function shellWellFormed(str) { return !/[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/.test(str); }
 function shellReject(code, version, source) {
   if (source === 'cache' && code !== 'replay') toCode({ kind: 'payloadDrop' });
   if (source === 'bridge') flashError(false);
@@ -109,7 +116,8 @@ function shellAccept(env, source) {
   let h;
   if (!env || typeof env !== 'object' || env.layout !== 1 || typeof env.code !== 'string' || typeof env.ui !== 'string' || typeof env.sig !== 'string'
     || !(h = env.header) || typeof h !== 'object' || !Number.isInteger(h.shellProtocol) || h.shellProtocol < 1
-    || typeof h.flavour !== 'string' || typeof h.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(h.version)) {
+    || typeof h.flavour !== 'string' || typeof h.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(h.version)
+    || env.code.length > SHELL_MAX_BYTES || env.ui.length > SHELL_MAX_BYTES || !shellWellFormed(env.code) || !shellWellFormed(env.ui)) {
     shellReject('bad_format', '', source); return;
   }
   // A payload that needs a newer shell cannot be trusted to follow this layout, so this is judged
@@ -123,36 +131,43 @@ function shellAccept(env, source) {
   if (!/^[A-Za-z0-9+/]{86}==$/.test(env.sig)) { shellReject('bad_signature', h.version, source); return; }
   const sig = Uint8Array.from(atob(env.sig), (c) => c.charCodeAt(0));
   const msg = shellMessage(h, env.code, env.ui);
-  if (!SHELL_RELEASE_KEYS.some((k) => gripEdVerify(sig, msg, shellHex(k)))) { shellReject('bad_signature', h.version, source); return; }
+  if (!SHELL_RELEASE_KEYS.some((k) => shellVerify(sig, msg, shellHex(k)))) { shellReject('bad_signature', h.version, source); return; }
   if (shellNewest !== null) {
     const c = shellCmp(h.version, shellNewest);
     if (c === 0) return;                                    // the same payload again: nothing to do
     if (c < 0) { shellReject('replay', h.version, source); return; }
   }
-  shellNewest = h.version; shellSource = source; shellUi = env.ui;
+  shellNewest = h.version; shellPending[h.version] = { ui: env.ui, source };
   shellPhase = 'installing'; render();
   toCode({ kind: 'payloadInstall', version: h.version, code: env.code, envelope: JSON.stringify(env) });
 }
 
 function shellOnCache(text) {
   if (typeof text !== 'string') return;
+  if (text.length > SHELL_MAX_BYTES) { toCode({ kind: 'payloadDrop' }); return; }
   let env; try { env = JSON.parse(text); } catch (e) { toCode({ kind: 'payloadDrop' }); return; }
   shellAccept(env, 'cache');
 }
 
 function shellOnResult(m) {
+  const rec = typeof m.version === 'string' ? shellPending[m.version] : undefined;
+  if (!rec) return;                                          // not a payload this page sent (or already answered)
+  delete shellPending[m.version];
   if (m.ok === true) {
     shellInstalled = m.version; shellPhase = 'ready';
     shellBase = Object.assign({}, shellPristine);            // every payload starts from the pristine page
-    if (shellUi.trim() !== '') {
+    if (rec.ui.trim() !== '') {
       try {
-        new Function('shell', shellUi)({ orig: shellPristine, define: (name, fn) => { if (name in shellPristine && typeof fn === 'function') shellBase[name] = fn; } });
+        new Function('shell', rec.ui)({ orig: shellPristine, define: (name, fn) => { if (name in shellPristine && typeof fn === 'function') shellBase[name] = fn; } });
       } catch (e) { shellBase = Object.assign({}, shellPristine); }
     }
     shellReport('installed', m.version);
   } else {
-    shellNewest = shellInstalled; shellPhase = shellInstalled ? 'ready' : 'idle';
-    if (shellSource === 'cache') toCode({ kind: 'payloadDrop' }); else flashError(false);
+    // The live payload (and its ui patch) are untouched: a failed install never applies a patch.
+    const open = Object.keys(shellPending);
+    shellNewest = open.concat(shellInstalled ? [shellInstalled] : []).sort(shellCmp).pop() || null;
+    if (open.length === 0) shellPhase = shellInstalled ? 'ready' : 'idle';
+    if (rec.source === 'cache') toCode({ kind: 'payloadDrop' }); else flashError(false);
     shellReport('rejected', m.version, 'install_failed', m.error);
   }
   render();

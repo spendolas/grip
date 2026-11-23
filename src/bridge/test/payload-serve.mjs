@@ -115,9 +115,15 @@ const have = (v, flavour = 'acme') => ({ type: 'payload_have', flavour, shellPro
   const frame = c.frames.find((f) => f.type === 'payload');
   assert.equal(frame.envelope.header.version, '1.0.0');
   assert.equal(frame.envelope.code, 'var a;');
-  // current: nothing newer
-  c.send(have('1.0.0'));
-  await waitFor(() => c.frames.some((f) => f.type === 'payload_current'));
+  // current: nothing newer (a second socket: one answer per socket per 5 seconds)
+  const cur = await client(port);
+  cur.send(have('1.0.0'));
+  await waitFor(() => cur.frames.some((f) => f.type === 'payload_current'));
+  // the same socket asking again right away is not answered (a 300KB frame per ask would be a cheap flood)
+  const before = c.frames.length;
+  c.send(have(null)); c.send(have(null));
+  await sleep(300);
+  assert.equal(c.frames.length, before, 'throttled: no second answer within 5 seconds');
   // payload_have is not a hello: the session is not live
   assert.equal(bridge.snapshot().plugins.filter((p) => p.hello).length, 0);
   // payload_report is logged and not answered

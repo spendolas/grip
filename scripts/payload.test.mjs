@@ -107,3 +107,14 @@ test('the committed vector verifies (the UI verifier must agree on it)', () => {
   assert.deepEqual(verifyEnvelope(env, [key]), { ok: true });
   assert.equal(createHash('sha256').update(signingMessage(v.header, v.code, v.ui)).digest('hex'), v.messageSha256);
 });
+
+test('strings with a lone surrogate are refused by the builder and the verifier', () => {
+  const k = kp();
+  const keys = [createPublicKey(pem(k.publicKey, 'spki'))];
+  for (const [code, ui] of [['var a = "\ud800";', ''], ['var a;', 'x = "\udc00";'], ['\udc00\ud800', '']]) {
+    assert.throws(() => buildEnvelope(H, code, ui), PayloadError);
+    const env = { layout: 1, header: H, code, ui, sig: Buffer.alloc(64).toString('base64') };
+    assert.deepEqual(verifyEnvelope(env, keys), { ok: false, code: 'bad_format' });
+  }
+  assert.doesNotThrow(() => buildEnvelope(H, 'var a = "\u{1F600}";', ''), 'a surrogate PAIR is fine');
+});

@@ -37,7 +37,7 @@ function boot(initialStorage = {}) {
     openExternal: (u) => opened.push(u),
   };
   const ctx = vm.createContext({
-    figma, __html__: '<html>', console,
+    figma, __html__: '<html>', console, Date: { now: () => now },
     setTimeout: (fn, ms) => { const t = { fn, at: now + ms, id: timers.length }; timers.push(t); return t.id; },
     clearTimeout: (id) => { const t = timers[id]; if (t) t.fn = null; },
   });
@@ -189,6 +189,34 @@ const goodCode = (tag, extra = '') => `
   await t.send({ kind: 'payloadInstall', version: '1.0.0', code: 'x' });
   assert.equal(t.kinds('payloadResult').filter((r) => r.ok).length, 0);
   assert.equal(t.store.has('grip.payload'), false);
+}
+
+// F: the version string goes into the sourceURL line, so only x.y.z may reach the evaluator
+{
+  const t = boot();
+  await t.send({ kind: 'payloadInstall', version: '1.0.0\n;globalThis.__pwned = 1;//', code: goodCode('v1'), envelope: env('1.0.0') });
+  await t.send({ kind: 'payloadInstall', version: '1.0', code: goodCode('v1'), envelope: env('1.0.0') });
+  await t.send({ kind: 'payloadInstall', version: '1.0.0 ', code: goodCode('v1'), envelope: env('1.0.0') });
+  assert.equal(t.kinds('payloadResult').length, 0, 'nothing is evaluated');
+  assert.equal(t.ctx.__pwned, undefined);
+  assert.equal(t.store.has('grip.payload'), false);
+}
+
+// G: a call that never settles cannot block an update forever (cap SWAP_DEFER_MAX_MS = 120 s)
+{
+  const t = boot();
+  await t.send({ kind: 'payloadInstall', version: '1.0.0', code: goodCode('v1'), envelope: env('1.0.0') });
+  void t.figma.ui.onmessage({ kind: 'request', id: 'stuck', method: 'w', hold: new Promise(() => {}) });
+  await flush();
+  await t.send({ kind: 'payloadInstall', version: '1.1.0', code: goodCode('v2'), envelope: env('1.1.0') });
+  for (let i = 0; i < 230; i++) await t.advance(500);           // 115 s: still waiting
+  assert.equal(t.kinds('payloadResult').length, 1, 'still deferred before the cap');
+  for (let i = 0; i < 30; i++) await t.advance(500);            // past 120 s
+  const res = t.kinds('payloadResult');
+  assert.equal(res.length, 2, 'applied after the cap');
+  assert.equal(res[1].version, '1.1.0');
+  await t.send({ kind: 'request', id: 'after', method: 'r' });
+  assert.equal(t.kinds('response').find((r) => r.id === 'after').result, 'v2');
 }
 
 console.log('shell-main.mjs OK');
