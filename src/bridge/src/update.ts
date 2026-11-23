@@ -1437,7 +1437,14 @@ export async function installAndScheduleRestart(o: InstallOptions): Promise<Inst
 
 // ---------- stopping a running daemon (installer + CLI) ----------
 
-function processCommandLine(pid: number): string | null {
+// True when a process command line is a bridge DAEMON of the build whose entry file stem is
+// `entryName` (e.g. `<stem>.mjs --daemon`). The one check every "is this really that daemon?"
+// decision uses, for this build's own daemon and (phase 2B) for a foreign one.
+export function isDaemonCommand(cmd: string, entryName: string): boolean {
+  return cmd.includes(entryName) && /--daemon/.test(cmd);
+}
+
+export function processCommandLine(pid: number): string | null {
   try {
     if (process.platform === 'win32') {
       return execFileSync('powershell', ['-NoProfile', '-Command',
@@ -1490,7 +1497,7 @@ export function stopRunningDaemon(): { stopped: boolean; note: string } {
   catch { return { stopped: false, note: 'status file is stale (that process is gone)' }; }
   const cmd = processCommandLine(pid);
   if (!cmd) return { stopped: false, note: `could not verify pid ${pid} is a Grip daemon; left it running (restart your agent / Figma plugin to pick up the new bridge)` };
-  if (!/grip-bridge/.test(cmd) || !/--daemon/.test(cmd)) {
+  if (!isDaemonCommand(cmd, 'grip-bridge')) {
     return { stopped: false, note: `pid ${pid} does not look like a Grip daemon; left it alone` };
   }
   try { process.kill(pid, 'SIGTERM'); }
