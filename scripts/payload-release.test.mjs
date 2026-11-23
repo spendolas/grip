@@ -196,3 +196,17 @@ test('release.yml builds and signs the payload with the secret, after the build 
   assert.match(body, /GRIP_RELEASE_SIGNING_KEY: \$\{\{ secrets\.GRIP_RELEASE_SIGNING_KEY \}\}/);
   assert.match(body, /node scripts\/payload\.mjs/);
 });
+
+test('release.yml publish job handles the payload asset for a loader flavour (check, recover upload, recomputed sums)', () => {
+  const yml = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  const pub = yml.slice(yml.indexOf('- name: Publish'));
+  const at = pub.indexOf('ASSETS="grip-bridge.mjs');
+  assert.ok(at >= 0);
+  const guard = pub.indexOf('payloadLoader === true', at);
+  assert.ok(guard > at, 'the ASSETS list grows for a loader flavour');
+  assert.ok(pub.slice(guard, guard + 200).includes('ASSETS="$ASSETS grip-plugin-payload.json"'));
+  // everything that iterates the list comes after the guard, so check, recover upload and the sums all see it
+  for (const use of ['for asset in $ASSETS', 'for n in $ASSETS; do', 'printf \'%s\\n\' $ASSETS']) {
+    assert.ok(pub.indexOf(use) > guard, `${use} sees the payload asset`);
+  }
+});

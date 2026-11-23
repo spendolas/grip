@@ -259,6 +259,11 @@ jobs:
           # bridge works with: a release without it is never offered);
           # a release missing any of them would break installs or updates.
           ASSETS="grip-bridge.mjs grip-plugin-code.js grip-plugin-ui.html grip-plugin-manifest.json grip-install.zip compat.json THIRD-PARTY-NOTICES.txt"
+          # A payloadLoader flavour also ships its signed plugin payload (scripts/payload.mjs): it must be
+          # checked, uploaded in the recover path and listed in the recomputed sums like every other asset.
+          if [ "$(node -p "require('./flavour/flavour.json').payloadLoader === true")" = "true" ]; then
+            ASSETS="$ASSETS grip-plugin-payload.json"
+          fi
           # SHA256SUMS.txt.sig is the Ed25519 signature over SHA256SUMS.txt; the
           # bridge refuses a release without a valid one (see update.ts).
           for asset in $ASSETS SHA256SUMS.txt SHA256SUMS.txt.sig; do
