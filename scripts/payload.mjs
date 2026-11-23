@@ -100,7 +100,8 @@ function readJson(path, what) {
 // Builds (and signs when the key is available) the payload of the repo at `root`.
 // Returns null when the flavour is not a loader.
 export function buildPayloadFile({ root, out, keyPem }) {
-  const f = readJson(join(root, 'flavour', 'flavour.json'), 'flavour/flavour.json');
+  const fdir = process.env.GRIP_FLAVOUR_DIR ? resolve(process.env.GRIP_FLAVOUR_DIR) : join(root, 'flavour');   // same switch as gen-flavour.mjs
+  const f = readJson(join(fdir, 'flavour.json'), 'flavour.json');
   if (f.payloadLoader !== true) return null;
   const codePath = join(root, 'build', 'payload', 'code.js');
   if (!existsSync(codePath)) throw new PayloadError(`missing ${codePath}; run \`npm run build\` with the loader flavour first`);

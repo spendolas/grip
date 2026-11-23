@@ -67,6 +67,13 @@ export function findProblems(text, allowlist = ALLOWLIST) {
 
 export const DEFAULT_FILES = ['bridge/grip-bridge.mjs', 'bridge/install.mjs', 'figma-plugin/code.js', 'bridge/THIRD-PARTY-NOTICES.txt'];
 
+// A loader flavour (flavour.json payloadLoader) also ships a shell page that inlines the Ed25519
+// verifier, and the signed payload.
+export const LOADER_FILES = ['figma-plugin/ui.html', 'build/payload/payload.json'];
+export function defaultFiles(flavour) {
+  return flavour && flavour.payloadLoader === true ? [...DEFAULT_FILES, ...LOADER_FILES] : DEFAULT_FILES;
+}
+
 export function checkFiles(files) {
   const report = [];
   for (const f of files) {
@@ -81,7 +88,9 @@ export function checkFiles(files) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const root = join(dirname(fileURLToPath(import.meta.url)), '..');
   const args = process.argv.slice(2);
-  const files = args.length ? args : DEFAULT_FILES.map((f) => join(root, f));
+  let flavour = {};
+  try { flavour = JSON.parse(readFileSync(process.env.GRIP_FLAVOUR_DIR ? join(resolve(process.env.GRIP_FLAVOUR_DIR), 'flavour.json') : join(root, 'flavour', 'flavour.json'), 'utf8')); } catch { /* public list */ }
+  const files = args.length ? args : defaultFiles(flavour).map((f) => join(root, f));
   const report = checkFiles(files);
   if (report.length) {
     console.error('bundle hygiene check FAILED:');

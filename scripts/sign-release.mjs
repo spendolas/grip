@@ -18,11 +18,12 @@
 // flavour/flavour.json, so a wrong secret (a different key than the one the
 // shipped bridges trust) fails here instead of producing a release no bridge
 // would accept. No dependencies; node:crypto only.
-import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
+import { createHash, createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isSinglePublicPem } from './gen-flavour.mjs';
+import { PAYLOAD_NAME, verifyEnvelope } from './payload.mjs';
 
 export class SignError extends Error {}
 
@@ -74,6 +75,20 @@ export function signSums({ root, dir, keyPem }) {
   if (!pinned.some((k) => verify(null, sums, k, signature))) {
     throw new SignError(`the signature made with ${KEY_ENV} does not verify against the public key(s) pinned in flavour/flavour.json: the secret is the wrong key`);
   }
+  // ---- payload loader begin (phase 3): a loader flavour's release must carry a SIGNED payload ----
+  let flavour = {};
+  try { flavour = JSON.parse(readFileSync(join(root, 'flavour', 'flavour.json'), 'utf8')); } catch { /* readPinnedKeys already succeeded */ }
+  if (flavour.payloadLoader === true) {
+    let env;
+    try { env = JSON.parse(readFileSync(join(dir, PAYLOAD_NAME), 'utf8')); }
+    catch { throw new SignError(`this flavour ships a plugin payload but ${join(dir, PAYLOAD_NAME)} is missing or unreadable`); }
+    if (!env || env.sig === '' || env.sig === undefined) throw new SignError(`${PAYLOAD_NAME} is not signed: run scripts/payload.mjs with ${KEY_ENV} set before packaging`);
+    const v = verifyEnvelope(env, pinned, { flavour: flavour.slug });
+    if (!v.ok) throw new SignError(`${PAYLOAD_NAME} does not verify against the pinned release key(s) (${v.code})`);
+    const want = createHash('sha256').update(readFileSync(join(dir, PAYLOAD_NAME))).digest('hex');
+    if (!sums.toString('utf8').split('\n').includes(`${want}  ${PAYLOAD_NAME}`)) throw new SignError(`${SUMS_NAME} does not list the current ${PAYLOAD_NAME}: package the release again`);
+  }
+  // ---- payload loader end ----
   const text = signature.toString('base64') + '\n';
   writeFileSync(join(dir, SIG_NAME), text);
   return text;

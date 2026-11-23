@@ -63,23 +63,27 @@ function findLicenseFiles(dir) {
 }
 
 // lockDir: the directory that holds package-lock.json and node_modules.
-export function buildNotices(lock, lockDir) {
+// opts.pluginLock / opts.pluginLockDir: the plugin's lockfile, for a payload loader flavour whose
+// shell page bundles the Ed25519 verifier (its entries are tagged "(plugin)").
+export function buildNotices(lock, lockDir, opts = {}) {
   const problems = [];
   const entries = [];
-  for (const p of productionPackages(lock)) {
-    const dir = join(lockDir, p.key);
+  const sources = [{ lock, lockDir, tag: '' }];
+  if (opts.pluginLock) sources.push({ lock: opts.pluginLock, lockDir: opts.pluginLockDir, tag: ' (plugin)' });
+  for (const src of sources) for (const p of productionPackages(src.lock)) {
+    const dir = join(src.lockDir, p.key);
     let pj;
     try { pj = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')); }
     catch { problems.push(`${p.key}: package.json not found in ${dir} (run npm ci)`); continue; }
     const name = pj.name || p.name;
     const version = pj.version || p.version;
-    const license = licenseString(pj) || lock.packages[p.key].license || '';
+    const license = licenseString(pj) || src.lock.packages[p.key].license || '';
     const files = findLicenseFiles(dir);
     if (!license) problems.push(`${name} ${version}: no license field in package.json`);
     else if (!licenseAllowed(license)) problems.push(`${name} ${version}: license "${license}" is outside the allowlist (${ALLOWED.join(', ')})`);
     if (!files.length) problems.push(`${name} ${version}: no license file found in ${dir}`);
     if (license && files.length) {
-      entries.push({ name, version, license, text: files.map((f) => readFileSync(f, 'utf8').trim()).join('\n\n') });
+      entries.push({ name, version, license, tag: src.tag, text: files.map((f) => readFileSync(f, 'utf8').trim()).join('\n\n') });
     }
   }
   if (problems.length) return { problems };
@@ -87,12 +91,14 @@ export function buildNotices(lock, lockDir) {
     'Grip third-party notices',
     '',
     'The Grip bridge (grip-bridge.mjs, install.mjs) bundles the open source packages listed below.',
-    'Grip itself is licensed under LICENSE.md. The Figma plugin bundles no third-party code.',
+    'Grip itself is licensed under LICENSE.md. ' + (opts.pluginLock
+      ? 'The Figma plugin shell (ui.html) bundles the open source packages marked (plugin) below.'
+      : 'The Figma plugin bundles no third-party code.'),
     'Node.js is not part of this package (MIT license, https://github.com/nodejs/node/blob/main/LICENSE).',
     '',
   ];
   for (const e of entries) {
-    out.push('='.repeat(78), `${e.name} ${e.version} (${e.license})`, '='.repeat(78), e.text, '');
+    out.push('='.repeat(78), `${e.name} ${e.version} (${e.license})${e.tag}`, '='.repeat(78), e.text, '');
   }
   return { text: out.join('\n'), count: entries.length };
 }
@@ -112,7 +118,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const o = parseArgs(process.argv.slice(2));
   const lockPath = resolve(o.lock ?? join(root, 'src', 'bridge', 'package-lock.json'));
   const outPath = resolve(o.out ?? join(root, 'THIRD-PARTY-NOTICES.txt'));
-  const res = buildNotices(JSON.parse(readFileSync(lockPath, 'utf8')), dirname(lockPath));
+  // A payload loader flavour's shell page bundles the Ed25519 verifier: its lockfile joins the walk.
+  let flavour = {};
+  try { flavour = JSON.parse(readFileSync(process.env.GRIP_FLAVOUR_DIR ? join(resolve(process.env.GRIP_FLAVOUR_DIR), 'flavour.json') : join(root, 'flavour', 'flavour.json'), 'utf8')); } catch { /* public */ }
+  const pluginLockPath = join(root, 'src', 'plugin', 'package-lock.json');
+  const opts = flavour.payloadLoader === true ? { pluginLock: JSON.parse(readFileSync(pluginLockPath, 'utf8')), pluginLockDir: dirname(pluginLockPath) } : {};
+  const res = buildNotices(JSON.parse(readFileSync(lockPath, 'utf8')), dirname(lockPath), opts);
   if (res.problems) {
     console.error('third-party notices FAILED:');
     for (const p of res.problems) console.error('  ' + p);

@@ -9,7 +9,7 @@
 // headings are `## 0.8.0` (exact version, no "v"), a release has 9 assets, and the
 // notes written for the release get an install footer (withInstallFooter).
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Every file a release must carry. The in-place updater downloads seven of them
@@ -31,6 +31,12 @@ export const REQUIRED_ASSETS = [
   'SHA256SUMS.txt',
   'SHA256SUMS.txt.sig',
 ];
+
+// A loader flavour (flavour.json payloadLoader) also ships its signed plugin payload, which
+// the updater installs next to the plugin files (src/bridge/src/update.ts ASSET_PAYLOAD).
+export function requiredAssets(flavour) {
+  return flavour && flavour.payloadLoader === true ? [...REQUIRED_ASSETS, 'grip-plugin-payload.json'] : REQUIRED_ASSETS;
+}
 
 // Everything from this line on in a release body is for people reading the
 // GitHub release page. The updater cuts it (src/bridge/src/update.ts:
@@ -117,10 +123,10 @@ export function extractNotes(changelog, version) {
 }
 
 // A release is complete when it is published (not a draft) and carries every asset.
-export function isCompleteRelease(release) {
+export function isCompleteRelease(release, required = REQUIRED_ASSETS) {
   if (!release || release.isDraft) return false;
   const names = (release.assets || []).map((a) => a.name);
-  return REQUIRED_ASSETS.every((n) => names.includes(n));
+  return required.every((n) => names.includes(n));
 }
 
 // version: string from BRIDGE_VERSION. tags: array of tag names.
@@ -130,11 +136,11 @@ export function isCompleteRelease(release) {
 //   recover the release exists (draft, or published but missing assets): finish it
 //   create  no release yet: tag + publish
 // Notes are required for create/recover: a release without notes must not publish.
-export function decide({ version, tags, release, changelog }) {
+export function decide({ version, tags, release, changelog, required }) {
   if (!parseVersion(version)) {
     throw new GateError(`BRIDGE_VERSION "${version}" is not major.minor.patch[-prerelease]`);
   }
-  if (isCompleteRelease(release)) return { action: 'skip', notes: null };
+  if (isCompleteRelease(release, required)) return { action: 'skip', notes: null };
   let action = 'recover';
   if (!release) {
     for (const tag of tags) {
@@ -174,7 +180,10 @@ export function main(argv, env) {
   const releaseText = readFileSync(args['release-file'], 'utf8').trim();
   const release = releaseText === '' ? null : JSON.parse(releaseText);
   const changelog = readFileSync(args.changelog, 'utf8');
-  const { action, notes } = decide({ version: args.version, tags, release, changelog });
+  const flavourFile = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'flavour', 'flavour.json');
+  let flavour = {};
+  try { flavour = JSON.parse(readFileSync(env.GRIP_FLAVOUR_DIR ? resolve(env.GRIP_FLAVOUR_DIR, 'flavour.json') : flavourFile, 'utf8')); } catch { /* no flavour file: the public asset list */ }
+  const { action, notes } = decide({ version: args.version, tags, release, changelog, required: requiredAssets(flavour) });
   if (notes !== null) writeFileSync(args['notes-out'], withInstallFooter(notes, args.version));
   if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `action=${action}\n`);
   console.log(`release-gate: v${args.version} -> ${action}`);

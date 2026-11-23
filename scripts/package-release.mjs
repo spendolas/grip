@@ -119,6 +119,24 @@ function readFlavourSlug(root) {
   return slug;
 }
 
+// ---- payload loader begin (phase 3): a loader flavour also ships its signed plugin payload ----
+function isLoaderFlavour(root) {
+  try { return JSON.parse(readFileSync(join(root, 'flavour', 'flavour.json'), 'utf8')).payloadLoader === true; } catch { return false; }
+}
+// build/payload/payload.json (scripts/payload.mjs) must belong to this release: same version, same flavour.
+function readPayload(root, version) {
+  let buf;
+  try { buf = readFileSync(join(root, 'build', 'payload', 'payload.json')); }
+  catch { throw new PackageError('missing build/payload/payload.json; run `node scripts/payload.mjs` after the build'); }
+  let env;
+  try { env = JSON.parse(buf.toString('utf8')); } catch { throw new PackageError('build/payload/payload.json is not JSON'); }
+  if (!env || env.layout !== 1 || !env.header || typeof env.code !== 'string') throw new PackageError('build/payload/payload.json is not a layout 1 payload');
+  if (env.header.version !== version) throw new PackageError(`payload header version ${env.header.version} does not match the release ${version}; run \`node scripts/payload.mjs\``);
+  if (env.header.flavour !== readFlavourSlug(root)) throw new PackageError(`payload flavour ${env.header.flavour} does not match this flavour (${readFlavourSlug(root)})`);
+  return buf;
+}
+// ---- payload loader end ----
+
 // compat.json content: never hand-edited, always derived from types.ts and the flavour file.
 export function buildCompat(root, version) {
   const minPlugin = readMinPluginVersion(root);
@@ -266,7 +284,10 @@ export function packageRelease({ root, out }) {
   }
   // The bundles must be built from this version (a stale local build would ship
   // an old bridge under a new tag; CI always builds fresh).
-  for (const [label, buf] of [['bridge/grip-bridge.mjs', src.bridge], ['bridge/install.mjs', src.installer], ['figma-plugin/code.js', src.pluginCode]]) {
+  const loader = isLoaderFlavour(root);
+  const payload = loader ? readPayload(root, version) : null;
+  // (a loader flavour's figma-plugin/code.js is the shell, which carries no release version)
+  for (const [label, buf] of [['bridge/grip-bridge.mjs', src.bridge], ['bridge/install.mjs', src.installer], ...(loader ? [] : [['figma-plugin/code.js', src.pluginCode]])]) {
     const t = buf.toString('utf8');
     if (!t.includes(`'${version}'`) && !t.includes(`"${version}"`)) {
       throw new PackageError(`${label} does not contain version ${version}; run \`npm run build\` and commit the result`);
@@ -280,6 +301,7 @@ export function packageRelease({ root, out }) {
     { name: 'grip/figma-plugin/code.js', data: src.pluginCode },
     { name: 'grip/figma-plugin/ui.html', data: src.pluginUi },
     { name: 'grip/THIRD-PARTY-NOTICES.txt', data: src.notices },
+    ...(payload ? [{ name: 'grip/figma-plugin/payload.json', data: payload }] : []),
   ]);
 
   const assets = {
@@ -290,6 +312,7 @@ export function packageRelease({ root, out }) {
     'grip-install.zip': zip,
     'THIRD-PARTY-NOTICES.txt': src.notices,
     'compat.json': buildCompat(root, version),
+    ...(payload ? { 'grip-plugin-payload.json': payload } : {}),
   };
   const sums = Object.keys(assets).sort()
     .map((n) => `${sha256(assets[n])}  ${n}\n`).join('');

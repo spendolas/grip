@@ -111,6 +111,14 @@ jobs:
       - name: Build bundles and third-party notices
         run: npm run build
 
+      # A flavour with payloadLoader ships its plugin as a signed payload (payload.json): built from
+      # build/payload/code.js and signed with the same release key. A no-op for every other flavour.
+      # Without the secret (a dry run) it writes an UNSIGNED payload; sign-release.mjs refuses that.
+      - name: Build and sign plugin payload
+        env:
+          GRIP_RELEASE_SIGNING_KEY: ${{ secrets.GRIP_RELEASE_SIGNING_KEY }}
+        run: node scripts/payload.mjs
+
       # No developer paths (/Users/, /Volumes/, /home/<name>/, C:\Users\) and no
       # secret-looking values (GitHub/AWS/Anthropic/OpenAI/npm/Slack tokens, PEM
       # blocks) may be inside anything that ships.
