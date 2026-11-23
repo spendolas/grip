@@ -37,6 +37,8 @@ export interface ForeignReport {
   findings: ForeignFinding[];
   worst: ForeignFinding | null;
   checkedAt: string;
+  // the overall time limit hit before every entry answered: do not trust this report over the last complete one
+  incomplete?: boolean;
 }
 
 const PROBE_TIMEOUT_MS = 2000;
@@ -53,6 +55,15 @@ function parseJson(text: string | null): Record<string, unknown> | null {
   } catch { return null; }
 }
 const str = (v: unknown): string | null => (typeof v === 'string' ? v.slice(0, 64) : null);
+// Everything the foreign side says is data, never text: only a plain x.y.z version is ever carried on.
+const semverOrNull = (v: string | null): string | null => (v !== null && isSemver(v) ? v : null);
+// the higher of two parseable versions; a parseable one beats an unparseable one
+function higher(a: string | null, b: string | null): string | null {
+  const sa = semverOrNull(a), sb = semverOrNull(b);
+  if (sa && sb) return compareSemver(sa, sb) >= 0 ? sa : sb;
+  return sa ?? sb ?? a ?? b;
+}
+const plainName = (n: string) => (/^[A-Za-z0-9._-]{1,64}$/.test(n) ? n : '<unusual name>');
 
 async function detectOne(e: WatchEntry, io: DetectIo): Promise<ForeignFinding> {
   const paths = foreignPaths(io, e);
@@ -75,10 +86,11 @@ async function detectOne(e: WatchEntry, io: DetectIo): Promise<ForeignFinding> {
 
   const present = !!foreignWelcome || statusAlive || !!install || entryFile;
 
-  if (foreignWelcome) evidence.push(`listening on port ${e.wsPort} (version ${foreignWelcome.version ?? 'unknown'})`);
+  const shown = (v: string | null) => semverOrNull(v) ?? 'unknown';
+  if (foreignWelcome) evidence.push(`listening on port ${e.wsPort} (version ${shown(foreignWelcome.version)})`);
   if (statusAlive) evidence.push(`status file: pid ${statusPid} alive`);
-  if (status && statusVersion !== null) evidence.push(`status file: version ${statusVersion}`);
-  if (installVersion !== null) evidence.push(`install.json: version ${installVersion}`);
+  if (status && statusVersion !== null) evidence.push(`status file: version ${shown(statusVersion)}`);
+  if (installVersion !== null) evidence.push(`install.json: version ${shown(installVersion)}`);
   if (entryFile) evidence.push('entry file present');
   if (unknownListener) evidence.push(`unknown service on port ${e.wsPort}`);
   for (const a of paths.autostart) if (io.exists(a.path)) evidence.push(`autostart: ${a.path}`);
@@ -86,11 +98,13 @@ async function detectOne(e: WatchEntry, io: DetectIo): Promise<ForeignFinding> {
   const servers = cfg && cfg.mcpServers && typeof cfg.mcpServers === 'object' ? (cfg.mcpServers as Record<string, unknown>) : null;
   if (servers) {
     for (const [name, v] of Object.entries(servers)) {
-      if (v && typeof v === 'object' && mcpEntryIsForeign(io, e, v as never)) evidence.push(`mcp entry: ${name}`);
+      if (v && typeof v === 'object' && mcpEntryIsForeign(io, e, v as never)) evidence.push(`mcp entry: ${plainName(name)}`);
     }
   }
 
-  const version = foreignWelcome ? foreignWelcome.version : (statusAlive || present) ? (statusVersion ?? installVersion) : null;
+  // a stale status file (its process is gone) must not outvote the installed version
+  const fileVersion = statusAlive ? higher(statusVersion, installVersion) : (installVersion ?? statusVersion);
+  const version = foreignWelcome ? foreignWelcome.version : present ? fileVersion : null;
   const running = !!foreignWelcome || statusAlive;
   let state: ForeignState;
   if (present) {
@@ -100,16 +114,18 @@ async function detectOne(e: WatchEntry, io: DetectIo): Promise<ForeignFinding> {
   } else {
     state = 'none';
   }
-  return { slug: e.slug, state, version: present ? version : null, floor: e.minSecureVersion, evidence, running, pid: statusAlive ? statusPid : null };
+  return { slug: e.slug, state, version: present ? semverOrNull(version) : null, floor: e.minSecureVersion, evidence, running, pid: statusAlive ? statusPid : null };
 }
 
 export async function detectForeign(entries: readonly WatchEntry[], io: DetectIo): Promise<ForeignReport> {
   const checkedAt = new Date().toISOString();
   let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<null>((res) => { timer = setTimeout(() => res(null), TOTAL_TIMEOUT_MS); timer.unref?.(); });
+  const timeout = new Promise<null>((res) => { timer = setTimeout(() => res(null), TOTAL_TIMEOUT_MS); });
   try {
     const all = Promise.all(entries.map((e) => detectOne(e, io).catch((): ForeignFinding => ({ slug: e.slug, state: 'none', version: null, floor: e.minSecureVersion, evidence: [], running: false, pid: null }))));
-    const findings = (await Promise.race([all, timeout])) ?? [];
+    const raced = await Promise.race([all, timeout]);
+    if (raced === null) return { findings: [], worst: null, checkedAt, incomplete: true };
+    const findings = raced;
     let worst: ForeignFinding | null = null;
     for (const f of findings) {
       if (f.state === 'none') continue;
@@ -117,7 +133,7 @@ export async function detectForeign(entries: readonly WatchEntry[], io: DetectIo
     }
     return { findings, worst, checkedAt };
   } catch {
-    return { findings: [], worst: null, checkedAt };
+    return { findings: [], worst: null, checkedAt, incomplete: true };
   } finally {
     if (timer) clearTimeout(timer);
   }

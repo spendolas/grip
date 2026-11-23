@@ -326,6 +326,7 @@ async function runDaemon(bridge: PluginBridge) {
     process.stderr.write(`[grip] ${signal} received, shutting down\n`);
     // Reject any pending plugin requests with typed error so attached MCP
     // clients see actionable codes instead of stdio-just-closed -32000s.
+    foreignGuard?.stop();   // phase 2B
     bridge.close();
     ipc.close();
     http.close();

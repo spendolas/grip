@@ -5,8 +5,8 @@
 import { join } from 'node:path';
 import { FLAVOUR, type WatchEntry } from './flavour.gen.js';
 import { liveIdentity } from './identity.js';
-import type { PluginBridge } from './ws-server.js';
-import { pluginInfos } from './update.js';
+import { fileIdentity, type PluginBridge } from './ws-server.js';
+import { isSemver } from './update.js';
 import { detectForeign, realDetectIo, type DetectIo, type ForeignReport, type ForeignState } from './foreign-detect.js';
 
 export interface OwnInfo { displayName: string; entryPath: string }
@@ -43,7 +43,14 @@ export function foreignGripSummary(r: ForeignReport | null, own: OwnInfo): Forei
   } else {
     action = 'none needed';
   }
-  return { state: w.state, version: w.version, floor: w.floor, evidence: [...w.evidence], action, slug: w.slug };
+  // Everything below reaches agents, toasts and terminals: only a plain version, printable evidence.
+  const V = '[0-9A-Za-z.+-]{1,40}';
+  const KNOWN = [new RegExp(`^listening on port \\d{1,5} \\(version (${V}|unknown)\\)$`), /^status file: pid \d{1,10} alive$/, new RegExp(`^status file: version (${V}|unknown)$`),
+    new RegExp(`^install\\.json: version (${V}|unknown)$`), /^entry file present$/, /^autostart: [\x20-\x7e]{1,300}$/, /^mcp entry: ([A-Za-z0-9._-]{1,64}|<unusual name>)$/, /^unknown service on port \d{1,5}$/];
+  // only the evidence lines this module's detection writes are passed on; anything else is replaced
+  const clean = (t: string) => (KNOWN.some((r) => r.test(t)) ? t : '(unrecognised evidence)');
+  const version = isSemver(w.version) ? w.version : null;
+  return { state: w.state, version, floor: w.floor, evidence: w.evidence.map(clean), action, slug: w.slug };
 }
 
 // Only an insecure finding is an alert. A healthy foreign Grip, an unknown listener and
@@ -108,6 +115,9 @@ export class ForeignGuard {
     const run = (async () => {
       const before = keyOf(this.cur);
       const report = await detectForeign(this.entries, this.io);
+      // a check that ran out of time says nothing: keep the last complete answer (and its alert)
+      if (report.incomplete && this.cur) return this.cur;
+      if (report.incomplete) return report;
       this.cur = report;
       if (keyOf(report) !== before) {
         for (const fn of [...this.listeners]) {
@@ -169,9 +179,10 @@ export function wireForeignToBridge(bridge: PluginBridge, g: ForeignGuard): () =
     bridge.setForeignAlert(texts ? { active: true, tooltip: texts.tooltip } : null);
     if (!texts) { toasted.clear(); return; }   // resolved: if it comes back it is announced again
     const w = report!.worst!;
-    for (const p of pluginInfos(bridge)) {
+    for (const p of bridge.snapshot().plugins as Array<{ sessionId?: string; hello?: boolean; wsReady?: boolean; fileKey?: string; fileUid?: string; fileName?: string }>) {
       if (!p.sessionId || p.hello === false || p.wsReady === false) continue;
-      const id = `${p.sessionId}|${w.slug}|${w.version ?? ''}`;
+      // one toast per FILE and alert: Figma respawns the plugin iframe every minute or two (a new session each time)
+      const id = `${fileIdentity(p) ?? `window:${p.sessionId}`}|${w.slug}|${w.version ?? ''}`;
       if (toasted.has(id)) continue;
       if (bridge.toast(p.sessionId, texts.toast)) toasted.add(id);   // a failed send retries on the next change
     }

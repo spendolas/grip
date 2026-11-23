@@ -275,7 +275,13 @@
         if (pairIssue === 'unverified') return 'This bridge could not prove who it is. Click to forget the pairing';
         if (needsSetup) return 'Bridge not running. Click for setup';
         if (current !== 'connected') return '';
-        if (foreignAlert) return foreignAlert;   // phase 2B
+        if (foreignAlert) {   // phase 2B: the warning first, then whatever the strip would have said about an update
+          if (updLatest && updClone) return foreignAlert + ' | Update available (developer install)';
+          if (bridgeOutdated()) return foreignAlert + ' | ' + (bridgeHearsUpdates() ? 'Bridge update needed. Click to update' : 'Bridge update needed. Click for steps');
+          if (offered && updPhase === 'failed') return foreignAlert + ' | Update failed. Click to retry';
+          if (offered) return foreignAlert + ' | Update available. Click to install';
+          return foreignAlert;
+        }
         if (updLatest && updClone) return 'Update available (developer install)';
         if (bridgeOutdated()) return bridgeHearsUpdates() ? 'Bridge update needed. Click to update' : 'Bridge update needed. Click for steps';
         if (offered && updPhase === 'failed') return 'Update failed. Click to retry';

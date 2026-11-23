@@ -720,7 +720,7 @@ const CONNECTED_TITLE = 'Connected';
   // an offered update keeps its purple and click
   ws.deliver({ type: 'update', available: true, latest: '0.9.0', current: '0.8.0', headline: null });
   assert.ok(h.has('update') && h.has('clickable'));
-  assert.strictEqual(h.title(), TIP);
+  assert.strictEqual(h.title(), TIP + ' | Update available. Click to install', 'the update text is still there, after the warning');
   h.click();
   assert.deepStrictEqual(ws.sent.at(-1), { type: 'update_request', version: '0.9.0' }, 'the click still installs');
   // cleared by the bridge

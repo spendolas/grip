@@ -81,25 +81,36 @@ assert.deepEqual(b.alerts()[0], { type: 'foreign_alert', active: true, tooltip: 
 await sleep(100);
 assert.equal(a.toasts().length, 1, 'the first window is not toasted again');
 
+// an iframe respawn (the same file, a new session) gets the frame but is not toasted again
+a.ws.close();
+await waitFor(() => a.closed);
+const a2 = await client('A');
+await waitFor(() => a2.alerts().length === 1);
+await sleep(150);
+assert.equal(a2.toasts().length, 0, 'a respawned window of the same file is not toasted again');
+bridge.emit('session-change');
+await sleep(100);
+assert.equal(a2.toasts().length, 0);
+
 // alert only: nothing was closed, and an ordinary request still completes (review focus 5)
-assert.ok(!a.closed && !b.closed);
+assert.ok(!a2.closed && !b.closed);
 const mcp = { id: 'm1', activeFileId: null, bind: { name: 'A' }, subscriptions: { selection: false, document: false, currentPage: false }, rateBucket: { tokens: 100, lastRefillMs: Date.now() }, toolScopeSpec: null, updateNoticeSent: false };
 const req = bridge.request('get_page_context', {}, mcp);
-await waitFor(() => a.frames.some((f) => f.method === 'get_page_context'));
-const frame = a.frames.find((f) => f.method === 'get_page_context');
-a.ws.send(JSON.stringify({ id: frame.id, result: { ok: true } }));
+await waitFor(() => a2.frames.some((f) => f.method === 'get_page_context'));
+const frame = a2.frames.find((f) => f.method === 'get_page_context');
+a2.ws.send(JSON.stringify({ id: frame.id, result: { ok: true } }));
 assert.deepEqual(await req, { ok: true });
 
 // resolved: the alert clears itself
 st.probe = { kind: 'closed' };
 await guard.refresh();
-await waitFor(() => a.alerts().length === 2 && b.alerts().length === 2);
-assert.deepEqual(a.alerts()[1], { type: 'foreign_alert', active: false, tooltip: '' });
+await waitFor(() => a2.alerts().length === 2 && b.alerts().length === 2);
+assert.deepEqual(a2.alerts()[1], { type: 'foreign_alert', active: false, tooltip: '' });
 
 // and if it comes back it is announced again
 st.probe = { kind: 'welcome', version: '1.0.0', flavour: null };
 await guard.refresh();
-await waitFor(() => a.alerts().length === 3 && a.toasts().length === 2);
+await waitFor(() => a2.alerts().length === 3 && a2.toasts().length === 1);
 
 off();
 for (const s of sockets) try { s.close(); } catch {}
