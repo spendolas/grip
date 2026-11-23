@@ -68,6 +68,15 @@ export const PLUGIN_ASSETS: Record<string, string> = {
   'grip-plugin-ui.html': 'ui.html',
   'grip-plugin-manifest.json': 'manifest.json',
 };
+// ---- payload loader begin (phase 3) ----
+// A flavour with `payloadLoader` also installs the signed plugin payload next to the plugin files
+// (the bridge serves it to the shell plugin, see payload.ts). The name matches PAYLOAD_NAME in
+// scripts/payload.mjs. PLUGIN_ASSETS and UPDATE_ASSET_NAMES stay the public list.
+export const ASSET_PAYLOAD = 'grip-plugin-payload.json';
+export function pluginAssets(): Record<string, string> {
+  return FLAVOUR.payloadLoader ? { ...PLUGIN_ASSETS, [ASSET_PAYLOAD]: 'payload.json' } : PLUGIN_ASSETS;
+}
+// ---- payload loader end ----
 export const UPDATE_ASSET_NAMES = [ASSET_BRIDGE, ...Object.keys(PLUGIN_ASSETS), ASSET_SUMS, ASSET_SUMS_SIG, ASSET_COMPAT];
 // release-page footer marker: everything from this line on is for GitHub
 // readers (install pointer), never part of an update notice. Appended by
@@ -488,12 +497,13 @@ export interface PluginInfo {
   minBridge?: string | null;     // the plugin says: I need a bridge >= this
   protocol?: number | null;      // the plugin's protocol integer (absent: a plugin that predates it)
   minBridgeProtocol?: number | null;   // the plugin says: I need a bridge protocol >= this
+  shellProtocol?: number | null;       // the window runs the loader shell (hello.shellProtocol, loader flavours)
 }
 
 export function pluginInfos(bridge: { snapshot(): { plugins: any[] } }): PluginInfo[] {
   return bridge.snapshot().plugins.map((p) => ({
     sessionId: p.sessionId, pluginVersion: p.pluginVersion, fileName: p.fileName, fileKey: p.fileKey, wsReady: p.wsReady, hello: p.hello, minBridge: p.minBridge,
-    protocol: p.protocol ?? null, minBridgeProtocol: p.minBridgeProtocol ?? null,
+    protocol: p.protocol ?? null, minBridgeProtocol: p.minBridgeProtocol ?? null, shellProtocol: p.shellProtocol ?? null,
   }));
 }
 
@@ -515,6 +525,8 @@ export type PluginVerdict =
 // rule: unknown version = incompatible.
 export function pluginIncompatibility(minPlugin: string, latest: string, p: PluginInfo, minProtocol?: number | null): string | null {
   const where = p.fileName ? ` in "${p.fileName}"` : '';
+  // Loader flavour: a shell window gets its plugin code from the very update that is on offer.
+  if (FLAVOUR.payloadLoader && typeof p.shellProtocol === 'number' && p.shellProtocol >= 1) return null;
   if (minProtocol != null && typeof p.protocol === 'number') {
     if (p.protocol >= minProtocol) return null;
     return `plugin ${p.pluginVersion ?? '?'}${where} speaks protocol ${p.protocol} but ${latest} needs protocol >= ${minProtocol}; update the Grip plugin in Figma first`;
@@ -627,6 +639,7 @@ function pluginVersionOf(codeJs: string): string | null {
 // The plugin version of the copy installed next to this bridge
 // (~/.grip/figma-plugin/code.js), or null when there is none.
 export function installedPluginVersion(): string | null {
+  if (FLAVOUR.payloadLoader) return null;   // loader flavour: code.js is the shell; plugin copies, nudges and refresh clicks do not apply
   const path = join(gripHome(), 'figma-plugin', 'code.js');
   try {
     const mtime = statSync(path).mtimeMs;
@@ -709,6 +722,7 @@ export interface CopySyncResult { updated: string[]; skipped: Array<{ dir: strin
 // ~/.grip/figma-plugin. Never throws; never touches a skipped folder.
 export function syncPluginCopies(): CopySyncResult {
   const out: CopySyncResult = { updated: [], skipped: [] };
+  if (FLAVOUR.payloadLoader) return out;    // loader flavour: nothing to refresh, the payload is delivered by the bridge
   const installed = installedPluginVersion();
   const src = join(gripHome(), 'figma-plugin');
   const { copies } = findPluginCopies(true);
@@ -1333,7 +1347,7 @@ export async function installUpdate(o: InstallOptions): Promise<InstallResult> {
     // 1. download + verify everything first
     const bridgeBuf = await downloadVerified(rel, ASSET_BRIDGE, sums);
     const pluginBufs: Array<[string, Buffer]> = [];
-    for (const [assetName, localName] of Object.entries(PLUGIN_ASSETS)) {
+    for (const [assetName, localName] of Object.entries(pluginAssets())) {
       const buf = await downloadVerified(rel, assetName, sums);
       if (localName === 'manifest.json') {
         let id: unknown; try { id = JSON.parse(buf.toString('utf8'))?.id; } catch { id = undefined; }

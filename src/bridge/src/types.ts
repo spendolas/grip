@@ -61,6 +61,8 @@ export interface WSHello {
   // oldest bridge protocol it works with. Absent in plugins that predate them.
   protocol?: number;
   minBridgeProtocol?: number;
+  // The window runs the loader shell (payloadLoader flavours; the shell page adds it to the hello).
+  shellProtocol?: number;
   capabilities?: string[];
   // Build flavour of the plugin (absent: a plugin that predates flavours, the public 'grip').
   flavour?: string;

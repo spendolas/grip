@@ -118,6 +118,8 @@ interface Session {
   // Protocol integers from the hello (absent: a plugin that predates them; see PROTOCOL_VERSION).
   protocol?: number;
   minBridgeProtocol?: number;
+  // The window runs the loader shell (hello.shellProtocol, payloadLoader flavours).
+  shellProtocol?: number;
   capabilities?: string[];
   lastPong: number;
   pingTimer?: NodeJS.Timeout;
@@ -1920,6 +1922,7 @@ export class PluginBridge extends EventEmitter {
     sess.minBridge = minB !== '' ? minB : undefined;
     sess.protocol = protocolInt(hello.protocol);
     sess.minBridgeProtocol = protocolInt(hello.minBridgeProtocol);
+    sess.shellProtocol = protocolInt(hello.shellProtocol);
     sess.capabilities = Array.isArray(hello.capabilities)
       ? hello.capabilities.slice(0, 200).map((c) => clip(c, 64)).filter((c) => c !== '')
       : [];
@@ -2175,6 +2178,7 @@ export class PluginBridge extends EventEmitter {
         minBridge: s.minBridge ?? null,
         protocol: s.protocol ?? null,
         minBridgeProtocol: s.minBridgeProtocol ?? null,
+        shellProtocol: s.shellProtocol ?? null,
         // false until the plugin's hello arrives (version/file not known yet)
         hello: s.helloAt > 0,
         // pairing: this socket proved itself / queued in the reserved pool (its connect URL carried a valid ticket)
