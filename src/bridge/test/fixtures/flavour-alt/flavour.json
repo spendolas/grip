@@ -18,5 +18,24 @@
   "releaseKeys": [
     "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAK0wou07B3THxB1KkLyofMNG7eB9I4lBIIENsuWxBwLM=\n-----END PUBLIC KEY-----\n"
   ],
-  "lockOverrides": true
+  "lockOverrides": true,
+  "watchlist": [
+    {
+      "slug": "zenith",
+      "wsPort": 7977,
+      "httpPort": 7978,
+      "homeDirName": ".zenith",
+      "statusFile": ".zenith-bridge.status",
+      "logFile": ".zenith-bridge.log",
+      "loginItem": "Zenith Daemon",
+      "launchLabel": "com.zenith.bridge",
+      "mcpName": "zenith",
+      "entryName": "zenith-bridge",
+      "ipcName": "zenith-bridge",
+      "serviceName": "zenith-bridge",
+      "startupLauncher": "ZenithDaemon.vbs",
+      "minSecureVersion": "2.0.0"
+    }
+  ],
+  "enforcement": "alert"
 }

@@ -111,7 +111,7 @@ const pluginGen = readFileSync(outP, 'utf8');
 assert.ok(!/\b(export|import)\b/.test(pluginGen), 'the plugin flavour file has no module syntax');
 assert.match(pluginGen, /^const FLAVOUR: Flavour = /m);
 // the same values, minus the release keys (the plugin never verifies a release)
-assert.equal(pluginGen.replace(/^interface /m, 'export interface ').replace(/^const FLAVOUR/m, 'export const FLAVOUR'), readFileSync(outB, 'utf8').replace(/^  releaseKeys: .*\n/gm, ''));
+assert.equal(pluginGen.replace(/^interface /m, 'export interface ').replace(/^const FLAVOUR/m, 'export const FLAVOUR'), readFileSync(outB, 'utf8').replace(/^  releaseKeys: .*\n/gm, '').replace(/^export interface WatchEntry \{[\s\S]*?\n\}\n\n/m, '').replace(/^  (watchlist|enforcement): .*\n/gm, ''));
 // templates rendered, no placeholder left
 for (const n of ['ui.html', 'manifest.json']) assert.ok(!/__[A-Z][A-Z0-9_]*__/.test(readFileSync(join(outDir, n), 'utf8')), n);
 // a placeholder the generator does not know is an error
@@ -125,5 +125,37 @@ assert.equal(renderTemplate('x', 'ws://localhost:__WS_PORT__ __FLAVOUR__', loadF
   const o = mkdtempSync(join(tmpdir(), 'flavour-linkout-'));
   execFileSync(process.execPath, [link, '--dir', altDir, '--out-bridge', join(o, 'b.ts'), '--out-plugin', join(o, 'p.ts'), '--out-plugin-dir', join(o, 'pd')]);
   for (const f of ['b.ts', 'p.ts', 'pd/ui.html', 'pd/manifest.json']) assert.ok(existsSync(join(o, f)), `symlinked run wrote ${f}`);
+}
+// ---- phase 2B: watchlist + enforcement
+{
+  const ent = () => JSON.parse(JSON.stringify(loadFlavour(altDir).watchlist[0]));
+  const alert = (f, mut) => { f.enforcement = 'alert'; f.watchlist = [ent()]; if (mut) mut(f.watchlist[0], f); };
+  rejects('wl-missing', (f) => { delete f.watchlist; }, 'watchlist');
+  rejects('enf-missing', (f) => { delete f.enforcement; }, 'enforcement');
+  rejects('enf-block', (f) => { f.enforcement = 'block'; }, 'enforcement');
+  rejects('enf-alert-empty', (f) => { f.enforcement = 'alert'; f.watchlist = []; }, 'watchlist');
+  rejects('wl-missing-floor', (f) => alert(f, (e) => { delete e.minSecureVersion; }), 'minSecureVersion');
+  rejects('wl-extra', (f) => alert(f, (e) => { e.x = 1; }), 'watchlist');
+  rejects('wl-floor-short', (f) => alert(f, (e) => { e.minSecureVersion = '0.9'; }), 'minSecureVersion');
+  rejects('wl-own-slug', (f) => alert(f, (e, ff) => { e.slug = ff.slug; }), 'slug');
+  rejects('wl-dup-slug', (f) => { alert(f); f.watchlist.push({ ...ent(), wsPort: 7990, httpPort: 7991 }); }, 'slug');
+  rejects('wl-own-ws', (f) => alert(f, (e, ff) => { e.wsPort = ff.wsPort; }), 'wsPort');
+  rejects('wl-own-http', (f) => alert(f, (e, ff) => { e.httpPort = ff.httpPort; }), 'httpPort');
+  rejects('wl-same-ports', (f) => alert(f, (e) => { e.httpPort = e.wsPort; }), 'httpPort');
+  rejects('wl-home-dotdot', (f) => alert(f, (e) => { e.homeDirName = '..'; }), 'homeDirName');
+  rejects('wl-home-slash', (f) => alert(f, (e) => { e.homeDirName = 'a/b'; }), 'homeDirName');
+  rejects('wl-home-own', (f) => alert(f, (e, ff) => { e.homeDirName = ff.homeDirName; }), 'homeDirName');
+  rejects('wl-mcp-space', (f) => alert(f, (e) => { e.mcpName = 'a b'; }), 'mcpName');
+  assert.equal(loadFlavour(altDir).watchlist[0].slug, 'zenith');
+  assert.equal(loadFlavour(altDir).enforcement, 'alert');
+  // the shipped public flavour watches nothing
+  const pub = loadFlavour(realDir);
+  assert.equal(pub.enforcement, 'off');
+  assert.equal(pub.watchlist.length, 0);
+  // the watchlist reaches the bridge's flavour file but never the plugin's
+  const o = join(tmp, 'gen-wl');
+  execFileSync('node', [script, '--dir', altDir, '--out-bridge', join(o, 'b.ts'), '--out-plugin', join(o, 'p.ts'), '--out-plugin-dir', join(o, 'fp')], { stdio: 'pipe' });
+  assert.match(readFileSync(join(o, 'b.ts'), 'utf8'), /export interface WatchEntry/);
+  assert.match(readFileSync(join(o, 'b.ts'), 'utf8'), /watchlist: Object\.freeze\(/);
 }
 console.log('flavour: ok');

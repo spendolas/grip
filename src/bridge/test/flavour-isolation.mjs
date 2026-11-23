@@ -46,6 +46,21 @@ for (const entry of ['src/index.ts', 'src/install.ts']) {
 }
 assert.deepEqual(leaks, [], `public identity strings in an acme build:\n${leaks.join('\n')}`);
 
+
+// ---- (a3) the foreign watchlist (data) never reaches the plugin, and code never names it
+{
+  for (const n of ['figma-plugin/ui.html', 'figma-plugin/manifest.json', 'plugin.gen.ts']) {
+    const t = readFileSync(join(tmp, n), 'utf8');
+    for (const w of ['zenith', 'watchlist', 'enforcement']) assert.ok(!t.includes(w), `${n} has no ${w}`);
+  }
+  const acmeBundle = await bundle('src/index.ts');
+  const stray = acmeBundle.split('\n').filter((l) => (/zenith/i.test(l) || l.includes('7977')) && !l.includes('watchlist: Object.freeze'));
+  assert.deepEqual(stray, [], `foreign identity strings outside the watchlist literal:\n${stray.join('\n')}`);
+  const pubTmp2 = mkdtempSync(join(tmpdir(), 'flavour-isolation-pub2-'));
+  const pubText = await flavourBundler(join(repo, 'flavour'), pubTmp2).bundle('src/index.ts');
+  assert.ok(!/zenith/i.test(pubText), 'public bundle has no zenith');
+}
+
 // ---- (a2) the rendered plugin UI names the flavour's own home dir, and the MCP server its own name
 {
   const ui = readFileSync(join(tmp, 'figma-plugin', 'ui.html'), 'utf8');
