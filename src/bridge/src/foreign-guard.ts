@@ -5,6 +5,8 @@
 import { join } from 'node:path';
 import { FLAVOUR, type WatchEntry } from './flavour.gen.js';
 import { liveIdentity } from './identity.js';
+import type { PluginBridge } from './ws-server.js';
+import { pluginInfos } from './update.js';
 import { detectForeign, realDetectIo, type DetectIo, type ForeignReport, type ForeignState } from './foreign-detect.js';
 
 export interface OwnInfo { displayName: string; entryPath: string }
@@ -125,6 +127,30 @@ export class ForeignGuard {
     this.lastLog = now;
     process.stderr.write(`[grip] ${msg}\n`);
   }
+}
+
+// Connect the guard to the plugin strips: the tooltip frame (replayed on hello by the bridge) and
+// ONE toast per window and alert. Alert only: nothing here changes a window's connection.
+export function wireForeignToBridge(bridge: PluginBridge, g: ForeignGuard): () => void {
+  const toasted = new Set<string>();
+  const apply = () => {
+    const own = ownInfo();
+    const report = g.current();
+    const texts = foreignAlertTexts(foreignGripSummary(report, own), own);
+    bridge.setForeignAlert(texts ? { active: true, tooltip: texts.tooltip } : null);
+    if (!texts) { toasted.clear(); return; }   // resolved: if it comes back it is announced again
+    const w = report!.worst!;
+    for (const p of pluginInfos(bridge)) {
+      if (!p.sessionId || p.hello === false || p.wsReady === false) continue;
+      const id = `${p.sessionId}|${w.slug}|${w.version ?? ''}`;
+      if (toasted.has(id)) continue;
+      if (bridge.toast(p.sessionId, texts.toast)) toasted.add(id);   // a failed send retries on the next change
+    }
+  };
+  apply();
+  const off = g.onChange(apply);
+  bridge.on('session-change', apply);
+  return () => { off(); bridge.off('session-change', apply); };
 }
 
 let guard: ForeignGuard | null = null;

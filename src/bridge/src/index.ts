@@ -19,7 +19,7 @@ import { isUpdateCli, runUpdateCli } from './update-cli.js';
 import { isPairCli, runPairCli } from './pair-cli.js';
 import { PairingStore } from './pairing.js';
 import { IDENTITY } from './identity.js';
-import { createForeignGuardFromFlavour, setForeignGuard } from './foreign-guard.js';
+import { createForeignGuardFromFlavour, setForeignGuard, wireForeignToBridge } from './foreign-guard.js';
 import { startUpdateChecks, setRestartHook, isManagedInstall, wireUpdateToBridge } from './update.js';
 
 // `--selftest`: the self-updater runs a freshly downloaded bridge once with this
@@ -218,7 +218,7 @@ async function runDaemon(bridge: PluginBridge) {
   wireUpdateToBridge(bridge);
   // >>> phase 2B: insecure-Grip guard (a flavour with a watchlist only; the public build has none)
   const foreignGuard = createForeignGuardFromFlavour();
-  if (foreignGuard) { setForeignGuard(foreignGuard); foreignGuard.start(); }
+  if (foreignGuard) { setForeignGuard(foreignGuard); wireForeignToBridge(bridge, foreignGuard); foreignGuard.start(); }
   // <<< phase 2B
   startUpdateChecks();
   setRestartHook(() => restartDaemon(ipc, http, bridge), isManagedInstall());

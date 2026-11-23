@@ -137,6 +137,9 @@ interface Session {
   // Key of the last `update` frame sent to this session ('off' until the
   // strip has been told something). Lets us skip duplicate frames.
   updateSent?: string;
+  // >>> phase 2B: key of the last `foreign_alert` frame sent to this session ('off' until told something)
+  foreignAlertSent?: string;
+  // <<< phase 2B
   // Pairing (pairing.ts). `authed`: this socket may say hello and be routed to. It is true
   // from the start while the bridge does not enforce pairing, else only after a verified
   // proof or a fresh pairing. `authNonce` is this connection's challenge (empty = the
@@ -178,6 +181,8 @@ const MAX_RESERVED = Number(process.env.GRIP_MAX_RESERVED ?? 8);
 // Update state pushed to plugin strips (see update.ts / wireUpdateToBridge).
 // `available` is the SIGNAL (update available AND compatible with every
 // connected plugin), not the raw "a newer release exists".
+// phase 2B: what the strip is told about an insecure foreign Grip
+export interface ForeignAlertBroadcast { active: boolean; tooltip: string }
 export interface UpdateBroadcast { available: boolean; latest: string | null; current?: string; headline?: string | null; eligible?: (sessionId: string) => boolean }
 
 // A Figma plugin iframe connects with Origin "null" (sandboxed) — or the
@@ -1927,6 +1932,7 @@ export class PluginBridge extends EventEmitter {
     // broadcast; then make sure THIS strip has the current state (deduped).
     this.emit('session-change');
     this.pushUpdate(sessionId);
+    this.pushForeignAlert(sessionId);   // phase 2B
   }
 
   // Rename tracking on a hello (see RESPAWN_MATCH_MS): the same window under a
@@ -2023,6 +2029,27 @@ export class PluginBridge extends EventEmitter {
     sess.updateSent = key;
     this.sendTo(sessionId, frame);
   }
+
+  // >>> phase 2B: insecure foreign Grip alert for the strip (tooltip only; the strip's state never changes)
+  private foreignAlert: ForeignAlertBroadcast | null = null;
+
+  // Set by the guard wiring whenever the alert changes; replayed to each plugin on its hello.
+  setForeignAlert(a: ForeignAlertBroadcast | null) {
+    this.foreignAlert = a;
+    for (const id of this.sessions.keys()) this.pushForeignAlert(id);
+  }
+
+  // Deduped per session; a strip that has nothing to show and was never told anything gets no frame.
+  pushForeignAlert(sessionId: string, force = false) {
+    const sess = this.sessions.get(sessionId);
+    if (!sess || sess.helloAt === 0) return;
+    const a = this.foreignAlert;
+    const key = a?.active ? JSON.stringify(a) : 'off';
+    if (!force && key === (sess.foreignAlertSent ?? 'off')) return;
+    sess.foreignAlertSent = key;
+    this.sendTo(sessionId, { type: 'foreign_alert', active: !!a?.active, tooltip: a?.active ? a.tooltip : '' });
+  }
+  // <<< phase 2B
 
   // Send one JSON frame to one plugin session (best effort, never throws).
   // A toast in ONE Figma window (the plugin's own `notify` method, so it works with every

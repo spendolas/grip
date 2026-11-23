@@ -700,4 +700,50 @@ const CONNECTED_TITLE = 'Connected';
   }
 }
 
+// ------------------------------------------------------------ phase 2B: foreign Grip alert (tooltip only)
+{
+  const TIP = 'Insecure Grip found: update or uninstall';
+  assert.ok(!html.includes('#state.alert') && !html.includes('--c-alert'), 'no new strip colour or state for the alert');
+  const h = harness();
+  const ws = h.ws();
+  ws.openWelcomed();
+  assert.ok(h.has('connected'));
+  const before = h.classes();
+  ws.deliver({ type: 'foreign_alert', active: true, tooltip: TIP });
+  assert.strictEqual(h.title(), TIP);
+  assert.deepStrictEqual(h.classes(), before, 'the classes (so the colour) are exactly what they were: still connected, usable');
+  assert.ok(h.has('connected') && !h.has('error') && !h.has('warning') && !h.has('actionable'));
+  assert.strictEqual(ws.readyState, 1, 'the connection is untouched');
+  // requests still reach the plugin while the alert shows
+  ws.deliver({ id: 'r1', method: 'get_node', params: {} });
+  assert.strictEqual(h.posted.at(-1).pluginMessage.kind, 'request');
+  // an offered update keeps its purple and click
+  ws.deliver({ type: 'update', available: true, latest: '0.9.0', current: '0.8.0', headline: null });
+  assert.ok(h.has('update') && h.has('clickable'));
+  assert.strictEqual(h.title(), TIP);
+  h.click();
+  assert.deepStrictEqual(ws.sent.at(-1), { type: 'update_request', version: '0.9.0' }, 'the click still installs');
+  // cleared by the bridge
+  const h2 = harness();
+  const w2 = h2.ws();
+  w2.openWelcomed();
+  w2.deliver({ type: 'foreign_alert', active: true, tooltip: TIP });
+  w2.deliver({ type: 'foreign_alert', active: false, tooltip: '' });
+  assert.strictEqual(h2.title(), 'Connected');
+  // a malformed frame shows nothing; control characters never reach the tooltip
+  w2.deliver({ type: 'foreign_alert', active: true });
+  assert.strictEqual(h2.title(), 'Connected');
+  w2.deliver({ type: 'foreign_alert', active: true, tooltip: 'a\u0007b\nc' });
+  assert.strictEqual(h2.title(), 'abc');
+  // a dropped connection forgets it (the next bridge connection re-announces)
+  w2.drop();
+  assert.strictEqual(h2.title(), 'Bridge not running. Click for setup');
+  // an untrusted socket (another build) cannot set it
+  const h3 = harness();
+  const w3 = h3.ws();
+  w3.open(); w3.deliver({ kind: 'welcome', sessionId: 's0', flavour: 'acme' });
+  w3.deliver({ type: 'foreign_alert', active: true, tooltip: TIP });
+  assert.notStrictEqual(h3.title(), TIP);
+}
+
 console.log('plugin-ui.mjs OK');
