@@ -1,0 +1,12 @@
+{
+  "pubHex": "2b5325f463a76ef5026eb341a7c8e3c069751dc008c2af7ce97034118e051566",
+  "header": {
+    "shellProtocol": 1,
+    "flavour": "acme",
+    "version": "0.9.7"
+  },
+  "code": "var greeting = \"héllo\";\n",
+  "ui": "",
+  "sigB64": "yEur4jQNxp68G6OfEHCORYB6n9LGm7q743Uo+IGGswM2OLnQvNchuSVKHwnt8hVZSvSapMUUS2UH7Xn7B3/oDQ==",
+  "messageSha256": "effc2943be20cfa7b4af682544b11bf85947836c4ef46d592b4120a7270c0b1e"
+}
