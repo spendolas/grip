@@ -155,7 +155,7 @@ const TEMPLATES = ['ui.html', 'manifest.json'];
 // already restricted to [a-z0-9-].
 export function renderTemplate(name, text, f) {
   const esc = (v) => JSON.stringify(String(v)).slice(1, -1);
-  const values = { WS_PORT: f.wsPort, FLAVOUR: f.slug, PLUGIN_ID: f.pluginId, PLUGIN_NAME: f.pluginName, HOME_LABEL: '~/' + f.homeDirName };
+  const values = { WS_PORT: f.wsPort, FLAVOUR: f.slug, PLUGIN_ID: f.pluginId, PLUGIN_NAME: f.pluginName, HOME_LABEL: '~/' + f.homeDirName, PAGES_URL: f.pagesUrl };
   const out = text.replace(/__([A-Z][A-Z0-9_]*)__/g, (m, k) => (k in values ? esc(values[k]) : m));
   const left = out.match(/__[A-Z][A-Z0-9_]*__/g);
   if (left) throw new Error(`gen-flavour: placeholder ${[...new Set(left)].join(', ')} left in ${name}`);
