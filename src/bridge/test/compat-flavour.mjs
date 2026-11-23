@@ -80,7 +80,7 @@ mkdirSync(process.env.GRIP_HOME, { recursive: true });
 const acmeDir = join(tmp, 'acme-flavour');
 mkdirSync(acmeDir);
 const alt = JSON.parse(readFileSync(join(altDir, 'flavour.json'), 'utf8'));
-writeFileSync(join(acmeDir, 'flavour.json'), JSON.stringify({ ...alt, releaseKeys: [TEST_PUB], lockOverrides: false }, null, 2));
+writeFileSync(join(acmeDir, 'flavour.json'), JSON.stringify({ ...alt, releaseKeys: [TEST_PUB], lockOverrides: false, payloadLoader: false }, null, 2));
 const acmeFile = join(tmp, 'update-acme.mjs');
 mkdirSync(join(tmp, 'gen'), { recursive: true });
 writeFileSync(acmeFile, await flavourBundler(acmeDir, join(tmp, 'gen')).bundle('src/update.ts'));
