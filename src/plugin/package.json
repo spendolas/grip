@@ -3,7 +3,7 @@
   "version": "0.9.6",
   "private": true,
   "scripts": {
-    "build": "node ../../scripts/gen-flavour.mjs && tsc",
+    "build": "node ../../scripts/gen-flavour.mjs && tsc && node ../../scripts/build-shell.mjs",
     "dev": "node ../../scripts/gen-flavour.mjs && tsc --watch"
   },
   "devDependencies": {
