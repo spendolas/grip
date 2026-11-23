@@ -95,6 +95,51 @@ export function homeSafeToDelete(ctx: ForeignCtx, e: WatchEntry, h: HomeFacts): 
   return { ok: true };
 }
 
+// What belongs to THIS build, so a foreign-removal can never touch it (phase 2B fix wave).
+export interface OwnIdentity {
+  // this process, its parent and the daemon in OUR status file
+  pids: number[];
+  // our home folder (null when unknown) and every identity path of ours
+  home: string | null;
+  paths: string[];
+}
+
+const hasToken = (cmd: string, token: string) => new RegExp(`(^|\\s)${token}(\\s|$)`).test(cmd);
+
+// Is `cmd` the command line of THAT foreign build's daemon? It must name the EXACT foreign entry
+// file (case-folded on darwin/win32) followed by the end, a space or a quote, carry `--daemon` as
+// a whole argument, and not point into OUR home folder. (Every flavour's entry file is called
+// the same, so the bare name proves nothing.)
+export function isForeignDaemonCommand(ctx: ForeignCtx, e: WatchEntry, cmd: string, own?: { home?: string | null }): boolean {
+  const p = pathFor(ctx.platform);
+  const fold = foldCase(ctx.platform);
+  const entry = fold(foreignPaths(ctx, e).entryFile);
+  const c = fold(cmd);
+  if (!hasToken(c, '--daemon')) return false;
+  if (own?.home && c.includes(fold(own.home + p.sep))) return false;
+  let at = c.indexOf(entry);
+  while (at >= 0) {
+    const before = at === 0 ? ' ' : c[at - 1];
+    const after = at + entry.length >= c.length ? ' ' : c[at + entry.length];
+    if (/[\s"']/.test(before) && /[\s"']/.test(after)) return true;
+    at = c.indexOf(entry, at + 1);
+  }
+  return false;
+}
+
+// The rotated log and the watchdog dump files the foreign daemon leaves next to its status file
+// (named from its file prefix), and nothing else.
+export function isForeignExtraFile(ctx: ForeignCtx, e: WatchEntry, path: string): boolean {
+  const p = pathFor(ctx.platform);
+  const fold = foldCase(ctx.platform);
+  if (fold(p.dirname(path)) !== fold(p.normalize(ctx.home))) return false;
+  const base = fold(p.basename(path));
+  if (base === fold(`${e.logFile}.1`)) return true;
+  if (!e.logFile.endsWith('.log')) return false;
+  const prefix = fold(e.logFile.slice(0, -4)).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^${prefix}\\.dump-\\d+\\.json$`).test(base);
+}
+
 // True only when an MCP config entry points at the foreign bridge (its HTTP endpoint, or a
 // path inside its home folder). An entry that merely has the same NAME but points at this
 // build is not foreign.

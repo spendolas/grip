@@ -84,7 +84,15 @@ function validateWatchlist(raw) {
     for (const k of WATCH_SPACED) {
       if (typeof e[k] !== 'string' || !/^[A-Za-z0-9._-](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9._-])?$/.test(e[k]) || /^\.+$/.test(e[k])) throw new Error(`flavour: watchlist field "${k}" may only contain letters, digits, spaces, ".", "-" and "_"`);
     }
-    if (e.homeDirName === raw.homeDirName) throw new Error("flavour: watchlist field \"homeDirName\" must differ from this flavour's own");
+    // every name a removal deletes must differ from THIS build's, ignoring case (macOS and Windows
+    // file systems do): a foreign removal must never be able to name our own files
+    const ownNames = {
+      homeDirName: raw.homeDirName, loginItem: raw.daemonAppName, statusFile: `${raw.filePrefix}.status`, logFile: `${raw.filePrefix}.log`,
+      ipcName: raw.ipcName, launchLabel: raw.launchLabel, serviceName: `${raw.slug}-bridge`, startupLauncher: `${raw.daemonAppName.replace(/\s+/g, '')}.vbs`,
+    };
+    for (const [k, mine] of Object.entries(ownNames)) {
+      if (e[k].toLowerCase() === mine.toLowerCase()) throw new Error(`flavour: watchlist field "${k}" must differ from this flavour's own (${mine}), ignoring case`);
+    }
     if (!MCP_NAME_RE.test(e.mcpName)) throw new Error('flavour: watchlist field "mcpName" is not a valid MCP name');
     if (typeof e.minSecureVersion !== 'string' || !/^\d+\.\d+\.\d+$/.test(e.minSecureVersion)) throw new Error('flavour: watchlist field "minSecureVersion" must look like 1.2.3');
   }

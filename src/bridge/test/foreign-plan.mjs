@@ -130,6 +130,21 @@ for (const [what, home] of [
   assert.equal(JSON.stringify(facts), snapshot, 'the input is not mutated');
 }
 
+// ---- typed pids on the stop items, never parsed from the display text
+{
+  const { c, facts } = full('darwin');
+  const items = planForeignRemoval(c, Z, facts);
+  assert.equal(items.find((i) => i.kind === 'stop-daemon').pid, 4242);
+  assert.equal(items.find((i) => i.kind === 'stop-supervisor').pid, 4242);
+}
+// ---- rotated log and dump files named from the watchlist prefix (and only those)
+{
+  const { c, facts } = full('linux');
+  const h = c.home;
+  const items = planForeignRemoval(c, Z, { ...facts, extraFiles: [`${h}/.zenith-bridge.log.1`, `${h}/.zenith-bridge.dump-1.json`, `${h}/.zenith-bridge.dump-x.json`, '/etc/hosts'] });
+  assert.deepEqual(items.filter((i) => i.kind === 'log-file').map((i) => i.target), [`${h}/.zenith-bridge.log`, `${h}/.zenith-bridge.log.1`, `${h}/.zenith-bridge.dump-1.json`]);
+}
+
 // ---- formatPlan
 {
   const { c, facts } = full('darwin');
@@ -138,6 +153,7 @@ for (const [what, home] of [
   assert.equal(lines.length, items.length);
   items.forEach((i, idx) => assert.ok(lines[idx].includes(i.target), lines[idx]));
   assert.ok(lines.at(-1).toLowerCase().includes('figma'));
+  assert.ok(lines.some((l) => l.startsWith('delete the folder and everything in it: /Users/u/.zenith')), lines.join('|'));
 }
 
 console.log('foreign-plan: ok');

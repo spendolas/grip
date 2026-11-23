@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { foreignPaths, homeSafeToDelete, mcpEntryIsForeign } from '../dist/foreign-paths.js';
+import { foreignPaths, homeSafeToDelete, mcpEntryIsForeign, isForeignDaemonCommand, isForeignExtraFile } from '../dist/foreign-paths.js';
 import { isDaemonCommand } from '../dist/update.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -88,6 +88,35 @@ const ctx = (platform, over = {}) => ({ platform, home: platform === 'win32' ? `
 assert.equal(isDaemonCommand('node /x/zenith-bridge.mjs --daemon --persistent', 'zenith-bridge'), true);
 assert.equal(isDaemonCommand('node /x/zenith-bridge.mjs', 'zenith-bridge'), false);
 assert.equal(isDaemonCommand('node /x/other.mjs --daemon', 'zenith-bridge'), false);
-assert.equal(isDaemonCommand('node /x/grip-bridge.mjs --daemon', 'grip-bridge'), true);
+assert.equal(isDaemonCommand('node /x/zenith-bridge.mjs --daemonize', 'zenith-bridge'), false, '--daemon is a whole argument');
+assert.equal(isDaemonCommand('node /x/grip-bridge.mjs --daemon', 'grip-bridge'), true, 'stopRunningDaemon (our own daemon) keeps working');
+
+// isForeignDaemonCommand: realistic COLLIDING names. Every flavour's entry file is grip-bridge.mjs,
+// so the bare name proves nothing; the exact foreign entry path does.
+{
+  const G = { ...Z, homeDirName: '.grip', entryName: 'grip-bridge', loginItem: 'Grip Daemon' };
+  const c = ctx('linux');
+  const ownHome = `/Users/${U}/.grip-alt`;
+  const foreignCmd = `node /Users/${U}/.grip/grip-bridge.mjs --daemon --persistent`;
+  assert.equal(isForeignDaemonCommand(c, G, foreignCmd, { home: ownHome }), true, 'the real foreign daemon');
+  assert.equal(isForeignDaemonCommand(c, G, `node ${ownHome}/grip-bridge.mjs --daemon --persistent`, { home: ownHome }), false, 'OUR daemon (same entry name)');
+  assert.equal(isForeignDaemonCommand(c, G, `node "/Users/${U}/.grip/grip-bridge.mjs" --daemon`, { home: ownHome }), true, 'quoted path');
+  assert.equal(isForeignDaemonCommand(c, G, `node /Users/${U}/.grip/grip-bridge.mjs --daemonize`, { home: ownHome }), false, 'whole-token --daemon');
+  assert.equal(isForeignDaemonCommand(c, G, `node /Users/${U}/.grip/grip-bridge.mjs`, { home: ownHome }), false, 'no --daemon');
+  assert.equal(isForeignDaemonCommand(c, G, `node /Users/${U}/.grip/grip-bridge.mjs.bak --daemon`, { home: ownHome }), false, 'a longer file name');
+  assert.equal(isForeignDaemonCommand(c, G, `node /other/Users/${U}/.grip/x/grip-bridge.mjs --daemon`, { home: ownHome }), false, 'another path');
+  assert.equal(isForeignDaemonCommand(ctx('darwin'), G, foreignCmd.replace('.grip', '.Grip'), { home: ownHome }), true, 'case-folded on darwin');
+  assert.equal(isForeignDaemonCommand(c, G, foreignCmd.replace('.grip', '.Grip'), { home: ownHome }), false, 'not on linux');
+  // a command line containing both our home and theirs is not their daemon
+  assert.equal(isForeignDaemonCommand(c, G, `node ${ownHome}/grip-bridge.mjs --daemon /Users/${U}/.grip/grip-bridge.mjs`, { home: ownHome }), false);
+}
+// extra files named from the foreign prefix, and nothing else
+{
+  const c = ctx('linux');
+  const h = `/Users/${U}`;
+  for (const f of ['.zenith-bridge.log.1', '.zenith-bridge.dump-1700000000.json']) assert.equal(isForeignExtraFile(c, Z, `${h}/${f}`), true, f);
+  for (const f of ['.zenith-bridge.dump-x.json', '.zenith-bridge.log', '.acme-bridge.log.1', '.zenith-bridge.dump-1.json.bak']) assert.equal(isForeignExtraFile(c, Z, `${h}/${f}`), false, f);
+  assert.equal(isForeignExtraFile(c, Z, '/elsewhere/.zenith-bridge.log.1'), false);
+}
 
 console.log('foreign-paths: ok');

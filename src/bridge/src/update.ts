@@ -1441,7 +1441,8 @@ export async function installAndScheduleRestart(o: InstallOptions): Promise<Inst
 // `entryName` (e.g. `<stem>.mjs --daemon`). The one check every "is this really that daemon?"
 // decision uses, for this build's own daemon and (phase 2B) for a foreign one.
 export function isDaemonCommand(cmd: string, entryName: string): boolean {
-  return cmd.includes(entryName) && /--daemon/.test(cmd);
+  // `--daemon` as a whole argument (not `--daemonize`)
+  return cmd.includes(entryName) && /(^|\s)--daemon(\s|$)/.test(cmd);
 }
 
 export function processCommandLine(pid: number): string | null {

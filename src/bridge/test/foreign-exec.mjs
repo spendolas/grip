@@ -22,7 +22,8 @@ function fakeIo(o = {}) {
   const cmds = { 4242: DAEMON_CMD, ...(o.cmds ?? {}) };
   const parents = { 4242: 4200, ...(o.parents ?? {}) };
   const rmFails = new Map(Object.entries(o.rmFails ?? {}).map(([k, v]) => [k, { ...v }]));
-  const files = { ...(o.json ?? {}) };
+  const files = Object.fromEntries(Object.entries(o.json ?? {}).map(([k, v]) => [k, JSON.stringify(v, null, 2)]));
+  const cfgReads = {};
   const io = {
     log, alive, files,
     execFile: async (cmd, args) => {
@@ -34,6 +35,7 @@ function fakeIo(o = {}) {
     procCommand: (pid) => { log.push(`cmd ${pid}`); return cmds[pid] ?? null; },
     parentPid: (pid) => parents[pid] ?? null,
     kill: (pid, sig) => {
+      if (o.stubborn && o.stubborn.includes(pid)) { log.push(`kill ${pid} ${sig}`); return true; }
       log.push(`kill ${pid} ${sig}`);
       const die = o.dieOn ?? 'SIGTERM';
       if (die === 'SIGTERM' || (die === 'SIGKILL' && sig === 'SIGKILL')) alive.delete(pid);
@@ -41,7 +43,7 @@ function fakeIo(o = {}) {
       return true;
     },
     pidAlive: (pid) => alive.has(pid),
-    portOpen: async () => (o.portStaysOpen ?? false) && alive.has(4242),
+    portOpen: async () => o.portAlwaysOpen === true || ((o.portStaysOpen ?? false) && alive.has(4242)),
     sleep: async (ms) => { log.push(`sleep ${ms}`); },
     lstatKind: (p) => (o.kinds && p in o.kinds ? o.kinds[p] : (p.endsWith('.zenith') || p.endsWith('.app') ? 'dir' : 'file')),
     realpath: (p) => (o.realpaths && p in o.realpaths ? o.realpaths[p] : p),
@@ -50,8 +52,15 @@ function fakeIo(o = {}) {
       if (f && f.times > 0) { f.times--; const e = new Error('locked'); e.code = f.code; throw e; }
       log.push(`rm ${p}`);
     },
-    readJson: (p) => { if (!(p in files)) throw new Error('ENOENT'); return JSON.parse(JSON.stringify(files[p])); },
-    writeJson: (p, v) => { log.push(`write ${p}`); files[p] = v; },
+    listDir: (p) => (p.endsWith('Contents/MacOS') ? ['zenith-daemon'] : (o.homeFiles ?? [])),
+    readText: (p) => {
+      if (o.changeAfterFirstRead && p in files) { cfgReads[p] = (cfgReads[p] ?? 0) + 1; if (cfgReads[p] > 1) return files[p] + ' '; }
+      if (p in files) return files[p];
+      if (p.includes('/Contents/MacOS/')) return o.launcher === false ? '#!/bin/bash\nexec node /Users/u/.other/x.mjs' : '#!/bin/bash\nexec node "/Users/u/.zenith/zenith-bridge.mjs" --daemon';
+      return null;
+    },
+    writeFile: (p, d, mode) => { log.push(`write ${p} ${mode.toString(8)}`); files[p] = d; },
+    rename: (a, b) => { log.push(`rename ${a} ${b}`); files[b] = files[a]; delete files[a]; },
   };
   return io;
 }
@@ -128,14 +137,14 @@ const status = (results, kind, action) => results.find((r) => r.item.kind === ki
 // ---- verify before kill
 {
   const { c, facts } = fullFacts('linux');
-  for (const cmd of ['node /x/other.mjs --daemon', 'node /x/zenith-bridge.mjs', null]) {
+  for (const cmd of ['node /x/other.mjs --daemon', 'node /x/zenith-bridge.mjs', 'node /x/zenith-bridge.mjs --daemon', null]) {
     const io = fakeIo({ cmds: { 4242: cmd } });
     if (cmd === null) delete io.procCommand, io.procCommand = () => null;
     const res = await runPlan(c, Z, planForeignRemoval(c, Z, facts), io, FAST);
     assert.equal(status(res, 'stop-daemon'), 'refused', String(cmd));
     assert.ok(!io.log.some((l) => l.startsWith('kill 4242')), 'never signalled');
-    // the pid was not the foreign daemon, so the user-requested deletes still happen
-    assert.equal(status(res, 'home-dir'), 'done');
+    // a pid that is another program: the user-requested deletes still happen; one that could not be read stays unverified
+    assert.equal(status(res, 'home-dir'), cmd === null ? 'skipped' : 'done');
   }
   // a pid that is already gone is not an error and is not signalled
   const io = fakeIo({ alive: [] });
@@ -173,11 +182,11 @@ const status = (results, kind, action) => results.find((r) => r.item.kind === ki
 // ---- locked files (review focus 4)
 {
   const { c, facts, p } = fullFacts('win32');
-  let io = fakeIo({ cmds: { 4242: 'node C:\\x\\zenith-bridge.mjs --daemon' }, rmFails: { [p.homeDir]: { times: 3, code: 'EBUSY' } } });
+  let io = fakeIo({ cmds: { 4242: 'node C:\\Users\\u\\.zenith\\zenith-bridge.mjs --daemon' }, rmFails: { [p.homeDir]: { times: 3, code: 'EBUSY' } } });
   let res = await runPlan(c, Z, planForeignRemoval(c, Z, facts), io, { yes: true, graceMs: 10, deleteRetries: 6 });
   assert.equal(status(res, 'home-dir'), 'done', 'retries until the lock lets go');
   assert.ok(io.log.filter((l) => l.startsWith('sleep')).length >= 3, 'with backoff');
-  io = fakeIo({ cmds: { 4242: 'node C:\\x\\zenith-bridge.mjs --daemon' }, rmFails: { [p.homeDir]: { times: 999, code: 'EBUSY' }, [p.logFile]: { times: 999, code: 'EPERM' } } });
+  io = fakeIo({ cmds: { 4242: 'node C:\\Users\\u\\.zenith\\zenith-bridge.mjs --daemon' }, rmFails: { [p.homeDir]: { times: 999, code: 'EBUSY' }, [p.logFile]: { times: 999, code: 'EPERM' } } });
   res = await runPlan(c, Z, planForeignRemoval(c, Z, facts), io, { yes: true, graceMs: 10, deleteRetries: 2 });
   assert.equal(status(res, 'home-dir'), 'deferred');
   assert.ok(res.find((r) => r.item.kind === 'home-dir').note.includes('will be removable after restart'));
@@ -185,7 +194,7 @@ const status = (results, kind, action) => results.find((r) => r.item.kind === ki
   assert.equal(status(res, 'status-file'), 'done', 'the other items still run');
   assert.ok(!res.some((r) => r.status === 'failed'), 'a locked file is not a failure');
   // any other error is a failure, not a retry loop
-  io = fakeIo({ rmFails: { [p.logFile]: { times: 1, code: 'EACCES' } }, cmds: { 4242: 'node C:\\x\\zenith-bridge.mjs --daemon' } });
+  io = fakeIo({ rmFails: { [p.logFile]: { times: 1, code: 'EACCES' } }, cmds: { 4242: 'node C:\\Users\\u\\.zenith\\zenith-bridge.mjs --daemon' } });
   res = await runPlan(c, Z, planForeignRemoval(c, Z, facts), io, FAST);
   assert.equal(status(res, 'log-file'), 'failed');
 }
@@ -226,17 +235,49 @@ const status = (results, kind, action) => results.find((r) => r.item.kind === ki
   assert.ok(!io.log.some((l) => l.startsWith('rm ')));
 }
 
-// ---- the MCP entry (review focus 5)
+// ---- the MCP entry (review focus 5; fix wave I3: atomic, backed up, never clobbers a concurrent write)
 {
   const { c, p } = fullFacts('linux');
   const cfg = p.claudeConfig;
   const item = [{ kind: 'mcp-entry', target: 'zenith', action: 'run-cli-or-edit-json' }];
   const base = (entry) => ({ [cfg]: { projects: { x: 1 }, mcpServers: { zenith: entry, mine: { type: 'http', url: 'http://127.0.0.1:7878/mcp' }, other: { command: 'x' } } } });
-  // JSON fallback when the CLI fails: only the foreign entry goes, everything else stays
-  let io = fakeIo({ json: base({ type: 'http', url: 'http://127.0.0.1:7978/mcp' }), exec: (cmd) => ({ ok: cmd !== 'claude', out: '' }) });
+  const foreignEntry = { type: 'http', url: 'http://127.0.0.1:7978/mcp' };
+  const noCli = (cmd) => ({ ok: cmd !== 'claude', out: '' });
+  // CLI works: that is the whole job
+  let io = fakeIo({ json: base(foreignEntry) });
   let res = await runPlan(c, Z, item, io, FAST);
   assert.equal(res[0].status, 'done');
-  assert.deepEqual(io.files[cfg], { projects: { x: 1 }, mcpServers: { mine: { type: 'http', url: 'http://127.0.0.1:7878/mcp' }, other: { command: 'x' } } });
+  assert.ok(!io.log.some((l) => l.startsWith('write')), 'no file edit when the CLI did it');
+  // the fallback: a 0600 backup, a 0600 temp file, then a rename; only the foreign entry goes
+  io = fakeIo({ json: base(foreignEntry), exec: noCli });
+  const before = io.files[cfg];
+  res = await runPlan(c, Z, item, io, FAST);
+  assert.equal(res[0].status, 'done');
+  const writes = io.log.filter((l) => l.startsWith('write') || l.startsWith('rename'));
+  assert.equal(writes.length, 3, writes.join('|'));
+  assert.ok(/^write .*\.claude\.json\.grip-remove-\d+\.bak 600$/.test(writes[0]), writes[0]);
+  assert.ok(/^write .*\.claude\.json\.grip-remove-\d+\.tmp 600$/.test(writes[1]), writes[1]);
+  assert.ok(writes[2].startsWith('rename ') && writes[2].endsWith(` ${cfg}`), writes[2]);
+  const bakPath = writes[0].split(' ')[1];
+  assert.equal(io.files[bakPath], before, 'the backup is the original, byte for byte');
+  assert.deepEqual(JSON.parse(io.files[cfg]), { projects: { x: 1 }, mcpServers: { mine: { type: 'http', url: 'http://127.0.0.1:7878/mcp' }, other: { command: 'x' } } });
+  assert.ok(!Object.keys(io.files).some((k) => k.endsWith('.tmp')), 'no temp file left');
+  // somebody else wrote the config meanwhile: abort, write nothing, keep the backup
+  io = fakeIo({ json: base(foreignEntry), exec: noCli, changeAfterFirstRead: true });
+  const orig = io.files[cfg];
+  res = await runPlan(c, Z, item, io, FAST);
+  assert.equal(res[0].status, 'failed');
+  assert.ok(res[0].note.includes('changed while this ran') && res[0].note.includes('claude mcp remove -s user zenith'));
+  assert.ok(!io.log.some((l) => l.startsWith('rename')));
+  assert.equal(io.files[cfg], orig, 'the config is untouched');
+  assert.ok(io.log.some((l) => /^rm .*\.tmp$/.test(l)), 'the temp file is removed');
+  // Windows: no guessing at the file, say what to run
+  const w = fullFacts('win32');
+  io = fakeIo({ json: { [w.p.claudeConfig]: { mcpServers: { zenith: foreignEntry } } }, exec: noCli });
+  res = await runPlan(w.c, Z, item, io, FAST);
+  assert.equal(res[0].status, 'instruct');
+  assert.ok(res[0].note.includes('claude mcp remove -s user zenith'));
+  assert.ok(!io.log.some((l) => l.startsWith('write') || l.startsWith('rename')));
   // the same name pointing at THIS build is never touched: no CLI call, no write
   io = fakeIo({ json: base({ type: 'http', url: `http://127.0.0.1:${alt.httpPort}/mcp` }) });
   res = await runPlan(c, Z, item, io, FAST);
@@ -247,6 +288,150 @@ const status = (results, kind, action) => results.find((r) => r.item.kind === ki
   res = await runPlan(c, Z, item, io, FAST);
   assert.ok(['skipped', 'refused'].includes(res[0].status));
   assert.ok(!io.log.some((l) => l.startsWith('exec claude') || l.startsWith('write')));
+}
+
+// ---- C1: colliding names. Every flavour's entry file is grip-bridge.mjs, so OUR daemon and OUR supervisor
+// look like the foreign ones unless the EXACT foreign path is required.
+{
+  const G = { ...Z, homeDirName: '.grip', entryName: 'grip-bridge', loginItem: 'Grip Daemon' };
+  const c = ctx('darwin');
+  const p = foreignPaths(c, G);
+  const OWN_HOME = '/Users/u/.grip-alt';
+  const own = { pids: [], home: OWN_HOME, paths: [OWN_HOME, '/Users/u/.grip-alt-bridge.status'] };
+  const facts = { pid: 4242, running: true, exists: Object.fromEntries(p.autostart.map((a) => [a.path, true])), home: { kind: 'dir', realpath: p.homeDir, parentRealpath: c.home }, mcp: { entry: undefined, claudeCli: false }, pluginCopies: [] };
+  const items = planForeignRemoval(c, G, facts);
+  const FOREIGN = 'node /Users/u/.grip/grip-bridge.mjs --daemon --persistent';
+  const OWN_DAEMON = `node ${OWN_HOME}/grip-bridge.mjs --daemon --persistent`;
+  const FOREIGN_SUP = '/bin/bash /Users/u/Applications/Grip Daemon.app/Contents/MacOS/grip-daemon';
+  const OWN_SUP = '/bin/bash /Users/u/Applications/Alt Grip Daemon.app/Contents/MacOS/grip-daemon';
+  const go = (opts, over = {}) => { const io = fakeIo({ alive: [4242, 4200], parents: { 4242: 4200 }, supervisorKillsChild: true, ...opts }); return runPlan(c, G, items, io, { ...FAST, own, ...over }).then((res) => ({ io, res })); };
+  const killed = (io, pid) => io.log.some((l) => l.startsWith(`kill ${pid} `));
+
+  // our own daemon (stale pid file now pointing at it) and our own supervisor: never touched
+  let r = await go({ cmds: { 4242: OWN_DAEMON, 4200: OWN_SUP } });
+  assert.equal(status(r.res, 'stop-daemon'), 'refused');
+  assert.equal(status(r.res, 'stop-supervisor'), 'refused');
+  assert.ok(!killed(r.io, 4242) && !killed(r.io, 4200), 'neither our daemon nor our supervisor is signalled');
+  // a foreign-looking supervisor above OUR daemon: the child is verified first, the parent is never touched
+  r = await go({ cmds: { 4242: OWN_DAEMON, 4200: FOREIGN_SUP } });
+  assert.ok(!killed(r.io, 4242) && !killed(r.io, 4200));
+  // the real foreign daemon under a lookalike supervisor: the daemon is stopped, the supervisor is refused
+  r = await go({ cmds: { 4242: FOREIGN, 4200: OWN_SUP }, supervisorKillsChild: false });
+  assert.equal(status(r.res, 'stop-supervisor'), 'refused');
+  assert.ok(!killed(r.io, 4200), 'the lookalike Alt Grip Daemon.app is not the foreign login item');
+  assert.ok(killed(r.io, 4242));
+  // the real foreign daemon and its real supervisor are accepted
+  r = await go({ cmds: { 4242: FOREIGN, 4200: FOREIGN_SUP } });
+  assert.equal(status(r.res, 'stop-supervisor'), 'done');
+  assert.ok(killed(r.io, 4200));
+  // --daemon is a whole argument
+  r = await go({ cmds: { 4242: 'node /Users/u/.grip/grip-bridge.mjs --daemonize', 4200: FOREIGN_SUP } });
+  assert.equal(status(r.res, 'stop-daemon'), 'refused');
+  assert.ok(!killed(r.io, 4242));
+  // our own pids are never signalled, even if the command line looks foreign
+  r = await go({ cmds: { 4242: FOREIGN, 4200: FOREIGN_SUP } }, { own: { ...own, pids: [4242] } });
+  assert.equal(status(r.res, 'stop-daemon'), 'refused');
+  assert.ok(!killed(r.io, 4242));
+  r = await go({ cmds: { 4242: FOREIGN, 4200: FOREIGN_SUP } }, { own: { ...own, pids: [4200] } });
+  assert.equal(status(r.res, 'stop-supervisor'), 'refused');
+  assert.ok(!killed(r.io, 4200));
+  // a hand-made stop item without its typed pid is refused
+  r = await go({}, {});
+  const res0 = await runPlan(c, G, [{ kind: 'stop-daemon', target: 'pid 4242', action: 'stop' }], fakeIo(), { ...FAST, own });
+  assert.equal(res0[0].status, 'refused');
+}
+
+// ---- I1: our own names, at run time
+{
+  const { c, p, facts } = fullFacts('linux');
+  const items = planForeignRemoval(c, Z, facts);
+  // a status file / log / socket path that is one of OURS is refused (the generator forbids it; this is the second lock)
+  let io = fakeIo();
+  let res = await runPlan(c, Z, items, io, { ...FAST, own: { pids: [], home: null, paths: [p.logFile, p.statusFile.toUpperCase()] } });
+  assert.equal(status(res, 'log-file'), 'refused');
+  assert.ok(!io.log.includes(`rm ${p.logFile}`));
+  // our own home folder, by name or by what it resolves to
+  io = fakeIo();
+  res = await runPlan(c, Z, items, io, { ...FAST, own: { pids: [], home: p.homeDir, paths: [] } });
+  assert.equal(status(res, 'home-dir'), 'refused');
+  assert.ok(!io.log.includes(`rm ${p.homeDir}`));
+  io = fakeIo({ realpaths: { [p.homeDir]: '/vol/ours', '/Users/u/.acme': '/vol/ours' } });
+  res = await runPlan(c, Z, items, io, { ...FAST, own: { pids: [], home: '/Users/u/.acme', paths: [] } });
+  assert.equal(status(res, 'home-dir'), 'refused');
+  assert.ok(!io.log.includes(`rm ${p.homeDir}`));
+  // an app bundle whose launcher does not start the foreign bridge is left alone
+  const d = fullFacts('darwin');
+  io = fakeIo({ launcher: false, cmds: { 4200: '/bin/bash /Users/u/Applications/Zenith Daemon.app/Contents/MacOS/zenith-daemon' }, alive: [4242, 4200] });
+  res = await runPlan(d.c, Z, planForeignRemoval(d.c, Z, d.facts), io, FAST);
+  assert.ok(res.filter((r) => r.item.kind === 'app-bundle').every((r) => r.status === 'refused'));
+  assert.ok(!io.log.some((l) => l.startsWith('rm /Users/u/Applications/Zenith') || l.startsWith('rm /Applications/Zenith')));
+}
+
+// ---- I2: nothing is deleted under a daemon that was never stopped
+{
+  const { c, facts } = fullFacts('linux');
+  const notDeleted = (io) => !io.log.some((l) => /^rm .*(\.zenith$|zenith-bridge\.(log|status)$)/.test(l));
+  // running, process could not be identified (instruct), port still open
+  let io = fakeIo({ portStaysOpen: true });
+  let res = await runPlan(c, Z, planForeignRemoval(c, Z, { ...facts, pid: null }), io, FAST);
+  assert.equal(status(res, 'stop-daemon'), 'instruct');
+  assert.equal(status(res, 'home-dir'), 'skipped');
+  assert.equal(status(res, 'log-file'), 'skipped');
+  assert.equal(status(res, 'status-file'), 'skipped');
+  assert.ok(res.find((r) => r.item.kind === 'home-dir').note.includes('daemon still running'));
+  assert.ok(notDeleted(io));
+  // the command line could not be read and the process is alive: unverified, so nothing under it is deleted
+  io = fakeIo({ cmds: { 4242: null } });
+  res = await runPlan(c, Z, planForeignRemoval(c, Z, facts), io, FAST);
+  assert.equal(status(res, 'stop-daemon'), 'refused');
+  assert.equal(status(res, 'home-dir'), 'skipped');
+  assert.ok(notDeleted(io));
+  // it exits but the port stays open: not stopped as far as anyone can tell
+  io = fakeIo({ portAlwaysOpen: true });
+  res = await runPlan(c, Z, planForeignRemoval(c, Z, facts), io, FAST);
+  assert.equal(status(res, 'stop-daemon'), 'failed');
+  assert.ok(res.find((r) => r.item.kind === 'stop-daemon').note.includes('still open'));
+  assert.equal(status(res, 'home-dir'), 'skipped');
+  assert.ok(notDeleted(io));
+  // a stale pid that is some other program, port closed: the user's deletes go ahead
+  io = fakeIo({ cmds: { 4242: 'node /x/other.mjs --daemon' } });
+  res = await runPlan(c, Z, planForeignRemoval(c, Z, facts), io, FAST);
+  assert.equal(status(res, 'home-dir'), 'done');
+  // a supervisor that will not exit blocks everything after it
+  const d = fullFacts('darwin');
+  io = fakeIo({ cmds: { 4200: '/bin/bash /Users/u/Applications/Zenith Daemon.app/Contents/MacOS/zenith-daemon' }, alive: [4242, 4200], stubborn: [4200] });
+  res = await runPlan(d.c, Z, planForeignRemoval(d.c, Z, d.facts), io, FAST);
+  assert.equal(status(res, 'stop-supervisor'), 'failed');
+  assert.equal(status(res, 'home-dir'), 'skipped');
+  assert.ok(res.filter((r) => r.item.action === 'delete').every((r) => r.status === 'skipped'));
+}
+
+// ---- minors: permission errors, extra files, wording
+{
+  const { c, facts, p } = fullFacts('linux');
+  const items = planForeignRemoval(c, Z, facts);
+  // POSIX: EPERM is not "removable after restart"
+  let io = fakeIo({ rmFails: { [p.logFile]: { times: 99, code: 'EPERM' } } });
+  let res = await runPlan(c, Z, items, io, FAST);
+  assert.equal(status(res, 'log-file'), 'failed');
+  assert.ok(res.find((r) => r.item.kind === 'log-file').note.includes('Finder'));
+  assert.ok(!io.log.some((l) => l.startsWith('sleep') && false));
+  io = fakeIo({ rmFails: { [p.logFile]: { times: 99, code: 'ENOTEMPTY' } } });
+  assert.equal(status(await runPlan(c, Z, items, io, FAST), 'log-file'), 'failed');
+  // rotated log and dump files named from the watchlist prefix go too (and only those)
+  const h = c.home;
+  const withExtras = planForeignRemoval(c, Z, { ...facts, extraFiles: [`${h}/.zenith-bridge.log.1`, `${h}/.zenith-bridge.dump-1700000000.json`, `${h}/.zenith-bridge.dump-x.json`, '/etc/passwd'] });
+  assert.deepEqual(withExtras.filter((i) => i.kind === 'log-file').map((i) => i.target), [p.logFile, `${h}/.zenith-bridge.log.1`, `${h}/.zenith-bridge.dump-1700000000.json`]);
+  io = fakeIo();
+  res = await runPlan(c, Z, withExtras, io, FAST);
+  assert.ok(io.log.includes(`rm ${h}/.zenith-bridge.log.1`) && io.log.includes(`rm ${h}/.zenith-bridge.dump-1700000000.json`));
+  // and a hand-made item for another file in the home folder is refused
+  res = await runPlan(c, Z, [{ kind: 'log-file', target: `${h}/.zshrc`, action: 'delete' }], fakeIo(), FAST);
+  assert.equal(res[0].status, 'refused');
+  // collectFacts lists them (from the fake directory listing)
+  const { collectFacts } = await import('../dist/foreign-remove.js');
+  const f2 = await collectFacts(c, Z, { slug: 'zenith', state: 'insecure', version: '1.0.0', floor: '2.0.0', evidence: [], running: false, pid: null }, { exists: () => false }, fakeIo({ homeFiles: ['.zenith-bridge.log.1', '.zenith-bridge.dump-1.json', 'notes.txt', '.zenith-bridge.dump-1.json.bak'] }));
+  assert.deepEqual(f2.extraFiles.map((x) => x.split('/').pop()), ['.zenith-bridge.log.1', '.zenith-bridge.dump-1.json']);
 }
 
 // ---- real fs in a temp dir: a real directory goes, a link is refused and its target survives
@@ -361,6 +546,25 @@ const status = (results, kind, action) => results.find((r) => r.item.kind === ki
   m.deps.exec = fakeIo({ kinds: { '/Users/u/.zenith': 'symlink' } });
   assert.equal(await runForeignCli(['node', 'x', 'remove-foreign', '--yes'], m.deps), 1);
   assert.ok(m.out.join('\n').includes('Still to do by hand'));
+  // a Grip at or above the floor is optional to remove: --include-secure is required before any action
+  m = mk();
+  m.deps.detect.probe = async () => ({ kind: 'welcome', version: '2.5.0', flavour: null });
+  assert.equal(await runForeignCli(['node', 'x', 'remove-foreign', '--yes'], m.deps), 0);
+  assert.ok(m.out.join('\n').includes('up to date and safe to keep; removing it is optional'), m.out.join('\n'));
+  assert.ok(!m.exec.log.some((l) => l.startsWith('kill') || l.startsWith('rm ')), 'nothing happens to a secure Grip without --include-secure');
+  m = mk();
+  m.deps.detect.probe = async () => ({ kind: 'welcome', version: '2.5.0', flavour: null });
+  assert.equal(await runForeignCli(['node', 'x', 'remove-foreign', '--yes', '--include-secure'], m.deps), 0);
+  assert.ok(m.exec.log.includes('rm /Users/u/.zenith'));
+  m = mk();
+  m.deps.detect.probe = async () => ({ kind: 'welcome', version: '2.5.0', flavour: null });
+  assert.equal(await runForeignCli(['node', 'x', 'remove-foreign', '--include-secure'], m.deps), 2, 'still lists only without --yes');
+  // a running daemon that could not be identified (so was not stopped) is exit 1, not 0
+  m = mk();
+  m.deps.detect.readText = () => null;
+  assert.equal(await runForeignCli(['node', 'x', 'remove-foreign', '--yes'], m.deps), 1);
+  assert.ok(m.out.join('\n').includes('Still to do by hand'));
+  assert.ok(m.out.join('\n').includes('the folder and everything in it'));
 }
 
 console.log('foreign-exec: ok');

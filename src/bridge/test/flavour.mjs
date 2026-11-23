@@ -146,6 +146,12 @@ assert.equal(renderTemplate('x', 'ws://localhost:__WS_PORT__ __FLAVOUR__', loadF
   rejects('wl-home-slash', (f) => alert(f, (e) => { e.homeDirName = 'a/b'; }), 'homeDirName');
   rejects('wl-home-own', (f) => alert(f, (e, ff) => { e.homeDirName = ff.homeDirName; }), 'homeDirName');
   rejects('wl-mcp-space', (f) => alert(f, (e) => { e.mcpName = 'a b'; }), 'mcpName');
+  // every name a removal deletes must differ from OUR build's, case-insensitively
+  const own = (f) => ({ home: f.homeDirName, item: f.daemonAppName, status: `${f.filePrefix}.status`, log: `${f.filePrefix}.log`, ipc: f.ipcName, label: f.launchLabel, unit: `${f.slug}-bridge`, vbs: `${f.daemonAppName.replace(/\s+/g, '')}.vbs` });
+  for (const [field, key, fn] of [['homeDirName', 'home', (s) => s.toUpperCase()], ['loginItem', 'item', (s) => s.toLowerCase()], ['statusFile', 'status', (s) => s], ['logFile', 'log', (s) => s.toUpperCase()],
+    ['ipcName', 'ipc', (s) => s], ['launchLabel', 'label', (s) => s.toUpperCase()], ['serviceName', 'unit', (s) => s], ['startupLauncher', 'vbs', (s) => s.toLowerCase()]]) {
+    rejects(`wl-own-${field}`, (f) => alert(f, (e, ff) => { e[field] = fn(own(ff)[key]); }), field);
+  }
   assert.equal(loadFlavour(altDir).watchlist[0].slug, 'zenith');
   assert.equal(loadFlavour(altDir).enforcement, 'alert');
   // the shipped public flavour watches nothing
