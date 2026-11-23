@@ -129,6 +129,35 @@ export class ForeignGuard {
   }
 }
 
+// Lines for the installer and updater output. Empty unless there is something to say.
+export function foreignCliLines(r: ForeignReport | null, own: OwnInfo): string[] {
+  const s = foreignGripSummary(r, own);
+  if (!s) return [];
+  if (s.state === 'insecure') return foreignAlertTexts(s, own)!.cliLines;
+  if (s.state === 'unknown_service') return [`warning: ${s.action}`];
+  return [];
+}
+
+export type PreflightVerdict = { proceed: true; lines: string[] } | { proceed: false; lines: string[]; exitCode: 1 };
+
+// Whether an install may go ahead. Alert only: it never blocks this build, it stops an AGENT's
+// install (stdin is not a terminal, interactiveYes null) until the user chose, and the user can
+// always choose to continue (--continue-with-foreign, or "y" at the prompt).
+export function preflightForeign(r: ForeignReport | null, o: { interactiveYes: boolean | null; continueFlag: boolean }, own: OwnInfo): PreflightVerdict {
+  if (r?.worst?.state !== 'insecure') return { proceed: true, lines: [] };
+  if (o.continueFlag) return { proceed: true, lines: ['The insecure Grip alert was overridden with --continue-with-foreign.'] };
+  if (o.interactiveYes === true) return { proceed: true, lines: [] };
+  return {
+    proceed: false,
+    exitCode: 1,
+    lines: [
+      'Not installing yet. Tell the user about the insecure Grip above.',
+      `To remove it: ${removeCommand(own)} (it lists what it removes; add --yes after the user agrees).`,
+      'Re-run this installer with --continue-with-foreign only after the user chose to keep going.',
+    ],
+  };
+}
+
 // Connect the guard to the plugin strips: the tooltip frame (replayed on hello by the bridge) and
 // ONE toast per window and alert. Alert only: nothing here changes a window's connection.
 export function wireForeignToBridge(bridge: PluginBridge, g: ForeignGuard): () => void {

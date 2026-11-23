@@ -122,6 +122,25 @@ console.log('\n4. Linux install (GRIP_FAKE_PLATFORM=linux --http)');
   }
 }
 
+// >>> phase 2B: the insecure-Grip guard is OS-agnostic, and the shipped public build is unchanged by it
+console.log('\n5. Foreign guard paths on every platform (acme fixture) + public install output unchanged');
+{
+  const { foreignPaths } = await import('../dist/foreign-paths.js');
+  const alt = JSON.parse(readFileSync(join(HERE, 'fixtures', 'flavour-alt', 'flavour.json'), 'utf8'));
+  const Z = alt.watchlist[0];
+  const mk = (platform, home, env = {}) => ({ platform, home, tmp: '/tmp', env, uid: 1 });
+  const d = foreignPaths(mk('darwin', '/Users/u'), Z);
+  check('darwin: login item app in ~/Applications', d.autostart[0].path === '/Users/u/Applications/Zenith Daemon.app', d.autostart[0].path);
+  const l = foreignPaths(mk('linux', '/home/u'), Z);
+  check('linux: user systemd unit', l.autostart[0].path === '/home/u/.config/systemd/user/zenith-bridge.service', l.autostart[0].path);
+  const w = foreignPaths(mk('win32', 'C:\\Users\\u', { APPDATA: 'C:\\Users\\u\\AppData\\Roaming' }), Z);
+  check('win32: startup launcher and named pipe', w.autostart[0].path.endsWith('\\Startup\\ZenithDaemon.vbs') && w.ipcPipe === '\\\\.\\pipe\\zenith-bridge', w.autostart[0].path);
+  const printed = execFileSync(NODE, [INSTALL_JS, '--print-config'], { encoding: 'utf8' });
+  check('public --print-config still the same shape', printed.includes('Connect Grip to your MCP client') && printed.includes('http://127.0.0.1:7778/mcp'));
+  check('public install output has no guard text', !/remove-foreign|watchlist|URGENT/.test(printed));
+}
+// <<< phase 2B
+
 console.log(failures === 0
   ? '\n\x1b[32mAll Windows/Linux install-path checks passed.\x1b[0m\n(Logic only. Real Windows runtime was verified separately — see header.)\n'
   : `\n\x1b[31m${failures} check(s) failed.\x1b[0m\n`);
