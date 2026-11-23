@@ -210,3 +210,10 @@ test('release.yml publish job handles the payload asset for a loader flavour (ch
     assert.ok(pub.indexOf(use) > guard, `${use} sees the payload asset`);
   }
 });
+
+test('release.yml smoke test checks payload.json for a loader flavour', () => {
+  const yml = readFileSync(join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  const smoke = yml.slice(yml.indexOf('- name: Smoke test the packaged install'), yml.indexOf('- name: Sign SHA256SUMS.txt'));
+  assert.match(smoke, /payloadLoader === true/);
+  assert.ok(smoke.includes('test -f "$S/home/$HD/figma-plugin/payload.json"'));
+});

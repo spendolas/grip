@@ -46,6 +46,20 @@ const fresh = () => ({ home: mkdtempSync(join(tmpdir(), 'grip-reg-home-')), gh: 
   assert.match(again.stdout, /pairing: already set up/);
 }
 
+{ // a release-style layout: every file of figma-plugin/ is copied, payload.json (loader flavours) included
+  const root = mkdtempSync(join(tmpdir(), 'grip-reg-zip-'));
+  mkdirSync(join(root, 'bridge')); mkdirSync(join(root, 'figma-plugin'));
+  for (const f of ['install.mjs', 'grip-bridge.mjs']) writeFileSync(join(root, 'bridge', f), readFileSync(join(HERE, '..', '..', '..', 'bridge', f)));
+  const files = { 'manifest.json': '{}', 'code.js': '// shell', 'ui.html': '<html></html>', 'payload.json': '{"layout":1,"probe":true}' };
+  for (const [n, t] of Object.entries(files)) writeFileSync(join(root, 'figma-plugin', n), t);
+  const { home, gh } = fresh();
+  const r = spawnSync(process.execPath, [join(root, 'bridge', 'install.mjs'), '--no-register'], {
+    env: { ...process.env, HOME: home, USERPROFILE: home, GRIP_HOME: gh, GRIP_STATUS_PATH: join(gh, 'nostatus.json') }, encoding: 'utf8',
+  });
+  assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+  for (const [n, t] of Object.entries(files)) assert.strictEqual(readFileSync(join(gh, 'figma-plugin', n), 'utf8'), t, `${n} copied into figma-plugin/`);
+}
+
 { // chooseMcpName: pure decision
   const { chooseMcpName } = await import('../dist/mcp-name.js');
   const { FLAVOUR } = await import('../dist/flavour.gen.js');

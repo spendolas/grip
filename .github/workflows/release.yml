@@ -165,6 +165,10 @@ jobs:
           test -f "$S/home/$HD/grip-bridge.mjs"
           test -f "$S/home/$HD/figma-plugin/manifest.json"
           test -f "$S/home/$HD/figma-plugin/code.js"
+          # a loader flavour's signed plugin payload must land next to the shell
+          if [ "$(node -p "require('./flavour/flavour.json').payloadLoader === true")" = "true" ]; then
+            test -f "$S/home/$HD/figma-plugin/payload.json"
+          fi
           test -f "$S/extract/grip/THIRD-PARTY-NOTICES.txt"
           node -e "const j=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')); if(j.source!=='release'||j.version!==process.argv[2]) { console.error('bad install.json', j); process.exit(1); }" "$S/home/$HD/install.json" "$V"
           cmp "$S/home/$HD/grip-bridge.mjs" dist/grip-bridge.mjs
