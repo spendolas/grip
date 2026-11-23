@@ -174,6 +174,8 @@ export interface McpSession {
   // The 'help the user update the plugin/bridge' notices were handled for this session (shown or throttled).
   helpNoticeSent?: boolean;
   helpNoticesGranted?: string[];
+  // phase 2B: the insecure-foreign-Grip notice was put on a tool result of this session (once, every session).
+  foreignNoticeSent?: boolean;
 }
 
 export interface SerializedPaint {
