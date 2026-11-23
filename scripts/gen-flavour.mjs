@@ -18,6 +18,7 @@ import { createPublicKey } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ed25519KeyProblem } from './ed25519-check.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -88,6 +89,9 @@ export function loadFlavour(dir) {
     let k;
     try { k = createPublicKey(pem); } catch { throw new Error('flavour: field "releaseKeys" holds an entry that is not a public key PEM'); }
     if (k.asymmetricKeyType !== 'ed25519') throw new Error('flavour: field "releaseKeys" holds a key that is not Ed25519');
+    // every flavour, loader or not: a small-order or non-canonical key would let a forged signature verify
+    const bad = ed25519KeyProblem(Uint8Array.from(k.export({ type: 'spki', format: 'der' }).subarray(-32)));
+    if (bad) throw new Error(`flavour: field "releaseKeys" holds an unusable Ed25519 key (${bad})`);
   }
   if (!MCP_NAME_RE.test(raw.mcpName)) throw new Error('flavour: field "mcpName" may only contain letters, digits, ".", "-" and "_", starting with a letter or digit (max 64)');
   if (!/^\d{10,25}$/.test(raw.pluginId)) throw new Error('flavour: field "pluginId" must be 10 to 25 digits');

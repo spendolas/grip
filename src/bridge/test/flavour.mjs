@@ -126,6 +126,13 @@ assert.equal(renderTemplate('x', 'ws://localhost:__WS_PORT__ __FLAVOUR__', loadF
   execFileSync(process.execPath, [link, '--dir', altDir, '--out-bridge', join(o, 'b.ts'), '--out-plugin', join(o, 'p.ts'), '--out-plugin-dir', join(o, 'pd')]);
   for (const f of ['b.ts', 'p.ts', 'pd/ui.html', 'pd/manifest.json']) assert.ok(existsSync(join(o, f)), `symlinked run wrote ${f}`);
 }
+// a small-order key (the identity point) must never be pinned, loader or not
+{
+  const spki = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from('01' + '00'.repeat(31), 'hex')]);
+  const pem = `-----BEGIN PUBLIC KEY-----\n${spki.toString('base64')}\n-----END PUBLIC KEY-----\n`;
+  rejects('key-small-order', (f) => { f.releaseKeys = [pem]; }, 'releaseKeys');
+  rejects('key-small-order-second-slot', (f) => { f.releaseKeys = [f.releaseKeys[0], pem]; }, 'releaseKeys');
+}
 // payloadLoader (phase 3)
 rejects('loader-missing', (f) => { delete f.payloadLoader; }, 'payloadLoader');
 rejects('loader-string', (f) => { f.payloadLoader = 'yes'; }, 'payloadLoader');

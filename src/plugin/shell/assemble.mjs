@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildSync } from 'esbuild';
 import { renderTemplate } from '../../../scripts/gen-flavour.mjs';
+import { ed25519KeyProblem } from '../../../scripts/ed25519-check.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -25,7 +26,10 @@ export function bundleVerifier() {
 export function ed25519RawKeys(f) {
   return f.releaseKeys.map((pem) => {
     const der = createPublicKey(pem).export({ format: 'der', type: 'spki' });
-    return Buffer.from(der).subarray(-32).toString('hex');
+    const raw = Uint8Array.from(Buffer.from(der).subarray(-32));
+    const bad = ed25519KeyProblem(raw);
+    if (bad) throw new Error(`shell: an unusable release key (${bad}) cannot be pinned`);
+    return Buffer.from(raw).toString('hex');
   });
 }
 

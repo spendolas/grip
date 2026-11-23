@@ -329,4 +329,19 @@ const page = pageFor([K]);
   assert.equal(haves(w).length, 1, 'payload_have after the pairing gate');
 }
 
+// ---- a small-order pinned key must not verify a forged signature (R = identity, S = 0)
+{
+  const realHex = ed25519RawKeys({ releaseKeys: [K.pub] })[0];
+  const identity = '01' + '00'.repeat(31);
+  assert.throws(() => pageFor([{ pub: `-----BEGIN PUBLIC KEY-----\n${Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(identity, 'hex')]).toString('base64')}\n-----END PUBLIC KEY-----\n` }]), /unusable release key/, 'the build refuses to pin it');
+  const forgedPage = page.replace(realHex, identity);          // as if a bad key had been pinned anyway
+  assert.ok(forgedPage !== page);
+  const h = harness(forgedPage);
+  const ws = connect(h);
+  const sig = Buffer.concat([Buffer.from('01', 'hex'), Buffer.alloc(63)]).toString('base64');
+  ws.deliver({ type: 'payload', envelope: { layout: 1, header: { shellProtocol: 1, flavour: 'acme', version: '1.0.0' }, code: 'evil()', ui: '', sig } });
+  assert.equal(h.installs().length, 0, 'the strict verifier refuses a small-order key');
+  assert.deepEqual(reports(ws).at(-1), { type: 'payload_report', status: 'rejected', version: '1.0.0', code: 'bad_signature' });
+}
+
 console.log('shell-ui.mjs OK');

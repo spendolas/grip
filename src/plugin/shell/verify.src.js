@@ -7,6 +7,7 @@ import { sha512 } from '@noble/hashes/sha512';
 ed.etc.sha512Sync = (...m) => sha512(ed.etc.concatBytes(...m));
 
 // (signature: Uint8Array(64), message: Uint8Array, publicKey: Uint8Array(32)) -> boolean
+// zip215:false = RFC 8032 strict verification: it also refuses a small-order public key.
 globalThis.gripEdVerify = (sig, msg, pub) => {
-  try { return ed.verify(sig, msg, pub) === true; } catch (e) { return false; }
+  try { return ed.verify(sig, msg, pub, { zip215: false }) === true; } catch (e) { return false; }
 };
