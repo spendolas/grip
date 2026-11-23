@@ -368,17 +368,41 @@ const page = pageFor([K]);
   assert.notEqual(h.title(), 'C', 'a result for a version that already failed is ignored');
 }
 
-// ---- F: messages that do not come from the plugin main thread (ev.source !== parent) are ignored
+// ---- F: message SHAPE is validated; the source is deliberately NOT checked (how Figma delivers
+// main-thread messages to the iframe is unverified, and a wrong guess would kill the shell for good)
 {
   const h = harness(page, { autoInstall: false });
   const ws = connect(h);
   ws.deliver({ type: 'payload', envelope: sign(K, '1.0.0') });
+  const n = h.posted.length;
+  for (const bad of [null, 5, 'payloadResult', [], {}, { kind: 5 }, { kind: null, ok: true, version: '1.0.0' }]) {
+    assert.doesNotThrow(() => h.fromMain(bad));
+  }
+  assert.doesNotThrow(() => h.fromMain(undefined));
+  assert.equal(h.title(), 'Loading Grip…', 'malformed messages change nothing');
+  assert.equal(h.posted.length, n);
+  // a well-formed message is accepted whatever its source (documented choice)
   h.fromElsewhere({ kind: 'payloadResult', ok: true, version: '1.0.0' });
-  assert.equal(h.title(), 'Loading Grip…', 'a spoofed result changes nothing');
-  h.fromElsewhere({ kind: 'payloadCache', envelope: JSON.stringify(sign(K, '2.0.0')) });
-  assert.equal(h.installs().length, 1);
-  h.fromMain({ kind: 'payloadResult', ok: true, version: '1.0.0' });
   assert.equal(h.title(), 'Connected');
+}
+
+// ---- stale entries: a superseded install is answered and forgotten; a later failure returns to the live state
+{
+  const h = harness(page, { autoInstall: false });
+  const ws = connect(h);
+  ws.deliver({ type: 'payload', envelope: sign(K, '1.0.0') });
+  h.fromMain({ kind: 'payloadResult', ok: true, version: '1.0.0' });              // v1 live
+  ws.deliver({ type: 'payload', envelope: sign(K, '2.0.0') });                       // v2 held by the main thread
+  ws.deliver({ type: 'payload', envelope: sign(K, '3.0.0') });                       // v3 replaces it
+  h.fromMain({ kind: 'payloadResult', ok: false, version: '2.0.0', reason: 'superseded' });
+  assert.ok(h.has('updating'), 'v3 is still on its way');
+  h.fromMain({ kind: 'payloadResult', ok: false, version: '3.0.0', error: 'boom' });
+  h.advance(2500);
+  assert.ok(h.has('connected') && !h.has('updating'), 'back to the live state, not stuck on installing');
+  assert.equal(h.title(), 'Connected');
+  const installs = h.installs().length;
+  ws.deliver({ type: 'payload', envelope: sign(K, '3.0.0') });                       // the bridge offers v3 again
+  assert.equal(h.installs().length, installs + 1, 'a re-offer of v3 is processed, not ignored as already seen');
 }
 
 // ---- H: a string with a lone surrogate is refused (it would be signed as U+FFFD but evaluated as written)

@@ -134,6 +134,8 @@ figma.ui.onmessage = async (msg) => {
   }
   if (kind === 'payloadInstall') {
     if (typeof msg.version !== 'string' || !VERSION_RE.test(msg.version) || typeof msg.code !== 'string' || msg.code === '' || typeof msg.envelope !== 'string') return;
+    // A payload still waiting is replaced by the newer one: say so, so the page forgets it.
+    if (pending) post({ kind: 'payloadResult', ok: false, version: pending.version, reason: 'superseded' });
     pending = { version: msg.version, code: msg.code, envelope: msg.envelope };
     if (inflight > 0) post({ kind: 'payloadPending', version: msg.version });
     tryApply();

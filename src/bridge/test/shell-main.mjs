@@ -132,8 +132,10 @@ const goodCode = (tag, extra = '') => `
   await t.send({ kind: 'payloadInstall', version: '1.2.0', code: goodCode('v3'), envelope: env('1.2.0') });
   release(); await slow; await flush();
   const res = t.kinds('payloadResult');
-  assert.equal(res.length, 2);
-  assert.equal(res[1].version, '1.2.0', 'the held payload was replaced by the newer one, 1.1.0 never ran');
+  assert.equal(res.length, 3);
+  assert.deepEqual(res[1], { kind: 'payloadResult', ok: false, version: '1.1.0', reason: 'superseded' }, 'the replaced install is answered, so the page can forget it');
+  assert.equal(res[2].version, '1.2.0', 'the held payload was replaced by the newer one, 1.1.0 never ran');
+  assert.equal(res[2].ok, true);
   assert.equal(t.store.get('grip.payload'), env('1.2.0'));
   await t.send({ kind: 'request', id: 'after', method: 'r' });
   assert.equal(t.kinds('response').find((r) => r.id === 'after').result, 'v3');

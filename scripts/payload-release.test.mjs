@@ -258,3 +258,10 @@ test('assemble.mjs loads esbuild lazily (the public plugin build must not need i
   const text = readFileSync(join(ROOT, 'src', 'plugin', 'shell', 'assemble.mjs'), 'utf8');
   assert.ok(!/^import .*esbuild/m.test(text), 'no top-level esbuild import');
 });
+
+test('sign-release: a small-order pinned key is refused', () => {
+  const s = signScratch();
+  const identity = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from('01' + '00'.repeat(31), 'hex')]);
+  writeFileSync(join(s.root, 'flavour', 'flavour.json'), JSON.stringify({ slug: 'acme', payloadLoader: true, releaseKeys: [`-----BEGIN PUBLIC KEY-----\n${identity.toString('base64')}\n-----END PUBLIC KEY-----\n`] }));
+  assert.throws(() => signSums({ root: s.root, dir: s.dir, keyPem: s.key }), (e) => e instanceof SignError && /small-order/.test(e.message));
+});

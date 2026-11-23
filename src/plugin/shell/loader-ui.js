@@ -61,9 +61,12 @@ function shellReport(status, version, code, message) {
 
 const shellPrevOnMessage = window.onmessage;
 window.onmessage = function (ev) {
-  if (ev && ev.source !== parent) return;      // only the plugin main thread talks to this page
+  // The message SHAPE is validated; the SOURCE (ev.source === parent) is deliberately not checked:
+  // how Figma delivers main-thread messages to the iframe is unverified, and a wrong guess would
+  // leave a published shell without its pairing token for good. The page has no nested frames.
   const m = ev && ev.data && ev.data.pluginMessage;
-  if (m && typeof m === 'object') {
+  if (!m || typeof m !== 'object' || typeof m.kind !== 'string') return;
+  {
     if (m.kind === 'payloadCache') { shellOnCache(m.envelope); return; }
     if (m.kind === 'payloadPending') { render(); return; }
     if (m.kind === 'payloadResult') { shellOnResult(m); return; }
@@ -162,6 +165,11 @@ function shellOnResult(m) {
       } catch (e) { shellBase = Object.assign({}, shellPristine); }
     }
     shellReport('installed', m.version);
+  } else if (m.reason === 'superseded') {
+    // replaced by a newer install before it ran: just forget it
+    const open = Object.keys(shellPending);
+    shellNewest = open.concat(shellInstalled ? [shellInstalled] : []).sort(shellCmp).pop() || null;
+    if (open.length === 0) shellPhase = shellInstalled ? 'ready' : 'idle';
   } else {
     // The live payload (and its ui patch) are untouched: a failed install never applies a patch.
     const open = Object.keys(shellPending);

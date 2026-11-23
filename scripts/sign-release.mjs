@@ -24,6 +24,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { flavourFile, isSinglePublicPem } from './gen-flavour.mjs';
 import { PAYLOAD_NAME, verifyEnvelope } from './payload.mjs';
+import { ed25519KeyProblem } from './ed25519-check.mjs';
 
 export class SignError extends Error {}
 
@@ -45,6 +46,8 @@ export function readPinnedKeys(root) {
     let k;
     try { k = createPublicKey(pem); } catch { throw new SignError('a pinned release public key in flavour/flavour.json is not a valid public key'); }
     if (k.asymmetricKeyType !== 'ed25519') throw new SignError('a pinned release public key is not an Ed25519 key');
+    const bad = ed25519KeyProblem(Uint8Array.from(k.export({ type: 'spki', format: 'der' }).subarray(-32)));
+    if (bad) throw new SignError(`a pinned release public key is unusable (${bad})`);
     return k;
   });
 }
