@@ -278,6 +278,8 @@ export async function runPlan(ctx: ForeignCtx, e: WatchEntry, items: PlanItem[],
         io.kill(pid, 'SIGTERM');
         let gone = await waitGone(pid, grace);
         if (!gone) {
+          // the pid may have been reused during the grace period: verify again before the hard kill
+          if (!verifyDaemon(pid).ok) return { status: 'refused', note: `pid ${pid} changed while waiting; left alone` };
           io.kill(pid, 'SIGKILL');
           gone = await waitGone(pid, Math.min(grace, 2000));
         }
@@ -324,6 +326,9 @@ export async function runPlan(ctx: ForeignCtx, e: WatchEntry, items: PlanItem[],
         const real = io.realpath(item.target);
         const ownReal = own.home ? io.realpath(own.home) : null;
         if (real && ownReal && fold(real) === fold(ownReal)) return { status: 'refused', note: "it resolves to this build's own home folder" };
+        // a recursive delete must never reach anything of ours that sits INSIDE the folder (our home, status, log, socket)
+        const inside = (x: string | null) => { if (!x) return false; const n = fold(p.normalize(x)); const t = fold(p.normalize(item.target)) + p.sep; return n.startsWith(t); };
+        if ([...own.paths, ...(own.home ? [own.home] : [])].some((x) => inside(x) || inside(io.realpath(x)))) return { status: 'refused', note: "something of this build's own lives inside that folder" };
         // fresh facts, right before the delete: whatever the plan saw, a swapped folder is refused
         const verdict = homeSafeToDelete(ctx, e, { kind: io.lstatKind(item.target), realpath: real, parentRealpath: io.realpath(ctx.home) });
         if (!verdict.ok) return { status: 'refused', note: verdict.reason };

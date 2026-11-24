@@ -296,14 +296,14 @@ const status = (results, kind, action) => results.find((r) => r.item.kind === ki
   const G = { ...Z, homeDirName: '.grip', entryName: 'grip-bridge', loginItem: 'Grip Daemon' };
   const c = ctx('darwin');
   const p = foreignPaths(c, G);
-  const OWN_HOME = '/Users/u/.grip-alt';
-  const own = { pids: [], home: OWN_HOME, paths: [OWN_HOME, '/Users/u/.grip-alt-bridge.status'] };
+  const OWN_HOME = '/Users/u/.grip-acme';
+  const own = { pids: [], home: OWN_HOME, paths: [OWN_HOME, '/Users/u/.grip-acme-bridge.status'] };
   const facts = { pid: 4242, running: true, exists: Object.fromEntries(p.autostart.map((a) => [a.path, true])), home: { kind: 'dir', realpath: p.homeDir, parentRealpath: c.home }, mcp: { entry: undefined, claudeCli: false }, pluginCopies: [] };
   const items = planForeignRemoval(c, G, facts);
   const FOREIGN = 'node /Users/u/.grip/grip-bridge.mjs --daemon --persistent';
   const OWN_DAEMON = `node ${OWN_HOME}/grip-bridge.mjs --daemon --persistent`;
   const FOREIGN_SUP = '/bin/bash /Users/u/Applications/Grip Daemon.app/Contents/MacOS/grip-daemon';
-  const OWN_SUP = '/bin/bash /Users/u/Applications/Alt Grip Daemon.app/Contents/MacOS/grip-daemon';
+  const OWN_SUP = '/bin/bash /Users/u/Applications/Acme Grip Daemon.app/Contents/MacOS/grip-daemon';
   const go = (opts, over = {}) => { const io = fakeIo({ alive: [4242, 4200], parents: { 4242: 4200 }, supervisorKillsChild: true, ...opts }); return runPlan(c, G, items, io, { ...FAST, own, ...over }).then((res) => ({ io, res })); };
   const killed = (io, pid) => io.log.some((l) => l.startsWith(`kill ${pid} `));
 
@@ -318,7 +318,7 @@ const status = (results, kind, action) => results.find((r) => r.item.kind === ki
   // the real foreign daemon under a lookalike supervisor: the daemon is stopped, the supervisor is refused
   r = await go({ cmds: { 4242: FOREIGN, 4200: OWN_SUP }, supervisorKillsChild: false });
   assert.equal(status(r.res, 'stop-supervisor'), 'refused');
-  assert.ok(!killed(r.io, 4200), 'the lookalike Alt Grip Daemon.app is not the foreign login item');
+  assert.ok(!killed(r.io, 4200), 'the lookalike Acme Grip Daemon.app is not the foreign login item');
   assert.ok(killed(r.io, 4242));
   // the real foreign daemon and its real supervisor are accepted
   r = await go({ cmds: { 4242: FOREIGN, 4200: FOREIGN_SUP } });
@@ -365,6 +365,29 @@ const status = (results, kind, action) => results.find((r) => r.item.kind === ki
   res = await runPlan(d.c, Z, planForeignRemoval(d.c, Z, d.facts), io, FAST);
   assert.ok(res.filter((r) => r.item.kind === 'app-bundle').every((r) => r.status === 'refused'));
   assert.ok(!io.log.some((l) => l.startsWith('rm /Users/u/Applications/Zenith') || l.startsWith('rm /Applications/Zenith')));
+}
+
+// ---- own files nested inside the foreign home: the recursive delete is refused
+{
+  const { c, p, facts } = fullFacts('linux');
+  const items = planForeignRemoval(c, Z, facts);
+  for (const own of [{ pids: [], home: `${p.homeDir}/ours`, paths: [] }, { pids: [], home: '/Users/u/.acme', paths: [`${p.homeDir}/sub/x.sock`] }]) {
+    const io = fakeIo();
+    const res = await runPlan(c, Z, items, io, { ...FAST, own });
+    assert.equal(status(res, 'home-dir'), 'refused');
+    assert.ok(!io.log.includes(`rm ${p.homeDir}`));
+  }
+}
+// ---- a pid that stops being the foreign daemon between SIGTERM and SIGKILL is not killed
+{
+  const { c, facts } = fullFacts('linux');
+  const io = fakeIo({ dieOn: 'SIGKILL' });
+  let n = 0;
+  const base = io.procCommand;
+  io.procCommand = (pid) => (++n > 1 ? 'node /x/unrelated.js' : base(pid));
+  const res = await runPlan(c, Z, planForeignRemoval(c, Z, facts), io, FAST);
+  assert.equal(status(res, 'stop-daemon'), 'refused');
+  assert.ok(!io.log.some((l) => l === 'kill 4242 SIGKILL'));
 }
 
 // ---- I2: nothing is deleted under a daemon that was never stopped
