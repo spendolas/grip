@@ -254,9 +254,23 @@ jobs:
           echo "REL_REPO=$REL_REPO" >> "$GITHUB_ENV"
           echo "Release target: $REL_REPO"
 
+      # A flavour that publishes to another repo needs RELEASES_PUBLISH_TOKEN. Without
+      # it the build artifact is still produced and signed; publish it by hand with
+      # scripts/publish-release-manual.sh.
+      - name: Check publish permission
+        env:
+          HAS_TOKEN: ${{ secrets.RELEASES_PUBLISH_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$REL_REPO" != "$GITHUB_REPOSITORY" ] && [ "$HAS_TOKEN" != "true" ]; then
+            echo "CAN_PUBLISH=false" >> "$GITHUB_ENV"
+            echo "::notice::No RELEASES_PUBLISH_TOKEN: skipping publish to $REL_REPO. Run scripts/publish-release-manual.sh with this run's id."
+          fi
+
       # The write token sees drafts, so a draft left by an earlier failed run is
       # recovered here instead of duplicated.
       - name: Re-check release state with the write token
+        if: env.CAN_PUBLISH != 'false'
         run: |
           set -euo pipefail
           if [ "$REL_REPO" = "$GITHUB_REPOSITORY" ]; then
@@ -275,9 +289,11 @@ jobs:
 
       - name: Release gate
         id: gate
+        if: env.CAN_PUBLISH != 'false'
         run: node scripts/release-gate.mjs --version "$V" --tags-file tags.txt --release-file release.json --changelog CHANGELOG.md --notes-out notes.md
 
       - name: Publish
+        if: env.CAN_PUBLISH != 'false'
         env:
           ACTION: ${{ steps.gate.outputs.action }}
           # Only read by scripts/sign-release.mjs, in the one case where the
