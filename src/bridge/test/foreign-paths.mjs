@@ -96,7 +96,7 @@ assert.equal(isDaemonCommand('node /x/grip-bridge.mjs --daemon', 'grip-bridge'),
 {
   const G = { ...Z, homeDirName: '.grip', entryName: 'grip-bridge', loginItem: 'Grip Daemon' };
   const c = ctx('linux');
-  const ownHome = `/Users/${U}/.grip-alt`;
+  const ownHome = `/Users/${U}/.grip-acme`;
   const foreignCmd = `node /Users/${U}/.grip/grip-bridge.mjs --daemon --persistent`;
   assert.equal(isForeignDaemonCommand(c, G, foreignCmd, { home: ownHome }), true, 'the real foreign daemon');
   assert.equal(isForeignDaemonCommand(c, G, `node ${ownHome}/grip-bridge.mjs --daemon --persistent`, { home: ownHome }), false, 'OUR daemon (same entry name)');
