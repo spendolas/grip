@@ -25,6 +25,29 @@ import {
   helpNotices, pluginsBehind, findPluginCopies, copyNeedsWork,
   type UpdateState, type PluginInfo,
 } from './update.js';
+// >>> phase 2B: insecure-Grip guard
+import { getForeignGuard, foreignGripSummary, foreignAlertTexts, ownInfo, type ForeignSummary, type ForeignAlertTexts } from './foreign-guard.js';
+
+// What the guard knows right now (read at call time, so a cleared alert disappears at once).
+// Always empty for a flavour without a guard.
+function foreignNow(): { summary: ForeignSummary | null; texts: ForeignAlertTexts | null } {
+  const g = getForeignGuard();
+  if (!g) return { summary: null, texts: null };
+  const own = ownInfo();
+  const summary = foreignGripSummary(g.current(), own);
+  return { summary, texts: foreignAlertTexts(summary, own) };
+}
+// `foreignGrip` for grip_health / grip_update check (empty object when there is nothing to say)
+function foreignHealthField(): { foreignGrip?: ForeignSummary } {
+  const s = foreignNow().summary;
+  return s ? { foreignGrip: s } : {};
+}
+// the alert notice at the start of grip_update check's note ('' when there is no alert)
+function foreignNotePrefix(): string {
+  const t = foreignNow().texts;
+  return t ? `${t.notice}\n\n` : '';
+}
+// <<< phase 2B
 
 // File extension per export format, for auto temp-file naming.
 const EXPORT_EXT: Record<string, string> = {
@@ -241,6 +264,9 @@ export function createSession(bridge: PluginBridge): LiveSession {
     }
     if (granted.length) session.helpNoticesGranted = granted;
   }
+  // >>> phase 2B: an insecure foreign Grip is told to EVERY session (no throttle, not silenced by GRIP_NO_UPDATE_CHECK)
+  { const fx = foreignNow().texts; if (fx) updateParagraph += `\n\n${fx.instructions}`; }
+  // <<< phase 2B
   // `instructions` is returned with initialize and injected into the agent's
   // context once — unlike tool descriptions, it costs nothing per tool and is
   // not subject to the per-description budget.
@@ -340,6 +366,13 @@ export function createSession(bridge: PluginBridge): LiveSession {
       if (texts.length) (res as any).content.push({ type: 'text' as const, text: texts.join('\n\n') });
       if (texts.length || plugins.some((p) => p.hello !== false && p.wsReady !== false)) session.helpNoticeSent = true;
     }
+    // >>> phase 2B: the insecure-foreign-Grip notice, one extra block on the first successful result of
+    // EVERY session (grip_update check carries it in its own note instead).
+    if (!(res as any)?.isError && !session.foreignNoticeSent && name !== 'grip_update') {
+      const fx = foreignNow().texts;
+      if (fx) { (res as any).content.push({ type: 'text' as const, text: fx.notice }); session.foreignNoticeSent = true; }
+    }
+    // <<< phase 2B
     const ms = Date.now() - t0;
     const isErr = (res as any)?.isError;
     const text = (res as any)?.content?.[0]?.text ?? '';
@@ -388,6 +421,7 @@ export function createSession(bridge: PluginBridge): LiveSession {
         // Other agents connected to this bridge right now (a count only).
         otherAgents: otherSessions(session).length,
         update: updateSummary(undefined, pluginInfos(bridge)),
+        ...foreignHealthField(),   // phase 2B
         // Plugin pairing (pairing.ts): is the bridge enforcing it, how many plugin installs are paired.
         ...(typeof bridge.pairingStatus === 'function' && bridge.pairingStatus() ? { pairing: bridge.pairingStatus() } : {}),
       });
@@ -397,21 +431,22 @@ export function createSession(bridge: PluginBridge): LiveSession {
       const plugins = pluginInfos(bridge);
       if (action === 'check') {
         if (updatesDisabled()) {
-          return okResult({ ...updateSummary(undefined, plugins), disabled: true, note: 'Automatic update checks are off (GRIP_NO_UPDATE_CHECK). Nothing was contacted. If the user wants to update, call grip_update {action:\'install\', version} after they agree.' });
+          return okResult({ ...updateSummary(undefined, plugins), ...foreignHealthField(), disabled: true, note: foreignNotePrefix() + 'Automatic update checks are off (GRIP_NO_UPDATE_CHECK). Nothing was contacted. If the user wants to update, call grip_update {action:\'install\', version} after they agree.' });
         }
         const s = await checkForUpdate();
         const sum = updateSummary(s, plugins);
         return okResult({
           ...sum,
+          ...foreignHealthField(),   // phase 2B
           // What's new, from the release notes (first ~1200 chars). Relay it to the user.
           headline: s.headline ?? null,
           notes: s.notes ?? null,
           ...(s.error ? { error: s.error } : {}),
-          note: s.available
+          note: foreignNotePrefix() + (s.available
             ? (sum.signalled
               ? `Update available. Tell the user what's new (headline/notes) and ask if they want it; only after they say yes, call grip_update {action:'install', version:'${s.latest}'}.${sum.staleWindows ? ` Warn them: ${sum.staleWindows.length} other open Figma window(s) have a Grip plugin that is too old for ${s.latest} and will stop working until it is updated in Figma (${sum.staleWindows.join('; ')}).` : ''}`
               : `Update ${s.latest} exists but is NOT offered: ${sum.blockedReason}. Do not install it.`)
-            : s.error ? 'Could not reach the update server; nothing changed.' : 'Grip is up to date.',
+            : s.error ? 'Could not reach the update server; nothing changed.' : 'Grip is up to date.'),
         });
       }
       if (!version) {

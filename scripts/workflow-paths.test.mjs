@@ -24,3 +24,11 @@ test('test.yml runs on all three OS runners and the Windows subset', () => {
   for (const os of ['ubuntu-latest', 'macos-latest', 'windows-latest']) assert.ok(yml.includes(os), os);
   assert.ok(yml.includes('test:win'));
 });
+
+test('test.yml runs the foreign guard tests (test:cross) on every OS', () => {
+  const yml = read('test.yml');
+  assert.ok(yml.includes('test:cross'));
+  // the step has no OS condition: it runs on all three runners
+  const step = yml.slice(yml.indexOf('- name: Foreign guard tests'));
+  assert.ok(!step.slice(0, step.indexOf('- name: Full test suite')).includes('if:'));
+});

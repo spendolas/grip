@@ -84,6 +84,10 @@
       let updError = '';          // short reason of the last failure
       let updFlash = false;       // the red flash on screen is an update failure, not "no bridge"
       let updTimer = null;
+      // >>> phase 2B: the bridge found an insecure foreign Grip on this machine. Alert only:
+      // the strip keeps its state and colour; the warning is the tooltip (and a toast from the bridge).
+      let foreignAlert = '';
+      // <<< phase 2B
 
       // ---- Pairing (bridge/src/pairing.ts) ------------------------------------------------
       // The socket is untrusted until the bridge proves it holds the shared secret we keep in
@@ -271,6 +275,13 @@
         if (pairIssue === 'unverified') return 'This bridge could not prove who it is. Click to forget the pairing';
         if (needsSetup) return 'Bridge not running. Click for setup';
         if (current !== 'connected') return '';
+        if (foreignAlert) {   // phase 2B: the warning first, then whatever the strip would have said about an update
+          if (updLatest && updClone) return foreignAlert + ' | Update available (developer install)';
+          if (bridgeOutdated()) return foreignAlert + ' | ' + (bridgeHearsUpdates() ? 'Bridge update needed. Click to update' : 'Bridge update needed. Click for steps');
+          if (offered && updPhase === 'failed') return foreignAlert + ' | Update failed. Click to retry';
+          if (offered) return foreignAlert + ' | Update available. Click to install';
+          return foreignAlert;
+        }
         if (updLatest && updClone) return 'Update available (developer install)';
         if (bridgeOutdated()) return bridgeHearsUpdates() ? 'Bridge update needed. Click to update' : 'Bridge update needed. Click for steps';
         if (offered && updPhase === 'failed') return 'Update failed. Click to retry';
@@ -339,6 +350,7 @@
           // Mid-update the drop is expected (the bridge restarts): keep "Updating…"
           // until we reconnect. Otherwise nothing is on offer without a bridge.
           if (updPhase !== 'updating') clearUpdate();
+          foreignAlert = '';   // phase 2B: the next bridge connection re-announces it
           trusted = false;
           if (ev.code === 1000 && ev.reason === 'duplicate') {
             setState('warning');
@@ -383,6 +395,7 @@
           // Update frames (additive; older plugins/bridges simply ignore them).
           if (msg && msg.type === 'update') { onUpdateNotice(msg); return; }
           if (msg && msg.type === 'update_result') { onUpdateResult(msg); return; }
+          if (msg && msg.type === 'foreign_alert') { onForeignAlert(msg); return; }   // phase 2B
           if (msg && msg.id && msg.method) {
             // Forward the whole frame (timeoutMs and any later additive field),
             // not an allow-list: dropping fields here once hid the bridge's
@@ -407,6 +420,15 @@
         if (!updLatest || updLatest !== was) { updClone = false; updError = ''; if (updPhase === 'failed') updPhase = 'idle'; }
         render();
       }
+
+      // >>> phase 2B: {type:'foreign_alert', active, tooltip}. Only the tooltip changes: no colour, no
+      // class, no click behaviour, and the connection is untouched.
+      function onForeignAlert(msg) {
+        foreignAlert = msg.active === true && typeof msg.tooltip === 'string'
+          ? msg.tooltip.replace(/[^\x20-\x7e]/g, '').slice(0, 200) : '';
+        render();
+      }
+      // <<< phase 2B
 
       // {type:'update_result', status, ...}: the outcome of OUR click.
       function onUpdateResult(msg) {

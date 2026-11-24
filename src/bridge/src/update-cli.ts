@@ -18,6 +18,7 @@ import { createInterface } from 'node:readline';
 import { BRIDGE_VERSION } from './types.js';
 import { IDENTITY } from './identity.js';
 import { FLAVOUR } from './flavour.gen.js';
+import { createForeignGuardFromFlavour, foreignCliLines } from './foreign-guard.js';   // phase 2B
 import {
   CLONE_NEXT_STEPS, checkForUpdate, checkPluginCompat, gripHome, installUpdate, isTrustFailure, readDaemonPlugins, readInstallRecord, releasesApi,
   UNCLAIMED_FLAVOUR,
@@ -61,6 +62,10 @@ export async function runUpdateCli(argv: string[]): Promise<number> {
     }
   }
 
+  // >>> phase 2B: an insecure foreign Grip is shown first (alert only; exit codes are not affected)
+  { const g = createForeignGuardFromFlavour();
+    if (g) foreignCliLines(await g.refresh(), { displayName: FLAVOUR.displayName, entryPath: entry }).forEach((l) => out(l)); }
+  // <<< phase 2B
   out(`Grip ${BRIDGE_VERSION} installed. Checking ${releasesApi()} ...`);
   const s = await checkForUpdate();
   if (s.error) {

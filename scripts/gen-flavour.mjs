@@ -51,12 +51,58 @@ export function isSinglePublicPem(pem) {
     && t.split('-----BEGIN ').length === 2 && t.split('-----END ').length === 2 && !t.includes('PRIVATE');
 }
 const SAFE_NAMES = ['filePrefix', 'homeDirName', 'ipcName', 'launchLabel', 'daemonBundleId'];
-const FIELDS = ['slug', 'displayName', 'wsPort', 'httpPort', 'homeDirName', 'filePrefix', 'ipcName', 'mcpName', 'daemonAppName', 'daemonBundleId', 'launchLabel', 'pluginId', 'pluginName', 'releasesApi', 'installUrl', 'pagesUrl', 'releaseKeys', 'lockOverrides', 'payloadLoader'];
+const FIELDS = ['slug', 'displayName', 'wsPort', 'httpPort', 'homeDirName', 'filePrefix', 'ipcName', 'mcpName', 'daemonAppName', 'daemonBundleId', 'launchLabel', 'pluginId', 'pluginName', 'releasesApi', 'installUrl', 'pagesUrl', 'releaseKeys', 'lockOverrides', 'payloadLoader',
+  // phase 2B: insecure-Grip guard (bridge only)
+  'watchlist', 'enforcement'];
 
 // The flavour file the release tooling reads: GRIP_FLAVOUR_DIR (the same switch as this script's
 // default dir) or <root>/flavour. Release scripts must fail CLOSED when it cannot be read.
 export function flavourFile(root) {
   return join(process.env.GRIP_FLAVOUR_DIR ? resolve(process.env.GRIP_FLAVOUR_DIR) : join(root, 'flavour'), 'flavour.json');
+}
+
+// ---- guard watchlist (phase 2B) ----
+const WATCH_FIELDS = ['slug', 'wsPort', 'httpPort', 'homeDirName', 'statusFile', 'logFile', 'loginItem', 'launchLabel', 'mcpName', 'entryName', 'ipcName', 'serviceName', 'startupLauncher', 'minSecureVersion'];
+const WATCH_NUMBERS = ['wsPort', 'httpPort'];
+const WATCH_SAFE = ['homeDirName', 'statusFile', 'logFile', 'launchLabel', 'mcpName', 'entryName', 'ipcName', 'serviceName'];
+const WATCH_SPACED = ['loginItem', 'startupLauncher'];
+
+function validateWatchlist(raw) {
+  if (raw.enforcement !== 'alert' && raw.enforcement !== 'off') throw new Error('flavour: field "enforcement" must be "alert" or "off"');
+  if (!Array.isArray(raw.watchlist)) throw new Error('flavour: field "watchlist" must be an array');
+  if (raw.enforcement === 'alert' && raw.watchlist.length < 1) throw new Error('flavour: field "watchlist" must not be empty when "enforcement" is "alert"');
+  const seen = new Set();
+  for (const e of raw.watchlist) {
+    if (!e || typeof e !== 'object' || Array.isArray(e)) throw new Error('flavour: field "watchlist" holds an entry that is not an object');
+    for (const k of Object.keys(e)) if (!WATCH_FIELDS.includes(k)) throw new Error(`flavour: watchlist entry has unknown field "${k}"`);
+    for (const k of WATCH_FIELDS) if (!(k in e)) throw new Error(`flavour: watchlist entry is missing field "${k}"`);
+    if (typeof e.slug !== 'string' || !/^[a-z][a-z0-9-]{0,23}$/.test(e.slug)) throw new Error('flavour: watchlist field "slug" must match ^[a-z][a-z0-9-]{0,23}$');
+    if (e.slug === raw.slug) throw new Error("flavour: watchlist field \"slug\" must differ from this flavour's own slug");
+    if (seen.has(e.slug)) throw new Error(`flavour: watchlist field "slug" is listed twice (${e.slug})`);
+    seen.add(e.slug);
+    for (const k of WATCH_NUMBERS) {
+      if (!Number.isInteger(e[k]) || e[k] < 1 || e[k] > 65535) throw new Error(`flavour: watchlist field "${k}" must be an integer port 1-65535`);
+      if (e[k] === raw.wsPort || e[k] === raw.httpPort) throw new Error(`flavour: watchlist field "${k}" must differ from this flavour's own ports`);
+    }
+    if (e.wsPort === e.httpPort) throw new Error('flavour: watchlist field "httpPort" must differ from "wsPort"');
+    for (const k of WATCH_SAFE) {
+      if (typeof e[k] !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(e[k]) || /^\.+$/.test(e[k])) throw new Error(`flavour: watchlist field "${k}" may only contain letters, digits, ".", "-" and "_" (not only dots)`);
+    }
+    for (const k of WATCH_SPACED) {
+      if (typeof e[k] !== 'string' || !/^[A-Za-z0-9._-](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9._-])?$/.test(e[k]) || /^\.+$/.test(e[k])) throw new Error(`flavour: watchlist field "${k}" may only contain letters, digits, spaces, ".", "-" and "_"`);
+    }
+    // every name a removal deletes must differ from THIS build's, ignoring case (macOS and Windows
+    // file systems do): a foreign removal must never be able to name our own files
+    const ownNames = {
+      homeDirName: raw.homeDirName, loginItem: raw.daemonAppName, statusFile: `${raw.filePrefix}.status`, logFile: `${raw.filePrefix}.log`,
+      ipcName: raw.ipcName, launchLabel: raw.launchLabel, serviceName: `${raw.slug}-bridge`, startupLauncher: `${raw.daemonAppName.replace(/\s+/g, '')}.vbs`,
+    };
+    for (const [k, mine] of Object.entries(ownNames)) {
+      if (e[k].toLowerCase() === mine.toLowerCase()) throw new Error(`flavour: watchlist field "${k}" must differ from this flavour's own (${mine}), ignoring case`);
+    }
+    if (!MCP_NAME_RE.test(e.mcpName)) throw new Error('flavour: watchlist field "mcpName" is not a valid MCP name');
+    if (typeof e.minSecureVersion !== 'string' || !/^\d+\.\d+\.\d+$/.test(e.minSecureVersion)) throw new Error('flavour: watchlist field "minSecureVersion" must look like 1.2.3');
+  }
 }
 
 export function loadFlavour(dir) {
@@ -121,6 +167,7 @@ export function loadFlavour(dir) {
   if (!/^[A-Za-z0-9._-](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9._-])?$/.test(raw.daemonAppName) || /^\.+$/.test(raw.daemonAppName)) {
     throw new Error('flavour: field "daemonAppName" may only contain letters, digits, spaces, ".", "-" and "_" (no leading or trailing space, not only dots)');
   }
+  validateWatchlist(raw);
   const out = {};
   for (const k of FIELDS) out[k] = raw[k];
   return out;
@@ -132,13 +179,16 @@ function q(s) {
 
 export function renderFlavour(f, fields = FIELDS) {
   const types = { string: 'string', number: 'number', boolean: 'boolean' };
-  const typeOf = (v) => (Array.isArray(v) ? 'readonly string[]' : types[typeof v]);
-  // string arrays go in as JSON (a PEM holds newlines, which a '...' literal cannot)
+  const typeOf = (v, k) => (k === 'watchlist' ? 'readonly WatchEntry[]' : k === 'enforcement' ? "'alert' | 'off'" : Array.isArray(v) ? 'readonly string[]' : types[typeof v]);
+  // arrays go in as JSON (a PEM holds newlines, which a '...' literal cannot)
   const valOf = (v) => (Array.isArray(v) ? `Object.freeze(${JSON.stringify(v)})` : typeof v === 'string' ? q(v) : v);
-  const iface = fields.map((k) => `  ${k}: ${typeOf(f[k])};`).join('\n');
+  const iface = fields.map((k) => `  ${k}: ${typeOf(f[k], k)};`).join('\n');
+  const watchIface = fields.includes('watchlist')
+    ? `export interface WatchEntry {\n${WATCH_FIELDS.map((k) => `  ${k}: ${WATCH_NUMBERS.includes(k) ? 'number' : 'string'};`).join('\n')}\n}\n\n`
+    : '';
   const vals = fields.map((k) => `  ${k}: ${valOf(f[k])},`).join('\n');
   return `// GENERATED by scripts/gen-flavour.mjs from flavour/flavour.json. DO NOT EDIT.
-export interface Flavour {
+${watchIface}export interface Flavour {
 ${iface}
 }
 
@@ -151,7 +201,7 @@ ${vals}
 // Same values, but a global script: `const FLAVOUR` with no import/export, so a
 // tsc outFile build (module: none) keeps code.js one plain script. The plugin never
 // verifies a release, so its copy leaves the release keys out.
-const PLUGIN_FIELDS = FIELDS.filter((k) => k !== 'releaseKeys' && k !== 'payloadLoader');
+const PLUGIN_FIELDS = FIELDS.filter((k) => !['releaseKeys', 'payloadLoader', 'watchlist', 'enforcement'].includes(k));
 export function renderFlavourGlobal(f) {
   return renderFlavour(f, PLUGIN_FIELDS)
     .replace('export interface Flavour', 'interface Flavour')

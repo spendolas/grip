@@ -41,6 +41,10 @@ jobs:
           node src/bridge/test/flavour.mjs
           node src/bridge/test/flavour-handshake.mjs
 
+      # phase 2B: the insecure-Grip guard's pure planner, detection and executor tests (fake IO), on every OS.
+      - name: Foreign guard tests
+        run: npm --prefix src/bridge run test:cross
+
       - name: Full test suite
         if: runner.os != 'Windows'
         run: npm test

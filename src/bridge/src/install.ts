@@ -29,6 +29,8 @@ import { BRIDGE_VERSION } from './types.js';
 import { FLAVOUR } from './flavour.gen.js';
 import { liveIdentity } from './identity.js';
 import { chooseMcpName, validMcpName, type McpTarget } from './mcp-name.js';
+import { createInterface } from 'node:readline';   // phase 2B
+import { createForeignGuardFromFlavour, foreignCliLines, preflightForeign } from './foreign-guard.js';   // phase 2B
 
 const args = new Set(process.argv.slice(2));
 const wantHttp = args.has('--http');
@@ -370,6 +372,29 @@ if (printConfig) {
 log();
 log('\x1b[1mGrip — installing the local bridge\x1b[0m');
 log();
+// >>> phase 2B: insecure-Grip preflight (a flavour with a watchlist only; nothing happens in the public build)
+{
+  const guard = createForeignGuardFromFlavour();
+  if (guard) {
+    const report = await guard.refresh();
+    // The new bridge is not installed yet: the removal command runs from the copy next to this installer.
+    const ownEntry = { displayName: FLAVOUR.displayName, entryPath: SOURCE_BRIDGE };
+    foreignCliLines(report, ownEntry).forEach((l) => log(l));
+    const continueFlag = args.has('--continue-with-foreign');
+    let interactiveYes: boolean | null = null;
+    if (report.worst?.state === 'insecure' && !continueFlag && process.stdin.isTTY) {
+      interactiveYes = await new Promise<boolean>((res) => {
+        const rl = createInterface({ input: process.stdin, output: process.stdout });
+        rl.question('Continue installing anyway? [y/N] ', (a) => { rl.close(); res(/^y(es)?$/i.test(a.trim())); });
+        rl.on('close', () => res(false));
+      });
+    }
+    const verdict = preflightForeign(report, { interactiveYes, continueFlag }, ownEntry);
+    verdict.lines.forEach((l) => log(l));
+    if (!verdict.proceed) process.exit(verdict.exitCode);
+  }
+}
+// <<< phase 2B
 // Decided before anything is written, so a refusal leaves the disk untouched.
 const mcpName = noRegister ? null : resolveMcpName();
 installBridge();
