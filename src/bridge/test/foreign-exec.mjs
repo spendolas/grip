@@ -543,7 +543,7 @@ const status = (results, kind, action) => results.find((r) => r.item.kind === ki
   // a flavour with a watchlist: listing without --yes changes nothing
   const mk = () => {
     const out = [];
-    const detect = { ...ctx('linux'), probe: async () => ({ kind: 'welcome', version: '1.0.0', flavour: null }), readText: (pth) => (pth.endsWith('.zenith-bridge.status') ? JSON.stringify({ pid: 4242, version: '1.0.0' }) : null), exists: () => true, pidAlive: (pid) => pid === 4242 };
+    const detect = { ...ctx('linux'), probe: async () => ({ kind: 'welcome', version: '1.0.0', flavour: null }), readText: (pth) => (pth.endsWith('.zenith-bridge.status') ? JSON.stringify({ pid: 4242, version: '1.0.0' }) : null), exists: () => true, pidAlive: (pid) => pid === 4242, procCommand: (pid) => (pid === 4242 ? DAEMON_CMD : null) };
     const exec = fakeIo({ kinds: { '/Users/u/.zenith': 'dir' } });
     return { out, deps: { entries: [Z], enforcement: 'alert', detect, exec, out: (s) => out.push(s) }, exec };
   };

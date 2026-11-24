@@ -6,8 +6,8 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { WebSocket } from 'ws';
 import type { WatchEntry } from './flavour.gen.js';
-import { foreignPaths, mcpEntryIsForeign, type ForeignCtx } from './foreign-paths.js';
-import { compareSemver, isSemver } from './update.js';
+import { foreignPaths, isForeignDaemonCommand, mcpEntryIsForeign, type ForeignCtx } from './foreign-paths.js';
+import { compareSemver, isSemver, processCommandLine } from './update.js';
 
 export type ForeignState = 'none' | 'ok' | 'insecure' | 'unknown_service';
 
@@ -21,6 +21,8 @@ export interface DetectIo extends ForeignCtx {
   readText(path: string, maxBytes: number): string | null;
   exists(path: string): boolean;
   pidAlive(pid: number): boolean;
+  // the command line of a pid (null = unreadable); on every OS, through the adapter
+  procCommand(pid: number): string | null;
 }
 
 export interface ForeignFinding {
@@ -78,7 +80,15 @@ async function detectOne(e: WatchEntry, io: DetectIo): Promise<ForeignFinding> {
 
   const status = parseJson(io.readText(paths.statusFile, SMALL_FILE));
   const statusPid = status && Number.isSafeInteger(status.pid) && (status.pid as number) > 1 ? (status.pid as number) : null;
-  const statusAlive = statusPid !== null && io.pidAlive(statusPid);
+  // A pid from the status file counts as present only while it is alive AND its command line is the
+  // foreign daemon (same whole-token entry + `--daemon` rule as the removal): a recycled pid is not it.
+  // An unreadable command line is not present.
+  let statusAlive = false;
+  if (statusPid !== null && io.pidAlive(statusPid)) {
+    let cmd: string | null = null;
+    try { cmd = io.procCommand(statusPid); } catch { /* unreadable */ }
+    statusAlive = !!cmd && isForeignDaemonCommand(io, e, cmd);
+  }
   const statusVersion = status ? str(status.version) : null;
   const install = parseJson(io.readText(paths.installJson, SMALL_FILE));
   const installVersion = install ? str(install.version) : null;
@@ -191,5 +201,6 @@ export function realDetectIo(): DetectIo {
     },
     exists: (path) => { try { return existsSync(path); } catch { return false; } },
     pidAlive: (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; } },
+    procCommand: (pid) => processCommandLine(pid),
   };
 }

@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { detectForeign, realDetectIo } from '../dist/foreign-detect.js';
+import { foreignPaths } from '../dist/foreign-paths.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const alt = JSON.parse(readFileSync(join(here, 'fixtures', 'flavour-alt', 'flavour.json'), 'utf8'));
@@ -16,9 +17,15 @@ const Q = { ...Z, slug: 'quark', wsPort: 7987, httpPort: 7988, homeDirName: '.qu
 const HOME = '/h';
 
 // A fake io: `files` maps absolute path -> text, `probes` maps port -> ProbeResult.
-function fakeIo({ probes = {}, files = {}, exists = [], alive = [], platform = 'linux' } = {}) {
+// `alive` pids run the real foreign daemon (its entry file + --daemon) unless `cmds` says otherwise
+// (pid -> command line, or null = unreadable); a pid not in `cmds` and not alive has no command line.
+function fakeIo({ probes = {}, files = {}, exists = [], alive = [], platform = 'linux', cmds = {} } = {}) {
+  const home = platform === 'win32' ? 'C:\\Users\\h' : HOME;
+  const ctx = { platform, home, tmp: '/t', env: {}, uid: 501 };
+  const daemon = `node ${platform === 'win32' ? '"' : ''}${foreignPaths(ctx, Z).entryFile}${platform === 'win32' ? '"' : ''} --daemon`;
   return {
-    platform, home: HOME, tmp: '/t', env: {}, uid: 501,
+    platform, home, tmp: '/t', env: {}, uid: 501,
+    procCommand: (pid) => (pid in cmds ? cmds[pid] : alive.includes(pid) ? daemon : null),
     probe: async (port) => probes[port] ?? { kind: 'closed' },
     readText: (p) => (p in files ? files[p] : null),
     exists: (p) => exists.includes(p) || p in files,
@@ -110,6 +117,31 @@ const one = async (io, entries = [Z]) => (await detectForeign(entries, io)).find
   f = await one(fakeIo({ files: { [status]: JSON.stringify({ pid: 123, version: '1.0.0' }) } }));
   assert.equal(f.state, 'none');
   assert.equal(f.pid, null);
+  // a pid that is alive but is NOT the foreign daemon (recycled pid) is not presence: no false alert
+  for (const [why, cmd] of [['another program', 'node /usr/bin/other-tool.js'], ['our own daemon (same entry name)', 'node /h/.grip/grip-bridge.mjs --daemon'],
+    ['the foreign entry but no --daemon', `node ${HOME}/.zenith/zenith-bridge.mjs`], ['--daemonize is not --daemon', `node ${HOME}/.zenith/zenith-bridge.mjs --daemonize`],
+    ['a longer entry name', `node ${HOME}/.zenith/zenith-bridge.mjs.bak --daemon`], ['unreadable (null)', null], ['unreadable (empty)', '']]) {
+    f = await one(fakeIo({ files: { [status]: JSON.stringify({ pid: 123, version: '1.0.0' }) }, alive: [123], cmds: { 123: cmd } }));
+    assert.equal(f.state, 'none', why);
+    assert.equal(f.running, false, why);
+    assert.equal(f.pid, null, why);
+    assert.ok(!f.evidence.some((x) => x.includes('alive')), why);
+  }
+  // ...and a command line that throws is unreadable too
+  {
+    const io = fakeIo({ files: { [status]: JSON.stringify({ pid: 123, version: '1.0.0' }) }, alive: [123] });
+    io.procCommand = () => { throw new Error('ps failed'); };
+    assert.equal((await one(io)).state, 'none', 'procCommand throws');
+  }
+  // the same rule on every OS (quoted Windows path, case-folded on darwin/win32)
+  for (const platform of ['linux', 'darwin', 'win32']) {
+    const st = foreignPaths({ platform, home: platform === 'win32' ? 'C:\\Users\\h' : HOME, tmp: '/t', env: {}, uid: 501 }, Z).statusFile;
+    f = await one(fakeIo({ platform, files: { [st]: JSON.stringify({ pid: 5, version: '1.0.0' }) }, alive: [5] }));
+    assert.equal(f.state, 'insecure', `${platform}: the real daemon counts`);
+    assert.equal(f.pid, 5, platform);
+    f = await one(fakeIo({ platform, files: { [st]: JSON.stringify({ pid: 5, version: '1.0.0' }) }, alive: [5], cmds: { 5: 'node other.js' } }));
+    assert.equal(f.state, 'none', `${platform}: a recycled pid does not`);
+  }
   // installed but stopped: insecure (it starts at next login)
   f = await one(fakeIo({ files: { [inst]: JSON.stringify({ source: 'release', version: '1.0.0' }) } }));
   assert.equal(f.state, 'insecure');
@@ -256,6 +288,8 @@ const one = async (io, entries = [Z]) => (await detectForeign(entries, io)).find
   assert.equal(real.readText(join(here, 'foreign-detect.mjs'), 10), null);
   assert.ok(real.readText(join(here, 'foreign-detect.mjs'), 10_000_000).includes('foreign-detect'));
   assert.equal(real.pidAlive(process.pid), true);
+  assert.ok(String(real.procCommand(process.pid)).includes('foreign-detect'), 'the real adapter reads a live command line');
+  assert.equal(real.procCommand(2 ** 22 + 12345), null, 'no such process: null');
   for (const s of open) await new Promise((r) => s.close(() => r()));
 }
 
