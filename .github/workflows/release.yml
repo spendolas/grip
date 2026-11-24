@@ -75,6 +75,16 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "V=$V" >> "$GITHUB_ENV"
 
+      # Where releases go: the repo named by the flavour's releasesApi. For the
+      # public flavour that is this very repo; a flavour may publish to a separate
+      # release-only repo instead (then the publish job needs RELEASES_PUBLISH_TOKEN).
+      - name: Resolve release target
+        run: |
+          set -euo pipefail
+          REL_REPO="$(node -e "const u=require('./flavour/flavour.json').releasesApi;const m=/^https:\/\/api\.github\.com\/repos\/([^/]+\/[^/]+)\/releases\/latest$/.exec(u);if(!m){console.error('releasesApi is not a github releases/latest URL');process.exit(1)}console.log(m[1])")"
+          echo "REL_REPO=$REL_REPO" >> "$GITHUB_ENV"
+          echo "Release target: $REL_REPO"
+
       # A read-only token cannot see drafts; the publish job re-checks with a
       # write token before it touches anything.
       - name: Collect release state
@@ -82,8 +92,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git tag -l 'v*' > tags.txt
-          if gh release view "v$V" --json isDraft,assets > release.json 2> gh-err.txt; then
+          if [ "$REL_REPO" = "$GITHUB_REPOSITORY" ]; then
+            git tag -l 'v*' > tags.txt
+          else
+            gh api "repos/$REL_REPO/git/matching-refs/tags/v" --jq '.[].ref | sub("refs/tags/";"")' > tags.txt
+          fi
+          if gh release view "v$V" --repo "$REL_REPO" --json isDraft,assets > release.json 2> gh-err.txt; then
             echo "Release v$V exists."
           elif grep -qi 'release not found' gh-err.txt; then
             echo 'null' > release.json
@@ -214,7 +228,7 @@ jobs:
       contents: write
     env:
       V: ${{ needs.build.outputs.version }}
-      GH_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ secrets.RELEASES_PUBLISH_TOKEN || github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -230,13 +244,27 @@ jobs:
           name: grip-release
           path: artifact
 
+      # Where releases go: the repo named by the flavour's releasesApi. For the
+      # public flavour that is this very repo; a flavour may publish to a separate
+      # release-only repo instead (then the publish job needs RELEASES_PUBLISH_TOKEN).
+      - name: Resolve release target
+        run: |
+          set -euo pipefail
+          REL_REPO="$(node -e "const u=require('./flavour/flavour.json').releasesApi;const m=/^https:\/\/api\.github\.com\/repos\/([^/]+\/[^/]+)\/releases\/latest$/.exec(u);if(!m){console.error('releasesApi is not a github releases/latest URL');process.exit(1)}console.log(m[1])")"
+          echo "REL_REPO=$REL_REPO" >> "$GITHUB_ENV"
+          echo "Release target: $REL_REPO"
+
       # The write token sees drafts, so a draft left by an earlier failed run is
       # recovered here instead of duplicated.
       - name: Re-check release state with the write token
         run: |
           set -euo pipefail
-          git tag -l 'v*' > tags.txt
-          if gh release view "v$V" --json isDraft,assets > release.json 2> gh-err.txt; then
+          if [ "$REL_REPO" = "$GITHUB_REPOSITORY" ]; then
+            git tag -l 'v*' > tags.txt
+          else
+            gh api "repos/$REL_REPO/git/matching-refs/tags/v" --jq '.[].ref | sub("refs/tags/";"")' > tags.txt
+          fi
+          if gh release view "v$V" --repo "$REL_REPO" --json isDraft,assets > release.json 2> gh-err.txt; then
             echo "Release v$V exists."
           elif grep -qi 'release not found' gh-err.txt; then
             echo 'null' > release.json
@@ -282,14 +310,15 @@ jobs:
             # A draft is invisible to releases/latest and creates no tag, so
             # users never see a release with assets still uploading. The notes
             # are the CHANGELOG.md section for this version, extracted by the gate.
-            gh release create "v$V" --draft --target "$GITHUB_SHA" --title "v$V" --notes-file notes.md $PRE artifact/dist/*
-            gh release edit "v$V" --draft=false
+            TARGET="$GITHUB_SHA"; [ "$REL_REPO" = "$GITHUB_REPOSITORY" ] || TARGET="$(gh api "repos/$REL_REPO" --jq .default_branch)"
+            gh release create "v$V" --repo "$REL_REPO" --draft --target "$TARGET" --title "v$V" --notes-file notes.md $PRE artifact/dist/*
+            gh release edit "v$V" --repo "$REL_REPO" --draft=false
           elif [ "$ACTION" = "recover" ]; then
             if [ "$(jq -r '.isDraft' release.json)" = "true" ]; then
               # Nothing public yet: replace whatever a failed run left behind.
-              gh release upload "v$V" artifact/dist/* --clobber
-              gh release edit "v$V" --notes-file notes.md
-              gh release edit "v$V" --draft=false
+              gh release upload "v$V" --repo "$REL_REPO" artifact/dist/* --clobber
+              gh release edit "v$V" --repo "$REL_REPO" --notes-file notes.md
+              gh release edit "v$V" --repo "$REL_REPO" --draft=false
             else
               # Published but missing assets. Never overwrite assets users
               # already download: upload only the missing ones, then recompute
@@ -299,18 +328,18 @@ jobs:
                 if jq -e --arg n "$n" '.assets | map(.name) | index($n)' release.json > /dev/null; then
                   echo "Keeping existing asset $n"
                 else
-                  gh release upload "v$V" "artifact/dist/$n"
+                  gh release upload "v$V" --repo "$REL_REPO" "artifact/dist/$n"
                 fi
               done
               FINAL="$RUNNER_TEMP/final-assets"
               rm -rf "$FINAL"
               mkdir -p "$FINAL"
-              for n in $ASSETS; do gh release download "v$V" --dir "$FINAL" -p "$n"; done
+              for n in $ASSETS; do gh release download "v$V" --repo "$REL_REPO" --dir "$FINAL" -p "$n"; done
               (cd "$FINAL" && for n in $(printf '%s\n' $ASSETS | LC_ALL=C sort); do sha256sum "$n"; done > SHA256SUMS.txt)
               # The recomputed sums need a fresh signature (the old one covers
               # the old bytes); this step has the signing key.
               node scripts/sign-release.mjs --dir "$FINAL"
-              gh release upload "v$V" "$FINAL/SHA256SUMS.txt" "$FINAL/SHA256SUMS.txt.sig" --clobber
+              gh release upload "v$V" --repo "$REL_REPO" "$FINAL/SHA256SUMS.txt" "$FINAL/SHA256SUMS.txt.sig" --clobber
             fi
           else
             echo "Nothing to publish (action=$ACTION)."
