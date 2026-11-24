@@ -46,6 +46,16 @@
         50% { opacity: 0.72; }
       }
       #state.updating { background: var(--c-update); animation: grip-updating-pulse 450ms ease-in-out infinite; cursor: progress; }
+      /* Insecure foreign Grip found (the bridge says so about once a minute): the strip stays green
+         and breathes red three times. Last rule, so it wins over every other animation. */
+      @keyframes grip-foreign-pulse {
+        0%, 100% { background: var(--c-connected); }
+        40% { background: var(--c-error); }
+      }
+      #state.foreignpulse { animation: grip-foreign-pulse 1100ms ease-in-out 3; }
+      @media (prefers-reduced-motion: reduce) {
+        #state.foreignpulse { animation: none; background: var(--c-error); }
+      }
     </style>
   </head>
   <body>
@@ -87,6 +97,8 @@
       // >>> phase 2B: the bridge found an insecure foreign Grip on this machine. Alert only:
       // the strip keeps its state and colour; the warning is the tooltip (and a toast from the bridge).
       let foreignAlert = '';
+      let foreignPulsing = false;   // a red pulse is on screen (about 3.6 s after each pulse frame)
+      let foreignPulseTimer = null;
       // <<< phase 2B
 
       // ---- Pairing (bridge/src/pairing.ts) ------------------------------------------------
@@ -244,7 +256,7 @@
 
       // Colour + tooltip + cursor are all derived from the state above, in one place.
       function render() {
-        el.classList.remove('connected', 'warning', 'error', 'update', 'updating', 'clickable', 'actionable', 'pulsing');
+        el.classList.remove('connected', 'warning', 'error', 'update', 'updating', 'clickable', 'actionable', 'pulsing', 'foreignpulse');
         if (current !== 'disconnected') el.classList.add(current);
         if (pairIssue) el.classList.add('actionable');
         // Purple only while connected: a disconnected strip stays grey.
@@ -262,6 +274,7 @@
         } else if (current === 'connected' && busyCount > 0) {
           el.classList.add('pulsing');
         }
+        if (foreignPulsing && foreignAlert && current === 'connected') el.classList.add('foreignpulse');
         el.title = tooltip(offered, needsSetup);
       }
 
@@ -350,7 +363,7 @@
           // Mid-update the drop is expected (the bridge restarts): keep "Updating…"
           // until we reconnect. Otherwise nothing is on offer without a bridge.
           if (updPhase !== 'updating') clearUpdate();
-          foreignAlert = '';   // phase 2B: the next bridge connection re-announces it
+          foreignAlert = ''; foreignPulsing = false;   // phase 2B: the next bridge connection re-announces it
           trusted = false;
           if (ev.code === 1000 && ev.reason === 'duplicate') {
             setState('warning');
@@ -421,11 +434,22 @@
         render();
       }
 
-      // >>> phase 2B: {type:'foreign_alert', active, tooltip}. Only the tooltip changes: no colour, no
-      // class, no click behaviour, and the connection is untouched.
+      // >>> phase 2B: {type:'foreign_alert', active, tooltip, pulse?}. The tooltip changes, and a `pulse` frame
+      // makes the green strip breathe red for a moment: no click behaviour, the connection is untouched.
       function onForeignAlert(msg) {
         foreignAlert = msg.active === true && typeof msg.tooltip === 'string'
           ? msg.tooltip.replace(/[^\x20-\x7e]/g, '').slice(0, 200) : '';
+        if (!foreignAlert) stopForeignPulse();
+        else if (msg.pulse === true) {
+          foreignPulsing = true;
+          if (foreignPulseTimer) clearTimeout(foreignPulseTimer);
+          foreignPulseTimer = setTimeout(stopForeignPulse, 3600);
+        }
+        render();
+      }
+      function stopForeignPulse() {
+        foreignPulsing = false;
+        if (foreignPulseTimer) { clearTimeout(foreignPulseTimer); foreignPulseTimer = null; }
         render();
       }
       // <<< phase 2B

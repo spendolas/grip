@@ -168,10 +168,26 @@ export function preflightForeign(r: ForeignReport | null, o: { interactiveYes: b
   };
 }
 
-// Connect the guard to the plugin strips: the tooltip frame (replayed on hello by the bridge) and
-// ONE toast per window and alert. Alert only: nothing here changes a window's connection.
-export function wireForeignToBridge(bridge: PluginBridge, g: ForeignGuard): () => void {
+// Connect the guard to the plugin strips: the tooltip frame (replayed on hello by the bridge), a
+// toast and a red pulse when an alert starts, and the same pulse and toast about once a minute
+// (env GRIP_FOREIGN_PULSE_MS, default 60 s) for as long as the alert lasts. Alert only: nothing here
+// changes a window's connection.
+export const FOREIGN_PULSE_MS = 60_000;
+export function wireForeignToBridge(bridge: PluginBridge, g: ForeignGuard, opts: { pulseMs?: number } = {}): () => void {
+  const envMs = Number(process.env.GRIP_FOREIGN_PULSE_MS);
+  const pulseMs = opts.pulseMs ?? (Number.isFinite(envMs) && envMs >= 50 ? envMs : FOREIGN_PULSE_MS);
   const toasted = new Set<string>();
+  // Live windows, one per file (Figma respawns the plugin iframe every minute or two: each is a new session).
+  const eachFile = (w: { slug: string; version: string | null }, fn: (sessionId: string, id: string) => void) => {
+    const seen = new Set<string>();
+    for (const p of bridge.snapshot().plugins as Array<{ sessionId?: string; hello?: boolean; wsReady?: boolean; fileKey?: string; fileUid?: string; fileName?: string }>) {
+      if (!p.sessionId || p.hello === false || p.wsReady === false) continue;
+      const id = `${fileIdentity(p) ?? `window:${p.sessionId}`}|${w.slug}|${w.version ?? ''}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      fn(p.sessionId, id);
+    }
+  };
   const apply = () => {
     const own = ownInfo();
     const report = g.current();
@@ -179,18 +195,26 @@ export function wireForeignToBridge(bridge: PluginBridge, g: ForeignGuard): () =
     bridge.setForeignAlert(texts ? { active: true, tooltip: texts.tooltip } : null);
     if (!texts) { toasted.clear(); return; }   // resolved: if it comes back it is announced again
     const w = report!.worst!;
-    for (const p of bridge.snapshot().plugins as Array<{ sessionId?: string; hello?: boolean; wsReady?: boolean; fileKey?: string; fileUid?: string; fileName?: string }>) {
-      if (!p.sessionId || p.hello === false || p.wsReady === false) continue;
-      // one toast per FILE and alert: Figma respawns the plugin iframe every minute or two (a new session each time)
-      const id = `${fileIdentity(p) ?? `window:${p.sessionId}`}|${w.slug}|${w.version ?? ''}`;
-      if (toasted.has(id)) continue;
-      if (bridge.toast(p.sessionId, texts.toast)) toasted.add(id);   // a failed send retries on the next change
-    }
+    // the first announcement per FILE and alert: one toast and one pulse
+    eachFile(w, (sessionId, id) => {
+      if (toasted.has(id)) return;
+      if (bridge.toast(sessionId, texts.toast)) { toasted.add(id); bridge.pulseForeignAlert(sessionId); }   // a failed send retries on the next change
+    });
+  };
+  // while the alert lasts: a pulse and a toast per file, about once a minute
+  const tick = () => {
+    const report = g.current();
+    const own = ownInfo();
+    const texts = foreignAlertTexts(foreignGripSummary(report, own), own);
+    if (!texts) return;
+    eachFile(report!.worst!, (sessionId) => { bridge.pulseForeignAlert(sessionId); bridge.toast(sessionId, texts.toast); });
   };
   apply();
   const off = g.onChange(apply);
   bridge.on('session-change', apply);
-  return () => { off(); bridge.off('session-change', apply); };
+  const timer = setInterval(tick, pulseMs);
+  timer.unref();
+  return () => { off(); bridge.off('session-change', apply); clearInterval(timer); };
 }
 
 let guard: ForeignGuard | null = null;

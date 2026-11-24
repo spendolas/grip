@@ -2076,6 +2076,16 @@ export class PluginBridge extends EventEmitter {
     sess.foreignAlertSent = key;
     this.sendTo(sessionId, { type: 'foreign_alert', active: !!a?.active, tooltip: a?.active ? a.tooltip : '' });
   }
+
+  // One red pulse on a strip that is showing the alert (the strip stays green otherwise). Not deduped:
+  // the guard wiring sends it about once a minute while the alert is active. Returns whether it was sent.
+  pulseForeignAlert(sessionId: string): boolean {
+    const sess = this.sessions.get(sessionId);
+    const a = this.foreignAlert;
+    if (!a?.active || !sess || sess.helloAt === 0 || sess.ws.readyState !== 1) return false;
+    this.sendTo(sessionId, { type: 'foreign_alert', active: true, tooltip: a.tooltip, pulse: true });
+    return true;
+  }
   // <<< phase 2B
 
   // Send one JSON frame to one plugin session (best effort, never throws).

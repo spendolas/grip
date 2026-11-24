@@ -738,6 +738,40 @@ const CONNECTED_TITLE = 'Connected';
   // a dropped connection forgets it (the next bridge connection re-announces)
   w2.drop();
   assert.strictEqual(h2.title(), 'Bridge not running. Click for setup');
+  // the pulse frame: the green strip breathes red for about 3.6 s, then is back; nothing else changes
+  {
+    const h4 = harness();
+    const w4 = h4.ws();
+    w4.openWelcomed();
+    w4.deliver({ type: 'foreign_alert', active: true, tooltip: TIP });
+    assert.ok(!h4.has('foreignpulse'), 'the plain alert frame does not pulse');
+    w4.deliver({ type: 'foreign_alert', active: true, tooltip: TIP, pulse: true });
+    assert.ok(h4.has('foreignpulse') && h4.has('connected'), 'a pulse frame pulses red on the connected strip');
+    assert.strictEqual(h4.title(), TIP);
+    h4.advance(3000);
+    assert.ok(h4.has('foreignpulse'), 'still pulsing');
+    h4.advance(700);
+    assert.ok(!h4.has('foreignpulse') && h4.has('connected'), 'back to plain green after the pulse');
+    // a second pulse restarts the clock, a clear stops it at once, a drop forgets it
+    w4.deliver({ type: 'foreign_alert', active: true, tooltip: TIP, pulse: true });
+    h4.advance(2000);
+    w4.deliver({ type: 'foreign_alert', active: true, tooltip: TIP, pulse: true });
+    h4.advance(2000);
+    assert.ok(h4.has('foreignpulse'));
+    w4.deliver({ type: 'foreign_alert', active: false, tooltip: '' });
+    assert.ok(!h4.has('foreignpulse'));
+    w4.deliver({ type: 'foreign_alert', active: true, tooltip: TIP, pulse: true });
+    assert.ok(h4.has('foreignpulse'));
+    w4.drop();
+    assert.ok(!h4.has('foreignpulse'));
+    // a pulse without an active alert (or malformed) does nothing
+    const h5 = harness(); const w5 = h5.ws(); w5.openWelcomed();
+    w5.deliver({ type: 'foreign_alert', active: false, tooltip: '', pulse: true });
+    w5.deliver({ type: 'foreign_alert', active: true, pulse: true });
+    assert.ok(!h5.has('foreignpulse'));
+    assert.ok(html.includes('@keyframes grip-foreign-pulse') && html.includes('prefers-reduced-motion'), 'the pulse is defined and respects reduced motion');
+    assert.ok(html.indexOf('#state.updating {') < html.indexOf('#state.foreignpulse {'), 'the pulse rule comes last, so it wins');
+  }
   // an untrusted socket (another build) cannot set it
   const h3 = harness();
   const w3 = h3.ws();
