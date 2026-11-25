@@ -5,12 +5,14 @@ import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync
 import { generateKeyPairSync } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '..', '..', '..');
 const script = join(repo, 'scripts', 'gen-flavour.mjs');
-const { loadFlavour } = await import(script);
+// import() needs a file:// URL: a bare Windows path (D:\...) is read as a URL scheme.
+const scriptUrl = pathToFileURL(script).href;
+const { loadFlavour } = await import(scriptUrl);
 
 const realDir = join(repo, 'flavour');
 const altDir = join(here, 'fixtures', 'flavour-alt');
@@ -60,7 +62,7 @@ assert.equal(loadFlavour(variant('locked-github', (f) => { f.lockOverrides = tru
 assert.equal(loadFlavour(variant('unlocked-any-url', (f) => { f.lockOverrides = false; f.releasesApi = 'https://example.invalid/x'; })).releasesApi, 'https://example.invalid/x', 'an unlocked flavour may point anywhere');
 { // the generator's GitHub-shape rule must agree with update-policy.ts downloadPrefixFor
   const { downloadPrefixFor } = await import('../dist/update-policy.js');
-  const { isGithubReleasesApi } = await import(script);
+  const { isGithubReleasesApi } = await import(scriptUrl);
   for (const u of ['https://api.github.com/repos/o/r/releases/latest', 'https://api.github.com/repos/o/r/releases/latest/', 'https://API.github.com/repos/O.x/r_y-z/releases/latest',
     'https://example.invalid/x', 'http://api.github.com/repos/o/r/releases/latest', 'https://api.github.com:8443/repos/o/r/releases/latest',
     'https://u:p@api.github.com/repos/o/r/releases/latest', 'https://api.github.com/repos/o/r/releases/latest#x', 'https://api.github.com/repos/o/releases/latest',
@@ -115,7 +117,7 @@ assert.equal(pluginGen.replace(/^interface /m, 'export interface ').replace(/^co
 // templates rendered, no placeholder left
 for (const n of ['ui.html', 'manifest.json']) assert.ok(!/__[A-Z][A-Z0-9_]*__/.test(readFileSync(join(outDir, n), 'utf8')), n);
 // a placeholder the generator does not know is an error
-const { renderTemplate } = await import(script);
+const { renderTemplate } = await import(scriptUrl);
 assert.throws(() => renderTemplate('x.html', 'a __NOPE__ b', loadFlavour(altDir)), /__NOPE__/);
 assert.equal(renderTemplate('x', 'ws://localhost:__WS_PORT__ __FLAVOUR__', loadFlavour(altDir)), 'ws://localhost:7877 acme');
 { // the CLI runs through a symlinked path to the script and still writes its outputs
@@ -140,7 +142,7 @@ rejects('loader-unlocked', (f) => { f.payloadLoader = true; f.lockOverrides = fa
 assert.equal(loadFlavour(altDir).payloadLoader, true);
 assert.equal(loadFlavour(realDir).payloadLoader, false);
 {
-  const { renderFlavourGlobal, renderFlavour } = await import(script);
+  const { renderFlavourGlobal, renderFlavour } = await import(scriptUrl);
   assert.ok(!renderFlavourGlobal(loadFlavour(altDir)).includes('payloadLoader'), 'the plugin global FLAVOUR never carries payloadLoader (it is compiled into code.js)');
   assert.ok(renderFlavour(loadFlavour(altDir)).includes('payloadLoader'), 'the bridge flavour does');
 }
