@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { excluded, scanDenylist, scrub } from './export-snapshot.mjs';
 import { treeHash, check } from './snapshot-check.mjs';
 
@@ -49,7 +50,7 @@ test('CLI: dry run writes nothing, --apply copies, removes stale files, refuses 
   const git = (...a) => execFileSync('git', a, { cwd: repo, stdio: 'pipe' });
   try {
     mkdirSync(join(repo, 'scripts')); mkdirSync(join(repo, 'src'));
-    for (const n of ['export-snapshot.mjs', 'snapshot-check.mjs']) execFileSync('cp', [new URL('./' + n, import.meta.url).pathname, join(repo, 'scripts', n)]);
+    for (const n of ['export-snapshot.mjs', 'snapshot-check.mjs']) execFileSync('cp', [fileURLToPath(new URL('./' + n, import.meta.url)), join(repo, 'scripts', n)]);
     writeFileSync(join(repo, 'src', 'a.ts'), 'see spendolas/grip'); writeFileSync(join(repo, 'README.md'), 'readme'); writeFileSync(join(repo, 'src', 'old.ts'), 'old');
     git('init', '-q'); git('add', '-A'); git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'one');
     writeFileSync(join(fl, 'flavour.json'), '{"slug":"x"}');

@@ -89,6 +89,13 @@ interface Overdue {
 export interface CallContext {
   queuedMs?: number;
   retryAfterMs?: number;
+  // Per-call file override (on_file / a tool's `file` argument): resolved on a
+  // throwaway copy of the session in request(), so the agent's own pin and
+  // bind never move.
+  fileTarget?: string;
+  // Which file actually served the call (set by request(); echoed as a receipt
+  // on per-call overrides).
+  servedFile?: { fileName: string; fileKey: string | null; sessionId: string };
 }
 export const callContext = new AsyncLocalStorage<CallContext>();
 
@@ -304,6 +311,9 @@ const SLOW_METHOD_TIMEOUT_MS: Record<string, number> = {
   get_library_usage: SCAN_TIMEOUT_MS,
   create_component_set: SCAN_TIMEOUT_MS,   // up to 200 clones + a combine in one write
   map_nodes: SCAN_TIMEOUT_MS,   // bulk edit over many nodes; chunks+yields, but the whole run can be long
+  export_tree: SCAN_TIMEOUT_MS,  // copy_between_files: serialize a whole subtree
+  import_tree: SCAN_TIMEOUT_MS,  // copy_between_files: rebuild it (fonts, vectors, images)
+  copy_check: SCAN_TIMEOUT_MS,   // copy_between_files: the target inventory can load every page
   set_current_page: PAGE_TIMEOUT_MS,
   get_document: PAGE_TIMEOUT_MS,   // loadAllPagesAsync across the file
   get_page: PAGE_TIMEOUT_MS,       // serialize a whole page tree
@@ -786,8 +796,17 @@ export class PluginBridge extends EventEmitter {
     return false;
   }
 
-  async request(method: string, params: Record<string, unknown>, mcp: McpSession): Promise<unknown> {
-    this.track(mcp);
+  // A throwaway routing view of `mcp` aimed at `target` (fileKey | exact name |
+  // sessionId | figma.com URL | fileUid), for ONE call. Same id (so the fair
+  // queue still sees one agent), its own bind and pin: route() mutates only
+  // this copy. resolveBind throws ambiguous_file_name / not_a_file_key.
+  private probeFor(mcp: McpSession, target: string): McpSession {
+    return { ...mcp, bind: this.resolveBind(target), activeFileId: null };
+  }
+
+  // The window a call for `mcp` goes to now, waiting the short reconnect grace
+  // when none is routable yet. Throws the same typed errors request() does.
+  private async sessionFor(mcp: McpSession): Promise<Session> {
     let session = this.activeSession(mcp);
     if (!session) {
       // Not routable right now. Distinguish WHY so the agent gets an
@@ -808,6 +827,37 @@ export class PluginBridge extends EventEmitter {
         throw new Error('plugin_disconnected: No plugin connected');
       }
     }
+    return session;
+  }
+
+  // Resolve a file target (fileKey | exact name | sessionId | figma.com URL |
+  // fileUid) to the window that would serve it, without binding anyone. Used by
+  // bridge-side tools that talk to two files (copy_between_files). `entryId`
+  // is the file's identity: two targets with the same entryId are one file.
+  async describeTarget(target: string, mcp: McpSession, others: McpSession[] = []): Promise<{
+    sessionId: string; fileName: string; fileKey: string | null; entryId: string;
+    capabilities: string[]; pluginVersion: string; boundAgents: number;
+  }> {
+    this.track(mcp);
+    const s = await this.sessionFor(this.probeFor(mcp, target));
+    const entryId = this.entryId(s);
+    return {
+      sessionId: s.id,
+      fileName: s.fileName ?? '',
+      fileKey: isRealFileKey(s.fileKey) ? s.fileKey : null,
+      entryId,
+      capabilities: s.capabilities ?? [],
+      pluginVersion: s.pluginVersion ?? 'unknown',
+      boundAgents: this.boundCounts(others).get(entryId) ?? 0,
+    };
+  }
+
+  async request(method: string, params: Record<string, unknown>, mcpIn: McpSession): Promise<unknown> {
+    this.track(mcpIn);
+    const store = callContext.getStore();
+    const mcp = store?.fileTarget ? this.probeFor(mcpIn, store.fileTarget) : mcpIn;
+    const session = await this.sessionFor(mcp);
+    if (store) store.servedFile = { fileName: session.fileName ?? '', fileKey: isRealFileKey(session.fileKey) ? session.fileKey : null, sessionId: session.id };
     // Busy guard (see BUSY_THRESHOLD_MS): fail fast instead of piling 10s
     // timeouts behind a thread that is stuck or busy with someone's slow call.
     const busy = this.busyCheck(session.id, method);

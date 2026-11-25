@@ -159,6 +159,9 @@ type ToolMethod =
   | 'get_top_level_frame'
   | 'get_text_content'
   | 'get_image_by_hash'
+  | 'export_tree'
+  | 'import_tree'
+  | 'copy_check'
   | 'get_stamp_author'
   | 'get_overrides'
   | 'get_publish_status'
@@ -3210,6 +3213,12 @@ async function handle(method: ToolMethod, params: any, reqId?: string): Promise<
       });
       return out;
     }
+    case 'export_tree':
+      return await exportTree(params);
+    case 'import_tree':
+      return await importTree(params);
+    case 'copy_check':
+      return await copyCheck(params);
     case 'get_image_by_hash': {
       const img = figma.getImageByHash(String(params.imageHash));
       if (!img) return null;
@@ -5078,6 +5087,870 @@ const MIN_BRIDGE_VERSION = '0.8.0';
 const PROTOCOL_VERSION = 1;
 const MIN_BRIDGE_PROTOCOL = 1;
 
+// ---------- cross-file copy (bridge tool copy_between_files) ----------
+// ---- grip:copy-tree begin (test/copy-tree.mjs runs this block against a fake figma) ----
+// The bridge copies a subtree from one open file to another without the payload
+// ever reaching the model: export_tree (source) -> the bridge moves image bytes
+// and rewrites references -> import_tree (target). copy_check is the cheap
+// pre-flight on the target (editable? which fonts are missing?).
+//
+// Spec node: {type, name, sourceId, props, children?, text?, vectorNetwork?,
+// booleanOperation?, styleRefs?, boundVariables?, instance?, reactions?}. Props
+// are raw Figma values (JSON copies), applied on import in COPY_PROPS order.
+
+// Applied before the node is placed, in this order (layoutMode before the props
+// that need it, GRID tracks before their sizes).
+const COPY_PROPS = [
+  'visible', 'locked', 'opacity', 'blendMode', 'isMask', 'maskType', 'clipsContent', 'constraints',
+  'cornerRadius', 'topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius', 'cornerSmoothing',
+  'fills', 'strokes', 'strokeWeight', 'strokeTopWeight', 'strokeRightWeight', 'strokeBottomWeight', 'strokeLeftWeight',
+  'strokeAlign', 'strokeJoin', 'strokeCap', 'strokeMiterLimit', 'dashPattern', 'effects', 'layoutGrids', 'exportSettings',
+  'complexStrokeProperties', 'variableWidthStrokeProperties',
+  'pointCount', 'innerRadius', 'arcData',
+  'layoutMode', 'layoutWrap', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'itemSpacing',
+  'counterAxisSpacing', 'primaryAxisSizingMode', 'counterAxisSizingMode', 'primaryAxisAlignItems', 'counterAxisAlignItems',
+  'counterAxisAlignContent', 'itemReverseZIndex', 'strokesIncludedInLayout',
+  'gridRowCount', 'gridColumnCount', 'gridRowGap', 'gridColumnGap', 'gridColumnSizes', 'gridRowSizes',
+  'overflowDirection', 'numberOfFixedChildren', 'guides',
+  'textAlignHorizontal', 'textAlignVertical', 'paragraphSpacing', 'paragraphIndent', 'textTruncation', 'maxLines',
+  'leadingTrim', 'textAutoResize',
+  'description', 'devStatus',
+];
+// Applied after the node is in its parent and its children are built (they need
+// an auto-layout parent, or their own children for HUG).
+const COPY_CHILD_PROPS = [
+  'layoutPositioning', 'layoutAlign', 'layoutGrow', 'layoutSizingHorizontal', 'layoutSizingVertical',
+  'minWidth', 'maxWidth', 'minHeight', 'maxHeight',
+  'gridRowSpan', 'gridColumnSpan', 'gridChildHorizontalAlign', 'gridChildVerticalAlign',
+];
+// Props that only mean something on an auto-layout frame / a GRID frame / a
+// GRID child. Figma refuses them elsewhere, so they are not exported there.
+const COPY_AUTOLAYOUT_ONLY = ['layoutWrap', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'itemSpacing', 'counterAxisSpacing',
+  'primaryAxisSizingMode', 'counterAxisSizingMode', 'primaryAxisAlignItems', 'counterAxisAlignItems', 'counterAxisAlignContent',
+  'itemReverseZIndex', 'strokesIncludedInLayout'];
+const COPY_GRID_ONLY = ['gridRowCount', 'gridColumnCount', 'gridRowGap', 'gridColumnGap', 'gridColumnSizes', 'gridRowSizes'];
+const COPY_GRID_CHILD_ONLY = ['gridRowSpan', 'gridColumnSpan', 'gridChildHorizontalAlign', 'gridChildVerticalAlign'];
+// What an instance may override (its layout comes from its main component).
+const COPY_INSTANCE_PROPS = ['visible', 'locked', 'opacity', 'blendMode', 'isMask', 'maskType', 'clipsContent', 'constraints',
+  'cornerRadius', 'topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius', 'cornerSmoothing',
+  'fills', 'strokes', 'strokeWeight', 'strokeAlign', 'effects', 'layoutGrids', 'exportSettings'];
+// Types import_tree can rebuild. INSTANCE becomes a FRAME (detached) unless the
+// bridge mapped its main component to one in the target.
+const COPY_TYPES = new Set([
+  'FRAME', 'GROUP', 'BOOLEAN_OPERATION', 'RECTANGLE', 'ELLIPSE', 'POLYGON', 'STAR', 'LINE', 'VECTOR', 'TEXT',
+  'COMPONENT', 'COMPONENT_SET', 'INSTANCE', 'SECTION', 'SLICE',
+]);
+const COPY_SEG_FIELDS = [
+  'fontName', 'fontSize', 'fills', 'textDecoration', 'textCase', 'lineHeight', 'letterSpacing', 'hyperlink',
+  'listOptions', 'indentation', 'fillStyleId', 'textStyleId',
+];
+const COPY_SEG_FIELDS_EXTRA = ['boundVariables', 'textDecorationStyle', 'textDecorationOffset', 'textDecorationThickness', 'textDecorationColor', 'textDecorationSkipInk', 'openTypeFeatures'];
+const COPY_STYLE_KEYS = ['fillStyleId', 'strokeStyleId', 'effectStyleId', 'gridStyleId', 'textStyleId'];
+const COPY_MAX_NODES = 5000;
+
+function copyPlain(v: any): any {
+  if (v === undefined || v === figma.mixed) return undefined;
+  if (v === null || typeof v !== 'object') return v;
+  return JSON.parse(JSON.stringify(v));
+}
+
+async function exportTree(params: any): Promise<any> {
+  let ids: string[] = asIds(params.nodeIds);
+  if (!ids.length && params.useSelection) ids = figma.currentPage.selection.map((n) => n.id);
+  if (!ids.length) throw new Error('copy_no_source: no source nodes. Pass nodeIds, a figma.com URL with ?node-id=, or select the layers in the source file.');
+  const cap = typeof params.maxNodes === 'number' && params.maxNodes > 0 ? params.maxNodes : COPY_MAX_NODES;
+  let count = 0;
+  const byType: Record<string, number> = {};
+  const unsupported: Array<{ sourceId: string; name: string; type: string }> = [];
+  const images = new Set<string>();
+  const fonts = new Map<string, FontName>();
+  const styleIds = new Set<string>();
+  const instances: Array<{ sourceId: string; componentId: string }> = [];
+  const localMains = new Map<string, BaseNode>();
+
+  const font = (f: any) => { if (f && typeof f === 'object' && f.family) fonts.set(`${f.family}|${f.style}`, { family: f.family, style: f.style }); };
+  const scanPaints = (ps: any) => { if (Array.isArray(ps)) for (const p of ps) if (p && p.imageHash) images.add(p.imageHash); };
+
+  const seen = new Set<string>();
+  const one = async (node: BaseNode, isRoot: boolean): Promise<any> => {
+    seen.add(node.id);
+    if (++count > cap) throw new Error(`copy_too_large: the source has more than ${cap} layers. Copy a smaller part, or pass a higher options.maxNodes.`);
+    const sn = node as any;
+    byType[node.type] = (byType[node.type] ?? 0) + 1;
+    const spec: any = { type: node.type, name: node.name, sourceId: node.id, props: {} };
+    if (!COPY_TYPES.has(node.type)) {
+      unsupported.push({ sourceId: node.id, name: node.name, type: node.type });
+      spec.unsupported = true;
+      return spec;
+    }
+    for (const k of COPY_PROPS) {
+      if (!(k in sn)) continue;
+      try {
+        const v = copyPlain(sn[k]);
+        if (v !== undefined) spec.props[k] = v;
+      } catch { /* unreadable here */ }
+    }
+    const lm = spec.props.layoutMode;
+    if (!lm || lm === 'NONE') for (const k of COPY_AUTOLAYOUT_ONLY) delete spec.props[k];
+    if (lm !== 'GRID') for (const k of COPY_GRID_ONLY) delete spec.props[k];
+    const vw = spec.props.variableWidthStrokeProperties;
+    if (vw && !(Array.isArray(vw.variableWidthPoints) && vw.variableWidthPoints.length)) delete spec.props.variableWidthStrokeProperties;
+    const cs = spec.props.complexStrokeProperties;
+    if (cs && (cs.type === 'BASIC' || !cs.type)) delete spec.props.complexStrokeProperties;
+    scanPaints(spec.props.fills); scanPaints(spec.props.strokes);
+    if ('width' in sn) { spec.props.width = sn.width; spec.props.height = sn.height; }
+    if ('relativeTransform' in sn) spec.relativeTransform = copyPlain(sn.relativeTransform);
+    if (isRoot && 'absoluteTransform' in sn) spec.absoluteTransform = copyPlain(sn.absoluteTransform);
+    for (const k of COPY_CHILD_PROPS) {
+      if (!(k in sn)) continue;
+      if (COPY_GRID_CHILD_ONLY.includes(k) && (node.parent as any)?.layoutMode !== 'GRID') continue;
+      try { const v = copyPlain(sn[k]); if (v !== undefined) (spec.childProps ??= {})[k] = v; } catch { /* ignore */ }
+    }
+    // Style references (resolved on import by the bridge's style map).
+    for (const k of COPY_STYLE_KEYS) {
+      if (!(k in sn)) continue;
+      const v = sn[k];
+      if (typeof v === 'string' && v) { (spec.styleRefs ??= {})[k] = v; styleIds.add(v); }
+    }
+    try { const bv = sn.boundVariables; if (bv && Object.keys(bv).length) spec.boundVariables = copyPlain(bv); } catch { /* ignore */ }
+    try { if (Array.isArray(sn.reactions) && sn.reactions.length) spec.reactions = copyPlain(sn.reactions); } catch { /* ignore */ }
+    try { const r = sn.componentPropertyReferences; if (r && Object.keys(r).length) spec.propertyReferences = copyPlain(r); } catch { /* ignore */ }
+    if (node.type === 'VECTOR') {
+      try { spec.vectorNetwork = copyPlain(sn.vectorNetwork); } catch { /* ignore */ }
+      try { spec.vectorPaths = copyPlain(sn.vectorPaths); } catch { /* ignore */ }
+    }
+    if (node.type === 'BOOLEAN_OPERATION') spec.booleanOperation = sn.booleanOperation;
+    if (node.type === 'TEXT') {
+      const t = node as TextNode;
+      let segs: any[];
+      try { segs = t.getStyledTextSegments([...COPY_SEG_FIELDS, ...COPY_SEG_FIELDS_EXTRA] as any); }
+      catch { segs = t.getStyledTextSegments(COPY_SEG_FIELDS as any); }
+      spec.text = {
+        characters: t.characters,
+        segments: segs.map((s) => {
+          const o: any = {};
+          for (const [k, v] of Object.entries(s)) if (k !== 'characters') o[k] = copyPlain(v);
+          font(o.fontName); scanPaints(o.fills);
+          for (const k of ['fillStyleId', 'textStyleId']) if (typeof o[k] === 'string' && o[k]) styleIds.add(o[k]); else delete o[k];
+          if (o.boundVariables && !Object.keys(o.boundVariables).length) delete o.boundVariables;
+          return o;
+        }),
+      };
+      if (t.characters === '' && t.fontName !== figma.mixed) font(t.fontName);
+      if (t.characters === '' && t.fontName !== figma.mixed) spec.text.fontName = copyPlain(t.fontName);
+    }
+    if (node.type === 'INSTANCE') {
+      try {
+        const main = await (node as InstanceNode).getMainComponentAsync();
+        if (main) {
+          const set = main.parent && main.parent.type === 'COMPONENT_SET' ? main.parent as ComponentSetNode : null;
+          spec.instance = {
+            componentId: main.id, key: main.key, name: main.name, remote: main.remote,
+            setId: set?.id, setKey: set?.key, setName: set?.name,
+            componentProperties: copyPlain((node as InstanceNode).componentProperties),
+          };
+          instances.push({ sourceId: node.id, componentId: main.id });
+          if (!main.remote) localMains.set((set ?? main).id, set ?? main);
+        }
+      } catch { /* main component unreadable: copied as a detached frame */ }
+    }
+    if (node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') {
+      const c = node as ComponentNode;
+      spec.component = { key: c.key, remote: c.remote };
+      try { spec.component.propertyDefinitions = copyPlain((c as any).componentPropertyDefinitions); } catch { /* variant */ }
+    }
+    if (hasChildren(node)) {
+      spec.children = [];
+      for (const c of node.children) spec.children.push(await one(c, false));
+    }
+    return spec;
+  };
+
+  const roots: any[] = [];
+  for (const id of ids) {
+    const n = await getNode(id);
+    if (n.type === 'PAGE' || n.type === 'DOCUMENT') throw new Error(`copy_bad_source: ${id} is a ${n.type}. Copy the layers on it instead.`);
+    roots.push(await one(n, true));
+  }
+  // Local main components the copied instances use (and those THEY use), when
+  // the bridge wants to copy them along. Ones inside the copied tree already
+  // come with it.
+  const components: any[] = [];
+  if (params.includeComponents) {
+    const done = new Set<string>();
+    for (;;) {
+      const next = [...localMains.entries()].find(([id]) => !done.has(id));
+      if (!next) break;
+      done.add(next[0]);
+      if (seen.has(next[0])) continue;
+      components.push(await one(next[1], true));
+    }
+  }
+
+  // Describe every style and variable the tree refers to, so the bridge can
+  // map them to the target by key or name.
+  const varIds = new Set<string>();
+  const walkAlias = (v: any) => {
+    if (!v || typeof v !== 'object') return;
+    if (Array.isArray(v)) { for (const x of v) walkAlias(x); return; }
+    if (v.type === 'VARIABLE_ALIAS' && typeof v.id === 'string') varIds.add(v.id);
+    for (const x of Object.values(v)) walkAlias(x);
+  };
+  const styles: Record<string, any> = {};
+  for (const id of styleIds) {
+    try {
+      const s = await figma.getStyleByIdAsync(id);
+      if (s) {
+        styles[id] = { id, key: s.key, name: s.name, type: s.type, remote: s.remote, description: s.description, value: copyStyleValue(s) };
+        walkAlias(styles[id].value);
+      }
+    } catch { /* unreadable */ }
+  }
+  walkAlias(roots);
+  walkAlias(components);
+  // Variables, plus every variable their values alias (so a created token
+  // keeps its chain), with values by mode NAME.
+  const variables: Record<string, any> = {};
+  const direct = new Set(varIds);
+  const todo = [...varIds];
+  while (todo.length) {
+    const id = todo.shift()!;
+    if (variables[id]) continue;
+    try {
+      const v = await figma.variables.getVariableByIdAsync(id);
+      if (!v) continue;
+      let col: VariableCollection | null = null;
+      try { col = await figma.variables.getVariableCollectionByIdAsync(v.variableCollectionId); } catch { /* ignore */ }
+      const modes: Array<{ mode: string; value: any }> = [];
+      for (const [modeId, val] of Object.entries(v.valuesByMode ?? {})) {
+        const name = col?.modes?.find((m) => m.modeId === modeId)?.name ?? modeId;
+        modes.push({ mode: name, value: copyPlain(val) });
+        if (val && typeof val === 'object' && (val as any).type === 'VARIABLE_ALIAS' && !variables[(val as any).id]) todo.push((val as any).id);
+      }
+      variables[id] = {
+        id, key: v.key, name: v.name, resolvedType: v.resolvedType, remote: v.remote,
+        collection: col?.name, collectionModes: col?.modes?.map((m) => m.name), modes,
+        scopes: copyPlain((v as any).scopes), description: v.description, direct: direct.has(id),
+      };
+    } catch { /* unreadable */ }
+  }
+
+  return {
+    roots, components, count, byType, unsupported,
+    localComponents: [...localMains.keys()],
+    images: [...images], fonts: [...fonts.values()],
+    styles, variables, instances,
+    file: { fileName: figma.root.name, pageId: figma.currentPage.id },
+  };
+}
+
+// What a style looks like, so the target can recreate it.
+function copyStyleValue(s: BaseStyle): any {
+  const x = s as any;
+  try {
+    if (s.type === 'PAINT') return { paints: copyPlain(x.paints) };
+    if (s.type === 'EFFECT') return { effects: copyPlain(x.effects) };
+    if (s.type === 'GRID') return { layoutGrids: copyPlain(x.layoutGrids) };
+    if (s.type === 'TEXT') {
+      const o: any = {};
+      for (const k of ['fontName', 'fontSize', 'lineHeight', 'letterSpacing', 'textCase', 'textDecoration', 'paragraphSpacing', 'paragraphIndent', 'leadingTrim', 'listSpacing']) {
+        if (k in x && x[k] !== undefined) o[k] = copyPlain(x[k]);
+      }
+      try { if (x.boundVariables && Object.keys(x.boundVariables).length) o.boundVariables = copyPlain(x.boundVariables); } catch { /* ignore */ }
+      return o;
+    }
+  } catch { /* unreadable */ }
+  return null;
+}
+
+// The target's own styles, variables and collections (ids, keys, names), so
+// the bridge can match the source's by key or name.
+async function copyInventory(withComponents = false): Promise<any> {
+  const styles: any[] = [];
+  const lists = await Promise.all([
+    figma.getLocalPaintStylesAsync(), figma.getLocalTextStylesAsync(), figma.getLocalEffectStylesAsync(), figma.getLocalGridStylesAsync(),
+  ]);
+  for (const l of lists) for (const st of l) styles.push({ id: st.id, key: st.key, name: st.name, type: st.type });
+  const collections: any[] = [];
+  const cols = await figma.variables.getLocalVariableCollectionsAsync();
+  const byCol = new Map<string, string>();
+  for (const c of cols) { collections.push({ id: c.id, name: c.name, modes: c.modes.map((m) => m.name) }); byCol.set(c.id, c.name); }
+  const variables = (await figma.variables.getLocalVariablesAsync()).map((v) => ({
+    id: v.id, key: v.key, name: v.name, resolvedType: v.resolvedType, collection: byCol.get(v.variableCollectionId),
+  }));
+  // Local components by name (only when asked: it loads every page).
+  let components: any[] | undefined;
+  if (withComponents) {
+    await figma.loadAllPagesAsync();
+    components = (figma.root.findAllWithCriteria({ types: ['COMPONENT'] }) as ComponentNode[]).slice(0, 5000).map((c) => {
+      const set = c.parent && c.parent.type === 'COMPONENT_SET' ? c.parent : null;
+      return { id: c.id, key: c.key, name: c.name, ...(set ? { setName: set.name } : {}) };
+    });
+  }
+  return { styles, variables, collections, ...(components ? { components } : {}) };
+}
+
+// Create the styles and variables the bridge could not match (create mode).
+// Variables first (styles may bind them), aliases after every variable exists.
+async function copyCreate(create: any, ctx: CopyCtx): Promise<{ styles: number; variables: number }> {
+  let ns = 0, nv = 0;
+  const vars: any[] = Array.isArray(create?.variables) ? create.variables : [];
+  const made: Array<{ v: Variable; spec: any; col: VariableCollection }> = [];
+  const colCache = new Map<string, VariableCollection>();
+  const fresh = new Set<string>();
+  for (const spec of vars) {
+    try {
+      const colName = String(spec.collection ?? 'Copied');
+      let col = colCache.get(colName);
+      if (!col) {
+        col = (await figma.variables.getLocalVariableCollectionsAsync()).find((c) => c.name === colName);
+        if (!col) { col = figma.variables.createVariableCollection(colName); fresh.add(col.id); }
+        colCache.set(colName, col);
+      }
+      // Modes by name: a new collection takes the source's modes; an existing
+      // one gets the missing ones added when the plan allows.
+      const wantModes: string[] = Array.isArray(spec.collectionModes) && spec.collectionModes.length ? spec.collectionModes : spec.modes.map((m: any) => m.mode);
+      if (fresh.has(col.id) && col.modes.length === 1 && wantModes.length && col.modes[0].name !== wantModes[0]) col.renameMode(col.modes[0].modeId, wantModes[0]);
+      for (const mName of wantModes) {
+        if (!col.modes.some((m) => m.name === mName)) {
+          try { col.addMode(mName); } catch (e) { copySkip(ctx, { name: spec.name }, `mode ${mName}`, e); }
+        }
+      }
+      const v = figma.variables.createVariable(String(spec.name), col, spec.resolvedType);
+      if (spec.description) v.description = spec.description;
+      if (Array.isArray(spec.scopes)) { try { v.scopes = spec.scopes; } catch { /* ignore */ } }
+      ctx.variableMap[spec.srcId] = v.id;
+      made.push({ v, spec, col });
+      nv++;
+    } catch (e) { copySkip(ctx, { name: spec.name }, 'variable', e); }
+  }
+  for (const { v, spec, col } of made) {
+    for (const m of spec.modes ?? []) {
+      const mode = col.modes.find((x) => x.name === m.mode) ?? (spec.modes.length === 1 ? col.modes[0] : undefined);
+      if (!mode) continue;
+      let val = m.value;
+      if (val && typeof val === 'object' && val.type === 'VARIABLE_ALIAS') {
+        const to = ctx.variableMap[val.id];
+        if (!to) { copySkip(ctx, { name: spec.name }, `value in ${m.mode}`, 'it aliases a variable that was not copied'); continue; }
+        val = { type: 'VARIABLE_ALIAS', id: to };
+      }
+      try { v.setValueForMode(mode.modeId, val); } catch (e) { copySkip(ctx, { name: spec.name }, `value in ${m.mode}`, e); }
+    }
+  }
+  for (const spec of Array.isArray(create?.styles) ? create.styles : []) {
+    try {
+      const val = spec.value ?? {};
+      let st: any;
+      if (spec.type === 'PAINT') { st = figma.createPaintStyle(); await copySetList(st, 'paints' as any, val.paints ?? [], ctx, spec); }
+      else if (spec.type === 'EFFECT') { st = figma.createEffectStyle(); await copySetList(st, 'effects', val.effects ?? [], ctx, spec); }
+      else if (spec.type === 'GRID') { st = figma.createGridStyle(); await copySetList(st, 'layoutGrids', val.layoutGrids ?? [], ctx, spec); }
+      else if (spec.type === 'TEXT') {
+        st = figma.createTextStyle();
+        if (val.fontName) st.fontName = await copyLoadFont(val.fontName, ctx);
+        for (const k of ['fontSize', 'lineHeight', 'letterSpacing', 'textCase', 'textDecoration', 'paragraphSpacing', 'paragraphIndent', 'leadingTrim', 'listSpacing']) {
+          if (k in val) { try { st[k] = val[k]; } catch (e) { copySkip(ctx, spec, k, e); } }
+        }
+        for (const [f, a] of Object.entries((val.boundVariables ?? {}) as Record<string, any>)) {
+          const v = a && a.type === 'VARIABLE_ALIAS' ? await copyVariable(a.id, ctx) : null;
+          if (v) { try { st.setBoundVariable(f, v); } catch (e) { copySkip(ctx, spec, `variable ${f}`, e); } }
+        }
+      } else continue;
+      st.name = String(spec.name);
+      if (spec.description) st.description = spec.description;
+      ctx.styleMap[spec.srcId] = st.id;
+      ns++;
+    } catch (e) { copySkip(ctx, spec, 'style', e); }
+  }
+  return { styles: ns, variables: nv };
+}
+
+// Is this file writable, and which of these fonts can it load? Writes the
+// file's own uid back unchanged (no visible change) to find out.
+async function copyCheck(params: any): Promise<any> {
+  const editorType = figma.editorType;
+  let editable = editorType !== 'dev';
+  let reason: string | undefined = editable ? undefined : 'the file is open in Dev Mode';
+  if (editable) {
+    try {
+      const k = 'grip.fileUid';
+      const cur = figma.root.getPluginData(k);
+      if (cur) figma.root.setPluginData(k, cur);
+      else { figma.root.setPluginData('grip.copyProbe', '1'); figma.root.setPluginData('grip.copyProbe', ''); }
+    } catch (e) {
+      editable = false;
+      reason = e instanceof Error ? e.message : String(e);
+    }
+  }
+  const want = Array.isArray(params.fonts) ? params.fonts : [];
+  let missingFonts: FontName[] = [];
+  if (want.length) {
+    const avail = new Set((await figma.listAvailableFontsAsync()).map((f) => `${f.fontName.family}|${f.fontName.style}`));
+    missingFonts = want.filter((f: any) => f && !avail.has(`${f.family}|${f.style}`));
+  }
+  const inventory = params.inventory ? await copyInventory(!!params.components) : undefined;
+  return { editable, editorType, ...(reason ? { reason } : {}), missingFonts, ...(inventory ? { inventory } : {}), currentPageId: figma.currentPage.id, currentPageName: figma.currentPage.name, fileName: figma.root.name };
+}
+
+interface CopyCtx {
+  count: number;
+  skipped: Array<{ sourceId?: string; name?: string; what: string; reason: string }>;
+  fontSub: Map<string, FontName>;
+  missingFonts: Array<{ family: string; style: string; substitute: FontName }>;
+  idMap: Record<string, string>;
+  styleMap: Record<string, string>;
+  variableMap: Record<string, string>;
+  componentMap: Record<string, string>;
+  propKeyMap: Record<string, string>;
+  detached: number;
+  reactions: Array<{ id: string; spec: any }>;
+  refs: Array<{ id: string; spec: any }>;
+}
+
+function copySkip(ctx: CopyCtx, spec: any, what: string, e: unknown) {
+  if (ctx.skipped.length >= 200) return;
+  ctx.skipped.push({ sourceId: spec?.sourceId, name: spec?.name, what, reason: e instanceof Error ? e.message : String(e) });
+}
+
+async function copyLoadFont(f: any, ctx: CopyCtx): Promise<FontName> {
+  const key = `${f.family}|${f.style}`;
+  const hit = ctx.fontSub.get(key);
+  if (hit) return hit;
+  const tries: FontName[] = [{ family: f.family, style: f.style }, { family: f.family, style: 'Regular' }, { family: 'Inter', style: 'Regular' }];
+  for (const t of tries) {
+    try {
+      await figma.loadFontAsync(t);
+      ctx.fontSub.set(key, t);
+      if (t !== tries[0]) ctx.missingFonts.push({ family: f.family, style: f.style, substitute: t });
+      return t;
+    } catch { /* next */ }
+  }
+  throw new Error(`no usable font for ${key}`);
+}
+
+// Paints/effects/grids: drop bindings to variables the bridge could not map
+// (their resolved values stay), keep the rest for re-binding.
+function copySplitBindings(list: any[]): { clean: any[]; binds: Array<{ i: number; field: string; id: string }> } {
+  const binds: Array<{ i: number; field: string; id: string }> = [];
+  const clean = list.map((p, i) => {
+    if (!p || typeof p !== 'object' || !p.boundVariables) return p;
+    const rest = { ...p };
+    delete rest.boundVariables;
+    for (const [field, a] of Object.entries(p.boundVariables as Record<string, any>)) {
+      if (a && a.type === 'VARIABLE_ALIAS' && typeof a.id === 'string') binds.push({ i, field, id: a.id });
+    }
+    return rest;
+  });
+  return { clean, binds };
+}
+
+async function copyVariable(id: string, ctx: CopyCtx): Promise<Variable | null> {
+  const mapped = ctx.variableMap[id];
+  if (!mapped) return null;
+  try { return await figma.variables.getVariableByIdAsync(mapped); } catch { return null; }
+}
+
+async function copySetList(node: any, key: 'fills' | 'strokes' | 'paints' | 'effects' | 'layoutGrids', list: any[], ctx: CopyCtx, spec: any) {
+  const { clean, binds } = copySplitBindings(list);
+  let out = clean;
+  for (const b of binds) {
+    const v = await copyVariable(b.id, ctx);
+    if (!v) continue;
+    try {
+      const fv = figma.variables as any;
+      if (key === 'fills' || key === 'strokes' || key === 'paints') out[b.i] = fv.setBoundVariableForPaint(out[b.i], b.field, v);
+      else if (key === 'effects') out[b.i] = fv.setBoundVariableForEffect(out[b.i], b.field, v);
+      else out[b.i] = fv.setBoundVariableForLayoutGrid(out[b.i], b.field, v);
+    } catch (e) { copySkip(ctx, spec, `${key} variable ${b.field}`, e); }
+  }
+  node[key] = out;
+}
+
+async function copyApplyProps(node: any, spec: any, keys: string[], props: any, ctx: CopyCtx) {
+  if (!props) return;
+  for (const k of keys) {
+    if (!(k in props) || !(k in node)) continue;
+    const v = props[k];
+    try {
+      if (k === 'fills' || k === 'strokes' || k === 'effects' || k === 'layoutGrids') {
+        if (Array.isArray(v)) await copySetList(node, k, v, ctx, spec);
+      } else if (k === 'description') {
+        if (node.type === 'COMPONENT' || node.type === 'COMPONENT_SET') node.description = v;
+      } else {
+        node[k] = v;
+      }
+    } catch (e) { copySkip(ctx, spec, k, e); }
+  }
+}
+
+async function copyStyles(node: any, spec: any, ctx: CopyCtx) {
+  if (!spec.styleRefs) return;
+  for (const [k, src] of Object.entries(spec.styleRefs as Record<string, string>)) {
+    const tgt = ctx.styleMap[src];
+    if (!tgt) continue;
+    const setter = `set${k.charAt(0).toUpperCase()}${k.slice(1)}Async`;
+    try {
+      if (setter in node) await node[setter](tgt);
+      else node[k] = tgt;
+    } catch (e) { copySkip(ctx, spec, k, e); }
+  }
+}
+
+async function copyNodeVariables(node: any, spec: any, ctx: CopyCtx) {
+  const bv = spec.boundVariables;
+  if (!bv || typeof bv !== 'object') return;
+  for (const [field, a] of Object.entries(bv as Record<string, any>)) {
+    // fills/strokes/effects/layoutGrids/componentProperties are carried by
+    // their own values; only scalar node fields are bound here.
+    if (Array.isArray(a) || !a || a.type !== 'VARIABLE_ALIAS') continue;
+    const v = await copyVariable(a.id, ctx);
+    if (!v) continue;
+    try { node.setBoundVariable(field, v); } catch (e) { copySkip(ctx, spec, `variable ${field}`, e); }
+  }
+}
+
+async function copyText(t: TextNode, spec: any, ctx: CopyCtx) {
+  const tx = spec.text ?? { characters: '', segments: [] };
+  const segs: any[] = Array.isArray(tx.segments) ? tx.segments : [];
+  const first = segs[0]?.fontName ?? tx.fontName ?? { family: 'Inter', style: 'Regular' };
+  t.fontName = await copyLoadFont(first, ctx);
+  t.characters = String(tx.characters ?? '');
+  for (const s of segs) {
+    const start = s.start, end = s.end;
+    if (typeof start !== 'number' || typeof end !== 'number' || end <= start) continue;
+    for (const [field, raw] of Object.entries(s)) {
+      if (field === 'start' || field === 'end' || raw === undefined || raw === null) continue;
+      try {
+        if (field === 'fontName') { t.setRangeFontName(start, end, await copyLoadFont(raw, ctx)); continue; }
+        if (field === 'fillStyleId' || field === 'textStyleId') {
+          const tgt = ctx.styleMap[raw as string];
+          if (!tgt) continue;
+          const setter = field === 'fillStyleId' ? 'setRangeFillStyleIdAsync' : 'setRangeTextStyleIdAsync';
+          await (t as any)[setter](start, end, tgt);
+          continue;
+        }
+        if (field === 'boundVariables') {
+          for (const [bf, a] of Object.entries(raw as Record<string, any>)) {
+            if (Array.isArray(a) || !a || a.type !== 'VARIABLE_ALIAS') continue;
+            const v = await copyVariable(a.id, ctx);
+            if (v) (t as any).setRangeBoundVariable(start, end, bf, v);
+          }
+          continue;
+        }
+        let val: any = raw;
+        if (field === 'fills' && Array.isArray(raw)) {
+          const { clean, binds } = copySplitBindings(raw);
+          val = clean;
+          for (const b of binds) {
+            const v = await copyVariable(b.id, ctx);
+            if (v) val[b.i] = (figma.variables as any).setBoundVariableForPaint(val[b.i], b.field, v);
+          }
+        }
+        const setter = `setRange${field.charAt(0).toUpperCase()}${field.slice(1)}`;
+        if (setter in t) (t as any)[setter](start, end, val);
+      } catch (e) { copySkip(ctx, spec, `text ${field}`, e); }
+    }
+  }
+}
+
+function copyResize(node: any, spec: any) {
+  const w = spec.props?.width, h = spec.props?.height;
+  if (typeof w !== 'number' || typeof h !== 'number') return;
+  const W = Math.max(w, 0.01);
+  const H = node.type === 'LINE' ? 0 : Math.max(h, 0.01);
+  if ('resizeWithoutConstraints' in node) node.resizeWithoutConstraints(W, H);
+  else if ('resize' in node) node.resize(W, H);
+}
+
+function copyPlace(node: any, spec: any, dx: number, dy: number, ctx: CopyCtx) {
+  const m = spec.relativeTransform;
+  if (!Array.isArray(m) || m.length !== 2) return;
+  try {
+    node.relativeTransform = [[m[0][0], m[0][1], m[0][2] + dx], [m[1][0], m[1][1], m[1][2] + dy]];
+  } catch (e) { copySkip(ctx, spec, 'position', e); }
+}
+
+// Build one spec node (and its subtree) into `container`. Returns null when
+// the node was skipped. dx/dy shift positions of nodes placed directly in the
+// container (roots, and the children of a root group, which share its space).
+async function copyBuild(spec: any, container: BaseNode & ChildrenMixin, ctx: CopyCtx, dx: number, dy: number): Promise<SceneNode | null> {
+  if (++ctx.count > COPY_MAX_NODES) throw new Error(`copy_too_large: more than ${COPY_MAX_NODES} layers`);
+  if (spec.unsupported) { copySkip(ctx, spec, 'layer', `${spec.type} layers cannot be copied between files`); return null; }
+
+  // Groups and boolean operations wrap children that live in the container's
+  // coordinate space: build the children there, then wrap them.
+  if (spec.type === 'GROUP' || spec.type === 'BOOLEAN_OPERATION') {
+    const kids: SceneNode[] = [];
+    for (const c of spec.children ?? []) {
+      const k = await copyBuild(c, container, ctx, dx, dy);
+      if (k) kids.push(k);
+    }
+    if (!kids.length) { copySkip(ctx, spec, 'layer', 'empty group'); return null; }
+    let node: SceneNode;
+    if (spec.type === 'GROUP') node = figma.group(kids, container);
+    else {
+      const op = String(spec.booleanOperation ?? 'UNION').toLowerCase();
+      const fn = (figma as any)[op === 'exclude' ? 'exclude' : op === 'subtract' ? 'subtract' : op === 'intersect' ? 'intersect' : 'union'];
+      node = fn.call(figma, kids, container);
+    }
+    node.name = spec.name;
+    ctx.idMap[spec.sourceId] = node.id;
+    await copyApplyProps(node, spec, ['visible', 'locked', 'opacity', 'blendMode', 'isMask', 'maskType', 'effects', 'fills', 'strokes', 'strokeWeight', 'strokeAlign', 'exportSettings', 'constraints'], spec.props, ctx);
+    await copyStyles(node, spec, ctx);
+    await copyNodeVariables(node, spec, ctx);
+    await copyApplyProps(node, spec, COPY_CHILD_PROPS, spec.childProps, ctx);
+    return node;
+  }
+
+  if (spec.type === 'COMPONENT_SET') {
+    const kids: ComponentNode[] = [];
+    for (const c of spec.children ?? []) {
+      const k = await copyBuild(c, container, ctx, 0, 0);
+      if (k && k.type === 'COMPONENT') kids.push(k);
+    }
+    if (!kids.length) { copySkip(ctx, spec, 'layer', 'component set without variants'); return null; }
+    const set = figma.combineAsVariants(kids, container);
+    set.name = spec.name;
+    ctx.idMap[spec.sourceId] = set.id;
+    const kidSpecs = (spec.children ?? []).filter((c: any) => c.type === 'COMPONENT');
+    kids.forEach((k, i) => { if (kidSpecs[i]) copyPlace(k, kidSpecs[i], 0, 0, ctx); });
+    await copyPropertyDefinitions(set, spec, ctx);
+    await copyApplyProps(set, spec, COPY_PROPS, spec.props, ctx);
+    copyResize(set, spec);
+    copyPlace(set, spec, dx, dy, ctx);
+    await copyStyles(set, spec, ctx);
+    await copyNodeVariables(set, spec, ctx);
+    await copyApplyProps(set, spec, COPY_CHILD_PROPS, spec.childProps, ctx);
+    return set;
+  }
+
+  let node: SceneNode;
+  let detachedInstance = false;
+  switch (spec.type) {
+    case 'FRAME': node = figma.createFrame(); break;
+    case 'COMPONENT': node = figma.createComponent(); break;
+    case 'RECTANGLE': node = figma.createRectangle(); break;
+    case 'ELLIPSE': node = figma.createEllipse(); break;
+    case 'POLYGON': node = figma.createPolygon(); break;
+    case 'STAR': node = figma.createStar(); break;
+    case 'LINE': node = figma.createLine(); break;
+    case 'VECTOR': node = figma.createVector(); break;
+    case 'SECTION': node = (figma as any).createSection(); break;
+    case 'SLICE': node = figma.createSlice(); break;
+    case 'TEXT': node = figma.createText(); break;
+    case 'INSTANCE': {
+      const target = spec.instance ? (ctx.componentMap[spec.instance.componentId] ?? ctx.idMap[spec.instance.componentId]) : undefined;
+      if (target) {
+        try {
+          const main = await getNode(target);
+          if (main.type === 'COMPONENT') { node = (main as ComponentNode).createInstance(); break; }
+        } catch (e) { copySkip(ctx, spec, 'component', e); }
+      }
+      node = figma.createFrame();
+      detachedInstance = true;
+      ctx.detached++;
+      break;
+    }
+    default:
+      copySkip(ctx, spec, 'layer', `${spec.type} layers cannot be copied between files`);
+      return null;
+  }
+  node.name = spec.name;
+  ctx.idMap[spec.sourceId] = node.id;
+  const isInstance = node.type === 'INSTANCE';
+  if (spec.reactions) ctx.reactions.push({ id: node.id, spec });
+  if (spec.propertyReferences) ctx.refs.push({ id: node.id, spec });
+
+  if (node.type === 'VECTOR') {
+    try {
+      if (spec.vectorNetwork) await (node as VectorNode).setVectorNetworkAsync(spec.vectorNetwork);
+      else if (spec.vectorPaths) (node as VectorNode).vectorPaths = spec.vectorPaths;
+    } catch (e) {
+      try { if (spec.vectorPaths) (node as VectorNode).vectorPaths = spec.vectorPaths; } catch { /* keep empty */ }
+      copySkip(ctx, spec, 'vector network', e);
+    }
+  }
+  if (node.type === 'TEXT') await copyText(node as TextNode, spec, ctx);
+  if (node.type !== 'VECTOR') copyResize(node, spec);
+  if (isInstance) {
+    if (spec.instance?.componentProperties) {
+      const vals: Record<string, any> = {};
+      for (const [k, p] of Object.entries(spec.instance.componentProperties as Record<string, any>)) {
+        if (!p) continue;
+        const key = p.type === 'VARIANT' ? k : (ctx.propKeyMap[k] ?? k);
+        if (p.type === 'INSTANCE_SWAP') {
+          const to = ctx.componentMap[p.value];
+          if (to) vals[key] = to;
+        } else vals[key] = p.value;
+      }
+      try { (node as InstanceNode).setProperties(vals); } catch (e) { copySkip(ctx, spec, 'component properties', e); }
+    }
+  }
+  await copyApplyProps(node, spec, isInstance ? COPY_INSTANCE_PROPS : COPY_PROPS, spec.props, ctx);
+  if (node.type !== 'VECTOR' && !isInstance) copyResize(node, spec);
+  if (node.type === 'TEXT' && spec.props?.textAutoResize) {
+    try { (node as TextNode).textAutoResize = spec.props.textAutoResize; } catch { /* ignore */ }
+  }
+  container.appendChild(node);
+  copyPlace(node, spec, dx, dy, ctx);
+  await copyStyles(node, spec, ctx);
+  await copyNodeVariables(node, spec, ctx);
+  if (detachedInstance && spec.instance) {
+    try { node.setPluginData('grip.copiedFrom', JSON.stringify({ component: spec.instance.name, key: spec.instance.key })); } catch { /* ignore */ }
+  }
+
+  if (Array.isArray(spec.children) && spec.children.length) {
+    if (isInstance) await copyInstanceOverrides(node as InstanceNode, spec.children, ctx);
+    else if (hasChildren(node)) for (const c of spec.children) await copyBuild(c, node as any, ctx, 0, 0);
+  }
+  if (node.type === 'COMPONENT' && spec.component?.propertyDefinitions) await copyPropertyDefinitions(node as ComponentNode, spec, ctx);
+  await copyApplyProps(node, spec, COPY_CHILD_PROPS, spec.childProps, ctx);
+  return node;
+}
+
+// An instance comes with its own sublayers. Re-apply what differs in the source
+// (text, fills, visibility), matching sublayers by position and type.
+async function copyInstanceOverrides(inst: InstanceNode, specs: any[], ctx: CopyCtx) {
+  const walk = async (nodes: readonly SceneNode[], list: any[]) => {
+    for (let i = 0; i < Math.min(nodes.length, list.length); i++) {
+      const n = nodes[i] as any, s = list[i];
+      if (!s || n.type !== s.type) continue;
+      ctx.idMap[s.sourceId] = n.id;
+      try {
+        if (s.props && 'visible' in s.props && n.visible !== s.props.visible) n.visible = s.props.visible;
+        if (s.props && Array.isArray(s.props.fills) && 'fills' in n && JSON.stringify(n.fills) !== JSON.stringify(copySplitBindings(s.props.fills).clean)) {
+          await copySetList(n, 'fills', s.props.fills, ctx, s);
+        }
+        if (n.type === 'TEXT' && s.text && n.characters !== s.text.characters) await copyText(n, s, ctx);
+      } catch (e) { copySkip(ctx, s, 'override', e); }
+      if (Array.isArray(s.children) && 'children' in n && n.type !== 'INSTANCE') await walk(n.children, s.children);
+    }
+  };
+  await walk(inst.children, specs);
+}
+
+// Component property definitions (TEXT / BOOLEAN / INSTANCE_SWAP / SLOT) get
+// new keys in the target; propKeyMap maps old -> new for references and
+// instance values. Variant properties come from the variant names.
+async function copyPropertyDefinitions(node: ComponentNode | ComponentSetNode, spec: any, ctx: CopyCtx) {
+  const defs = spec.component?.propertyDefinitions;
+  if (!defs || typeof defs !== 'object') return;
+  for (const [oldKey, d] of Object.entries(defs as Record<string, any>)) {
+    if (!d || d.type === 'VARIANT') continue;
+    const name = oldKey.replace(/#[^#]*$/, '');
+    let def = d.defaultValue;
+    if (d.type === 'INSTANCE_SWAP') {
+      def = ctx.componentMap[d.defaultValue];
+      if (!def) { copySkip(ctx, spec, `property ${name}`, 'its default component was not copied'); continue; }
+    }
+    try {
+      const opts: any = {};
+      if (Array.isArray(d.preferredValues) && d.type === 'INSTANCE_SWAP') {
+        opts.preferredValues = d.preferredValues.map((v: any) => ({ ...v, key: v.key })).filter((v: any) => v.type && v.key);
+      }
+      ctx.propKeyMap[oldKey] = (node as any).addComponentProperty(name, d.type, def, Object.keys(opts).length ? opts : undefined);
+    } catch (e) { copySkip(ctx, spec, `property ${name}`, e); }
+  }
+}
+
+// After every node exists: point layers at the new property keys and re-aim
+// prototype reactions at the copied nodes (links to anything not copied are
+// dropped and reported).
+async function copyFinish(ctx: CopyCtx, params: any) {
+  for (const { id, spec } of ctx.refs) {
+    const refs: Record<string, string> = {};
+    for (const [field, key] of Object.entries(spec.propertyReferences as Record<string, string>)) {
+      const to = ctx.propKeyMap[key];
+      if (to) refs[field] = to;
+    }
+    if (!Object.keys(refs).length) continue;
+    try { const n: any = await figma.getNodeByIdAsync(id); if (n) n.componentPropertyReferences = refs; } catch (e) { copySkip(ctx, spec, 'property references', e); }
+  }
+  if (params.reactions === false) return;
+  for (const { id, spec } of ctx.reactions) {
+    const out: any[] = [];
+    let dropped = 0;
+    for (const r of spec.reactions as any[]) {
+      const actions: any[] = [];
+      for (const a of (r.actions ?? (r.action ? [r.action] : [])) as any[]) {
+        if (!a) continue;
+        if (a.type === 'NODE' && a.destinationId) {
+          const to = ctx.idMap[a.destinationId];
+          if (!to) { dropped++; continue; }
+          actions.push({ ...a, destinationId: to });
+        } else if (a.type === 'SET_VARIABLE' || a.type === 'SET_VARIABLE_MODE' || a.type === 'CONDITIONAL') {
+          const vid = a.variableId;
+          if (vid && ctx.variableMap[vid]) actions.push({ ...a, variableId: ctx.variableMap[vid] });
+          else dropped++;
+        } else actions.push(a);
+      }
+      if (actions.length) { const rest = { ...r, actions }; delete rest.action; out.push(rest); }
+    }
+    if (dropped) copySkip(ctx, spec, 'prototype links', `${dropped} link(s) point at layers or variables that were not copied`);
+    if (!out.length) continue;
+    try {
+      const n: any = await figma.getNodeByIdAsync(id);
+      if (n && 'setReactionsAsync' in n) await n.setReactionsAsync(out);
+    } catch (e) { copySkip(ctx, spec, 'prototype links', e); }
+  }
+}
+
+async function importTree(params: any): Promise<any> {
+  const roots: any[] = Array.isArray(params.roots) ? params.roots : [];
+  if (!roots.length) throw new Error('import_tree: nothing to import');
+  let container: BaseNode & ChildrenMixin = figma.currentPage;
+  let onPage = true;
+  if (params.parentId) {
+    const p = await getNode(String(params.parentId));
+    if (!hasChildren(p)) throw new Error(`Parent ${params.parentId} cannot contain children`);
+    container = p as any;
+    onPage = p.type === 'PAGE';
+  } else if (params.pageId) {
+    container = await loadedPage(String(params.pageId));
+  }
+  const ctx: CopyCtx = {
+    count: 0, skipped: [], fontSub: new Map(), missingFonts: [], idMap: {},
+    styleMap: params.styleMap ?? {}, variableMap: params.variableMap ?? {}, componentMap: params.componentMap ?? {},
+    propKeyMap: params.propKeyMap ?? {}, detached: 0, reactions: [], refs: [],
+  };
+  const createdDefs = params.create ? await copyCreate(params.create, ctx) : { styles: 0, variables: 0 };
+  // Shift so the first root lands at (x, y) when given; else keep each root's
+  // position on the page (absolute) or in the parent (relative).
+  const first = roots[0];
+  const base = (r: any) => {
+    const rel = r.relativeTransform, abs = r.absoluteTransform;
+    if (onPage && !params.parentId && Array.isArray(abs) && Array.isArray(rel)) return { dx: abs[0][2] - rel[0][2], dy: abs[1][2] - rel[1][2] };
+    return { dx: 0, dy: 0 };
+  };
+  let ox = 0, oy = 0;
+  if (typeof params.x === 'number' || typeof params.y === 'number') {
+    const b = base(first), rel = first.relativeTransform;
+    const fx = Array.isArray(rel) ? rel[0][2] + b.dx : 0, fy = Array.isArray(rel) ? rel[1][2] + b.dy : 0;
+    if (typeof params.x === 'number') ox = params.x - fx;
+    if (typeof params.y === 'number') oy = params.y - fy;
+  }
+  const made: Array<{ id: string; name: string; type: string; sourceId: string }> = [];
+  for (const r of roots) {
+    const b = base(r);
+    const n = await copyBuild(r, container, ctx, b.dx + ox, b.dy + oy);
+    if (n) made.push({ id: n.id, name: n.name, type: n.type, sourceId: r.sourceId });
+  }
+  await copyFinish(ctx, params);
+  if (params.select && made.length) {
+    const page = pageOf(container as BaseNode) ?? figma.currentPage;
+    const nodes = (await Promise.all(made.map((m) => figma.getNodeByIdAsync(m.id)))).filter(Boolean) as SceneNode[];
+    if (page === figma.currentPage) { page.selection = nodes; figma.viewport.scrollAndZoomIntoView(nodes); }
+  }
+  return {
+    roots: made, created: Object.keys(ctx.idMap).length, detachedInstances: ctx.detached,
+    createdStyles: createdDefs.styles, createdVariables: createdDefs.variables,
+    styleMap: ctx.styleMap, variableMap: ctx.variableMap,
+    missingFonts: ctx.missingFonts, skipped: ctx.skipped, ...(params.returnIdMap ? { idMap: ctx.idMap, propKeyMap: ctx.propKeyMap } : {}),
+    parentId: (container as BaseNode).id,
+  };
+}
+// ---- grip:copy-tree end ----
+
+
 // Capability flags the loaded plugin advertises. Lets the bridge confirm
 // a specific fix is actually in the running iframe (version alone can lie
 // if two builds share a number). 'nodeBudget' = bounded serialize is live.
@@ -5086,7 +5959,8 @@ const MIN_BRIDGE_PROTOCOL = 1;
 // the mutation queue below). 'keepPage' = set_selection/scroll_to accept
 // keepPage and get_selection/find_with_criteria/create_node accept pageId.
 // 'docChangeOrigins' = documentchange events carry origins {LOCAL, REMOTE}.
-const PLUGIN_CAPABILITIES = ['nodeBudget', 'deepLink', 'fileUid', 'serialMutations', 'keepPage', 'docChangeOrigins', 'pairing'];
+// 'copyTree' = export_tree / import_tree / copy_check (copy_between_files).
+const PLUGIN_CAPABILITIES = ['nodeBudget', 'deepLink', 'fileUid', 'serialMutations', 'keepPage', 'docChangeOrigins', 'pairing', 'copyTree'];
 
 // Per-file identity. figma.fileKey is null for local/unpublished files (and in
 // some editors), and the fallback figma.root.id is the constant "0:0" in EVERY
@@ -5179,6 +6053,7 @@ const READ_ONLY_METHODS = new Set<string>([
   'get_instances', 'get_style_consumers', 'get_text_range_bound_variable',
   'get_attached_connectors', 'get_file_thumbnail_node',
   'get_image_by_hash', 'get_stamp_author', 'get_overrides',
+  'export_tree', 'copy_check',
   'get_publish_status', 'get_text_content', 'get_top_level_frame',
   'get_relaunch_data', 'get_buzz_asset_type',
   'slides_get_canvas_grid', 'get_slide_transition', 'get_audit', 'list_pages',

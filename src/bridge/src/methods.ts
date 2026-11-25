@@ -21,6 +21,7 @@ export const READ_ONLY_METHODS = new Set<string>([
   'get_instances', 'get_style_consumers', 'get_text_range_bound_variable',
   'get_attached_connectors', 'get_file_thumbnail_node',
   'get_image_by_hash', 'get_stamp_author', 'get_overrides',
+  'export_tree', 'copy_check',
   'get_publish_status', 'get_text_content', 'get_top_level_frame',
   'get_relaunch_data', 'get_buzz_asset_type',
   'slides_get_canvas_grid', 'get_slide_transition', 'get_audit', 'list_pages',
@@ -95,6 +96,11 @@ const BRIDGE_SIDE_SAFE_TOOLS = new Set<string>([
 export function toolMayChangeDocument(tool: string | undefined, args: unknown): boolean {
   if (!tool) return true;
   if (BRIDGE_SIDE_SAFE_TOOLS.has(tool)) return false;
+  // on_file only re-aims the call: it can change the document iff the wrapped tool can.
+  if (tool === 'on_file') {
+    const a = (args ?? {}) as { tool?: unknown; args?: unknown };
+    return toolMayChangeDocument(typeof a.tool === 'string' ? a.tool : undefined, a.args);
+  }
   const merged = resolveMerged(tool, args);
   if (merged) return 'method' in merged ? !isRetrySafe(merged.method) : false; // a bad op is refused before the plugin
   return !isRetrySafe(tool);
