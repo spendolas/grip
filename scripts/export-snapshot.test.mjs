@@ -50,7 +50,7 @@ test('CLI: dry run writes nothing, --apply copies, removes stale files, refuses 
     run('--to', out, '--flavour', fl, '--apply');
     assert.ok(!existsSync(join(out, 'src', 'old.ts')), 'a file removed upstream is removed in the target');
     writeFileSync(join(out, 'src', 'a.ts'), 'edited');
-    assert.throws(() => run('--check', out), /BROKEN|status 1/);
+    assert.throws(() => run('--check', out), (e) => e.status === 1 && /BROKEN/.test(e.stdout));
     const deny = join(fl, 'deny.txt'); writeFileSync(deny, 'x\n');
     assert.throws(() => run('--to', out, '--flavour', fl, '--denylist', deny, '--apply'), (e) => e.status === 2);
   } finally { for (const d of [repo, out, fl]) rmSync(d, { recursive: true, force: true }); }
