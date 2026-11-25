@@ -43,16 +43,25 @@ export function requiredAssets(flavour) {
 // INSTALL_MARKER) so update notices never carry it.
 export const INSTALL_MARKER = '<!-- grip-install -->';
 
-export function installFooter(version) {
-  return '**Install:** [open the install page](https://spendolas.github.io/grip/) to start it in Claude with one click, '
-    + 'or tell your agent `Install Grip from https://github.com/spendolas/grip/releases/latest`. '
-    + `The steps are in the [README for this release](https://github.com/spendolas/grip/blob/v${version}/README.md#install-instructions-for-agents), `
+// The public flavour's install pointers; a flavour passes its own installUrl / pagesUrl.
+const PUBLIC_INSTALL = { installUrl: 'https://github.com/spendolas/grip/releases/latest', pagesUrl: 'https://spendolas.github.io/grip/' };
+
+export function installFooter(version, flavour) {
+  const installUrl = (flavour && flavour.installUrl) || PUBLIC_INSTALL.installUrl;
+  const pagesUrl = (flavour && flavour.pagesUrl) || PUBLIC_INSTALL.pagesUrl;
+  const repoUrl = installUrl.replace(/\/releases\/latest\/?$/, '');
+  // A GitHub Pages install page has the one-click buttons; any other page is just the written steps.
+  const first = /^https:\/\/[a-z0-9-]+\.github\.io\//i.test(pagesUrl)
+    ? `[open the install page](${pagesUrl}) to start it in Claude with one click, or tell your agent`
+    : `[open the install steps](${pagesUrl}), or tell your agent`;
+  return `**Install:** ${first} \`Install Grip from ${installUrl}\`. `
+    + `The steps are in the [README for this release](${repoUrl}/blob/v${version}/README.md#install-instructions-for-agents), `
     + 'so the instructions always match the files attached to this release.';
 }
 
 // The release body: the CHANGELOG notes, then the marker line, then the footer.
-export function withInstallFooter(notes, version) {
-  return notes.replace(/\s+$/, '') + '\n\n' + INSTALL_MARKER + '\n' + installFooter(version) + '\n';
+export function withInstallFooter(notes, version, flavour) {
+  return notes.replace(/\s+$/, '') + '\n\n' + INSTALL_MARKER + '\n' + installFooter(version, flavour) + '\n';
 }
 
 export class GateError extends Error {}
@@ -184,7 +193,7 @@ export function main(argv, env) {
   let flavour = {};
   try { flavour = JSON.parse(readFileSync(env.GRIP_FLAVOUR_DIR ? resolve(env.GRIP_FLAVOUR_DIR, 'flavour.json') : flavourFile, 'utf8')); } catch { /* no flavour file: the public asset list */ }
   const { action, notes } = decide({ version: args.version, tags, release, changelog, required: requiredAssets(flavour) });
-  if (notes !== null) writeFileSync(args['notes-out'], withInstallFooter(notes, args.version));
+  if (notes !== null) writeFileSync(args['notes-out'], withInstallFooter(notes, args.version, flavour));
   if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `action=${action}\n`);
   console.log(`release-gate: v${args.version} -> ${action}`);
   return action;

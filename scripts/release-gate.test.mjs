@@ -95,6 +95,18 @@ test('install footer: after the marker, tag-pinned README link, release pointer'
   assert.equal(INSTALL_MARKER, '<!-- grip-install -->');
 });
 
+test('install footer follows the flavour: its own pointers, never the public ones', () => {
+  const fl = { installUrl: 'https://github.com/example-org/rel/releases/latest', pagesUrl: 'https://github.com/example-org/rel' };
+  const f = installFooter('1.2.3', fl);
+  assert.ok(f.includes('[open the install steps](https://github.com/example-org/rel), or tell your agent'), 'a non-Pages page is steps, not one-click');
+  assert.ok(f.includes('`Install Grip from https://github.com/example-org/rel/releases/latest`'));
+  assert.ok(f.includes('(https://github.com/example-org/rel/blob/v1.2.3/README.md#install-instructions-for-agents)'));
+  assert.ok(!f.includes('spendolas'), 'no public pointer leaks into another flavour');
+  const pages = installFooter('1.2.3', { installUrl: fl.installUrl, pagesUrl: 'https://example-org.github.io/rel/' });
+  assert.ok(pages.includes('[open the install page](https://example-org.github.io/rel/) to start it in Claude with one click'));
+  assert.equal(installFooter('0.9.0', {}), installFooter('0.9.0'), 'an empty flavour falls back to the public footer');
+});
+
 test('isCompleteRelease', () => {
   assert.equal(isCompleteRelease(null), false);
   assert.equal(isCompleteRelease(full(true)), false, 'draft');

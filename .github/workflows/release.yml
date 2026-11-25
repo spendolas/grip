@@ -149,8 +149,20 @@ jobs:
 
       # `npm test` builds first (it must not depend on anything already being
       # built), then runs the bridge suites and the scripts/ suites.
+      # A loader flavour (flavour.json payloadLoader) is a snapshot of source that passed the FULL
+      # suite upstream. That suite asserts the public flavour's ports, URLs and asset list, so it
+      # cannot pass against another flavour file; this repo runs the flavour-agnostic checks only
+      # (the build, hygiene, packaging, signing and the zip smoke test below still run).
       - name: Tests
-        run: npm test
+        run: |
+          set -euo pipefail
+          if [ "$(node -p "require('./flavour/flavour.json').payloadLoader === true")" = "true" ]; then
+            echo "::notice::Loader flavour: running the flavour-agnostic checks; the full shared suite runs upstream."
+            npm run build
+            node --test scripts/ed25519-check.test.mjs scripts/payload.test.mjs scripts/build-shell.test.mjs scripts/sign-release.test.mjs scripts/audit-gate.test.mjs scripts/workflow-paths.test.mjs
+          else
+            npm test
+          fi
 
       - name: Package
         id: package
