@@ -12,7 +12,7 @@ import { FLAVOUR } from './flavour.gen.js';
 import { join } from 'node:path';
 import {
   TOOLS, toolInputSchema, resolveToolScope, mergeToolScope, toolInScope, toolCategorySummary, toolDetail,
-  MERGED_TOOLS, resolveMerged,
+  MERGED_TOOLS, resolveMerged, FILE_ARG_TOOLS, ON_FILE_REFUSED,
 } from './tools.js';
 import type { PluginBridge, BridgeEvent } from './ws-server.js';
 import { callContext, QUEUED_NOTE_MS, type CallContext } from './ws-server.js';
@@ -384,9 +384,43 @@ export function createSession(bridge: PluginBridge): LiveSession {
     return res;
   });
 
-  async function handleCall(name: string, args: Record<string, unknown>) {
+  // Run `fn` with the call aimed at `file` for this one call (bridge.request reads
+  // callContext.fileTarget). The session's own bind/pin never change. The
+  // result gets a `grip/file` receipt: the file that really served it.
+  async function withFile(file: string, fn: () => Promise<any>) {
+    const store = callContext.getStore() ?? {};
+    const prev = store.fileTarget;
+    store.fileTarget = file;
+    store.servedFile = undefined;
+    try {
+      const res = await callContext.run(store, fn);
+      if (store.servedFile && res && typeof res === 'object') {
+        res._meta = { ...(res._meta ?? {}), 'grip/file': store.servedFile };
+      }
+      return res;
+    } finally {
+      store.fileTarget = prev;
+    }
+  }
+
+  async function handleCall(name: string, args: Record<string, unknown>): Promise<any> {
     const def = TOOLS.find((t) => t.name === name);
     if (!def) return errorResult(`Unknown tool: ${name}`);
+
+    // Per-call file: on_file {file, tool, args}, or a `file` argument on the tools in FILE_ARG_TOOLS.
+    if (name === 'on_file') {
+      const p = def.schema.safeParse(args);
+      if (!p.success) return errorResult(`Invalid params for on_file: ${p.error.message}`);
+      const { file, tool, args: inner } = p.data as { file: string; tool: string; args?: Record<string, unknown> };
+      if (!file.trim()) return errorResult('on_file: `file` is empty. Pass a fileKey, exact file name, sessionId or figma.com URL (see list_files).');
+      if (!TOOLS.some((t) => t.name === tool)) return errorResult(`on_file: unknown tool '${tool}'.`);
+      if (ON_FILE_REFUSED.has(tool)) return errorResult(`on_file: '${tool}' is a bridge-side tool and cannot be aimed at a file. Use it directly.`);
+      return withFile(file, () => handleCall(tool, inner ?? {}));
+    }
+    if (FILE_ARG_TOOLS.has(name) && typeof args.file === 'string' && args.file.trim()) {
+      const { file, ...rest } = args;
+      return withFile(file as string, () => handleCall(name, rest));
+    }
 
     const parsed = def.schema.safeParse(args);
     if (!parsed.success) {

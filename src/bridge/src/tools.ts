@@ -34,7 +34,7 @@ export type ToolCategory =
   | 'library' | 'assets' | 'storage' | 'subscribe' | 'misc';
 
 export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
-  meta: ['grip_health', 'grip_diagnose', 'list_files', 'set_active_file', 'get_page_context', 'grip_capabilities',
+  meta: ['grip_health', 'grip_diagnose', 'list_files', 'set_active_file', 'on_file', 'get_page_context', 'grip_capabilities',
     'grip_load_tools', 'grip_update'],
   read: ['get_document', 'get_page', 'get_node', 'get_nodes', 'get_selection', 'get_styles', 'get_variables',
     'get_components', 'search_nodes', 'find_with_criteria', 'get_plugin_data', 'get_overrides', 'get_instances',
@@ -334,6 +334,14 @@ export const TOOLS: ToolDef[] = [
     detail:
       "How the persistence works: on a plugin reconnect the binding re-resolves to that file's newest live session (not a fixed session id), and a bound agent moves to a newer live window of the same file as soon as one says hello. Note: a call issued in the brief instant a reconnect is mid-flight can still return `plugin_reconnected`: that error is RETRYABLE (just call again); it does NOT mean reload Figma. Unbound agents (relying on single-open-file auto-routing) are more exposed to that window; bind to avoid it. If the file isn't open yet the binding is held (deferred) and resolves when it connects. A file name matching >1 open file/window errors `ambiguous_file_name` listing the candidates (name, fileKey, sessionId): bind by the fileKey or the sessionId instead. Files with no stable key (local or unsaved files report fileKey \"0:0\") are never bound by \"0:0\" (that errors `not_a_file_key`): a name target stays a name bind, a sessionId target binds that window and falls back to its file name if the window respawns. The result carries `warnings[]` when another agent is already bound to the same file (edits can collide). (Launchers can skip this by starting the agent with env GRIP_FILE=<key|name|url> over stdio, or `?file=<key|name|url>` on the HTTP /mcp URL.)",
     schema: z.object({ target: z.string() }),
+  },
+  {
+    name: 'on_file',
+    description:
+      "Run a plugin tool on a NAMED file for one call, without moving your binding: {file, tool, args}. file = fileKey, exact name, sessionId or figma.com URL. Result carries a `grip/file` receipt. More: grip_capabilities.",
+    detail:
+      "Use it for one-off cross-file reads or writes (read a frame in file A while bound to B). The per-call file is resolved with the same strict matcher as set_active_file: fileKey, exact name, sessionId, figma.com URL or fileUid; an ambiguous name errors `ambiguous_file_name` listing the candidates, `0:0` is refused (`not_a_file_key`), and a file that is not open fails `bound_file_not_open` after the usual short wait. Your own binding, pin and subscriptions are untouched. `tool` is any plugin-bound tool (merged tools take their op/target in `args` as usual); bridge-side tools (list_files, set_active_file, on_file, grip_*, subscribe) are refused. The result's `_meta['grip/file']` is {fileName, fileKey, sessionId} of the window that served the call: check it when you pass a name. Several tools also take an optional `file` argument directly (run_script and the reads).",
+    schema: z.object({ file: z.string(), tool: z.string(), args: z.record(z.string(), z.any()).optional() }),
   },
   {
     name: 'get_document',
@@ -1401,6 +1409,24 @@ export const TOOLS: ToolDef[] = [
   },
 ];
 
+// Tools that take an optional per-call `file` (same resolver as on_file). The
+// field is added here, not on each definition, so the list is one line.
+export const FILE_ARG_TOOLS: ReadonlySet<string> = new Set([
+  'run_script', 'get_page', 'get_node', 'get_nodes', 'get_selection', 'search_nodes', 'find_with_criteria',
+  'get_styles', 'get_variables', 'get_components', 'export_node',
+]);
+const FILE_ARG_DESC = 'Run against this file for this call only (fileKey, exact name, sessionId or figma.com URL); your binding does not move. See on_file.';
+for (const t of TOOLS) {
+  if (FILE_ARG_TOOLS.has(t.name) && t.schema instanceof z.ZodObject) {
+    t.schema = t.schema.extend({ file: z.string().optional().describe(FILE_ARG_DESC) });
+  }
+}
+// Tools that never reach the plugin: on_file refuses them as targets.
+export const ON_FILE_REFUSED: ReadonlySet<string> = new Set([
+  'on_file', 'list_files', 'set_active_file', 'grip_health', 'grip_diagnose', 'grip_capabilities',
+  'grip_load_tools', 'grip_update', 'subscribe',
+]);
+
 // Extra `detail` appended to core tools (their `description` is byte-budgeted).
 // Kept here, apart from the long literals above, so independent edits don't collide.
 const EXTRA_DETAIL: Record<string, string> = {
@@ -1462,6 +1488,14 @@ function normalizeJsonSchema(node: unknown): unknown {
 }
 
 export function toolInputSchema(name: string): Record<string, unknown> {
+  const base = baseInputSchema(name);
+  if (!FILE_ARG_TOOLS.has(name)) return base;
+  const props = (base.properties ?? {}) as Record<string, unknown>;
+  if (props.file) return base;
+  return { ...base, properties: { ...props, file: { type: 'string', description: FILE_ARG_DESC } } };
+}
+
+function baseInputSchema(name: string): Record<string, unknown> {
   switch (name) {
     case 'grip_health':
     case 'grip_diagnose':

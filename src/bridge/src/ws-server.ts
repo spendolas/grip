@@ -89,6 +89,13 @@ interface Overdue {
 export interface CallContext {
   queuedMs?: number;
   retryAfterMs?: number;
+  // Per-call file override (on_file / a tool's `file` argument): resolved on a
+  // throwaway copy of the session in request(), so the agent's own pin and
+  // bind never move.
+  fileTarget?: string;
+  // Which file actually served the call (set by request(); echoed as a receipt
+  // on per-call overrides).
+  servedFile?: { fileName: string; fileKey: string | null; sessionId: string };
 }
 export const callContext = new AsyncLocalStorage<CallContext>();
 
@@ -786,8 +793,18 @@ export class PluginBridge extends EventEmitter {
     return false;
   }
 
-  async request(method: string, params: Record<string, unknown>, mcp: McpSession): Promise<unknown> {
-    this.track(mcp);
+  // A throwaway routing view of `mcp` aimed at `target` (fileKey | exact name |
+  // sessionId | figma.com URL | fileUid), for ONE call. Same id (so the fair
+  // queue still sees one agent), its own bind and pin: route() mutates only
+  // this copy. resolveBind throws ambiguous_file_name / not_a_file_key.
+  private probeFor(mcp: McpSession, target: string): McpSession {
+    return { ...mcp, bind: this.resolveBind(target), activeFileId: null };
+  }
+
+  async request(method: string, params: Record<string, unknown>, mcpIn: McpSession): Promise<unknown> {
+    this.track(mcpIn);
+    const store = callContext.getStore();
+    const mcp = store?.fileTarget ? this.probeFor(mcpIn, store.fileTarget) : mcpIn;
     let session = this.activeSession(mcp);
     if (!session) {
       // Not routable right now. Distinguish WHY so the agent gets an
@@ -808,6 +825,7 @@ export class PluginBridge extends EventEmitter {
         throw new Error('plugin_disconnected: No plugin connected');
       }
     }
+    if (store) store.servedFile = { fileName: session.fileName ?? '', fileKey: isRealFileKey(session.fileKey) ? session.fileKey : null, sessionId: session.id };
     // Busy guard (see BUSY_THRESHOLD_MS): fail fast instead of piling 10s
     // timeouts behind a thread that is stuck or busy with someone's slow call.
     const busy = this.busyCheck(session.id, method);

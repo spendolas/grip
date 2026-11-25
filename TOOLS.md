@@ -1,6 +1,6 @@
 # Grip MCP Tools
 
-155 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
+156 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
 
 **Figma Plugin API coverage:** through plugin update 141 (Oct 15, 2026) and `@figma/plugin-typings` 1.142.0. <!-- figma-api-coverage: update=141 typings=1.142.0 --> The weekly API-updates check reads the marker in this line as its baseline — bump both numbers in the same commit whenever support for newly shipped Plugin API features lands.
 
@@ -43,6 +43,13 @@ Bind this MCP session to one Figma file; every later call routes there.
 - A bound agent always routes to the newest live window of its file (reconnect overlap never keeps it on a dying window).
 - Launch-time alternatives: env `GRIP_FILE=<key|name|url>` (stdio shim) or `?file=<key|name|url>` on the HTTP initialize URL (`http://127.0.0.1:7778/mcp?file=...`, combinable with `?tools=`).
 - Unbound calls with more than one file, or more than one `"0:0"` window, open error `ambiguous_active_file` naming each file/window.
+
+### `on_file`
+Run any plugin tool against a NAMED file for one call, without moving this session's binding.
+- Params: `file` (req): fileKey, exact name, sessionId, figma.com URL or fileUid (same strict resolver as `set_active_file`); `tool` (req): a plugin-bound tool name; `args`: that tool's params (merged tools take their `op`/`target` here as usual).
+- Returns the wrapped tool's result, plus `_meta['grip/file'] = { fileName, fileKey, sessionId }`: the window that actually served the call (a receipt: check it when you passed a name).
+- Never moves the caller's bind or pin. Ambiguous names fail `ambiguous_file_name` with the candidates; `"0:0"` fails `not_a_file_key`; a file that is not open fails `bound_file_not_open` after the usual short wait and sends nothing to any other file. Bridge-side tools (`list_files`, `set_active_file`, `on_file`, `grip_*`, `subscribe`) are refused.
+- `run_script`, `get_page`, `get_node`, `get_nodes`, `get_selection`, `search_nodes`, `find_with_criteria`, `get_styles`, `get_variables`, `get_components` and `export_node` also take an optional `file` argument with the same meaning (it is not forwarded to the plugin). Writes other than `run_script` go through `on_file`.
 
 ### `get_page_context`
 Cheap "where am I" probe (one plugin round-trip, no node tree).

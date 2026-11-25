@@ -95,6 +95,11 @@ const BRIDGE_SIDE_SAFE_TOOLS = new Set<string>([
 export function toolMayChangeDocument(tool: string | undefined, args: unknown): boolean {
   if (!tool) return true;
   if (BRIDGE_SIDE_SAFE_TOOLS.has(tool)) return false;
+  // on_file only re-aims the call: it can change the document iff the wrapped tool can.
+  if (tool === 'on_file') {
+    const a = (args ?? {}) as { tool?: unknown; args?: unknown };
+    return toolMayChangeDocument(typeof a.tool === 'string' ? a.tool : undefined, a.args);
+  }
   const merged = resolveMerged(tool, args);
   if (merged) return 'method' in merged ? !isRetrySafe(merged.method) : false; // a bad op is refused before the plugin
   return !isRetrySafe(tool);
