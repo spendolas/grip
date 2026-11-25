@@ -1,6 +1,6 @@
 {
   "name": "grip-plugin",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "scripts": {
     "build": "node ../../scripts/gen-flavour.mjs && tsc && node ../../scripts/build-shell.mjs",

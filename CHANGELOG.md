@@ -2,6 +2,14 @@
 
 Newest first. Each `## <version>` heading is the exact version number; the GitHub Release for that version uses its section as the release notes. The history starts at 0.6.0.
 
+## 0.11.0
+
+**Agents can now work with several open Figma files at once: aim a single call at any file, and copy layers from one file to another. Update the plugin too.**
+
+- **Aim one call at a file.** The new `on_file` tool runs any plugin tool against a named file (file key, exact name, figma.com URL or window) for that one call, without changing which file the agent is bound to. `run_script` and the main read tools also take an optional `file` argument that does the same. The result says which file actually served the call. An ambiguous name, or a file that is not open, fails clearly and nothing is sent to another file.
+- **Copy between files.** The new `copy_between_files` tool copies layers from one open file to another. The bridge moves everything itself, so the layers never pass through the agent: layers, images, styles, variables and components. Styles, variables and components can each be created in the target (the default; library ones are imported by key, local ones are recreated or copied along so instances stay instances), matched to what the target already has, or detached to plain values. `dryRun: true` reports what would be copied without writing anything. Missing fonts are replaced and listed, and anything that cannot be copied is listed with the reason.
+- **Plugin.** Copying needs the new plugin in both files (an older one is reported as too old). Older plugins keep working with this bridge for everything else.
+
 ## 0.10.0
 
 **Grip can now be built as separate flavours that never mix, and updates are checked more strictly. Nothing changes in how you use Grip.**
