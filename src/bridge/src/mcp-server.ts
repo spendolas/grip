@@ -15,6 +15,7 @@ import {
   MERGED_TOOLS, resolveMerged, FILE_ARG_TOOLS, ON_FILE_REFUSED,
 } from './tools.js';
 import type { PluginBridge, BridgeEvent } from './ws-server.js';
+import { copyBetweenFiles, type CopyArgs } from './copy.js';
 import { callContext, QUEUED_NOTE_MS, type CallContext } from './ws-server.js';
 import type { McpSession } from './types.js';
 import { checkImageRead, checkExportWrite, checkWebUrl } from './guards.js';
@@ -576,6 +577,13 @@ export function createSession(bridge: PluginBridge): LiveSession {
         listing = bridge.fileListing(session, otherSessions(session));
       }
       return okResult(listing);
+    }
+    if (name === 'copy_between_files') {
+      try {
+        return okResult(await copyBetweenFiles(bridge, session, parsed.data as CopyArgs, otherSessions(session)));
+      } catch (err) {
+        return errorResult((err as Error).message);
+      }
     }
     if (name === 'set_active_file') {
       try {

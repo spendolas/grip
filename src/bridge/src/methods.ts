@@ -21,6 +21,7 @@ export const READ_ONLY_METHODS = new Set<string>([
   'get_instances', 'get_style_consumers', 'get_text_range_bound_variable',
   'get_attached_connectors', 'get_file_thumbnail_node',
   'get_image_by_hash', 'get_stamp_author', 'get_overrides',
+  'export_tree', 'copy_check',
   'get_publish_status', 'get_text_content', 'get_top_level_frame',
   'get_relaunch_data', 'get_buzz_asset_type',
   'slides_get_canvas_grid', 'get_slide_transition', 'get_audit', 'list_pages',

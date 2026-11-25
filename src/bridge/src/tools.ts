@@ -34,7 +34,7 @@ export type ToolCategory =
   | 'library' | 'assets' | 'storage' | 'subscribe' | 'misc';
 
 export const TOOL_CATEGORIES: Record<ToolCategory, string[]> = {
-  meta: ['grip_health', 'grip_diagnose', 'list_files', 'set_active_file', 'on_file', 'get_page_context', 'grip_capabilities',
+  meta: ['grip_health', 'grip_diagnose', 'list_files', 'set_active_file', 'on_file', 'copy_between_files', 'get_page_context', 'grip_capabilities',
     'grip_load_tools', 'grip_update'],
   read: ['get_document', 'get_page', 'get_node', 'get_nodes', 'get_selection', 'get_styles', 'get_variables',
     'get_components', 'search_nodes', 'find_with_criteria', 'get_plugin_data', 'get_overrides', 'get_instances',
@@ -342,6 +342,28 @@ export const TOOLS: ToolDef[] = [
     detail:
       "Use it for one-off cross-file reads or writes (read a frame in file A while bound to B). The per-call file is resolved with the same strict matcher as set_active_file: fileKey, exact name, sessionId, figma.com URL or fileUid; an ambiguous name errors `ambiguous_file_name` listing the candidates, `0:0` is refused (`not_a_file_key`), and a file that is not open fails `bound_file_not_open` after the usual short wait. Your own binding, pin and subscriptions are untouched. `tool` is any plugin-bound tool (merged tools take their op/target in `args` as usual); bridge-side tools (list_files, set_active_file, on_file, grip_*, subscribe) are refused. The result's `_meta['grip/file']` is {fileName, fileKey, sessionId} of the window that served the call: check it when you pass a name. Several tools also take an optional `file` argument directly (run_script and the reads).",
     schema: z.object({ file: z.string(), tool: z.string(), args: z.record(z.string(), z.any()).optional() }),
+  },
+  {
+    name: 'copy_between_files',
+    description:
+      "Copy layers between two open files: {from, to, options?, dryRun?}. The bridge moves them (images, styles, variables, components too) and returns a report. More: grip_capabilities.",
+    detail:
+      "`from` and `to` are required: fileKey, exact file name, sessionId or figma.com URL (see list_files); a URL with ?node-id= also names the source layer. Source layers: options.nodeIds, else the URL's node-id, else the source file's current selection. Placement: options.parentId or options.pageId in the target (default: the target's current page, at the same position), options.x/y moves the first layer there, options.select selects the copy. dryRun:true resolves both files and reports what would be copied (layers by type, images, fonts the target lacks, styles, variables, instances) without writing. Errors: `copy_same_file` (from and to are one file), `copy_target_read_only` (checked before anything is read), `plugin_too_old` (update the Grip plugin in that file), `copy_no_source`, `copy_too_large` (options.maxNodes, default 5000), plus the file errors of set_active_file (`ambiguous_file_name`, `not_a_file_key`, `bound_file_not_open`). A target that another agent is bound to still copies, with a warning. The report has created {count, roots, parentId}, images moved, missingFonts (with the substitute used), styles / variables / instances (mapped or detached) and skipped items with reasons. The whole copy is one undo step in the target. Neither file's binding moves.",
+    schema: z.object({
+      from: z.string(),
+      to: z.string(),
+      options: z.object({
+        nodeIds: z.array(z.string()).optional(),
+        parentId: z.string().optional(),
+        pageId: z.string().optional(),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        select: z.boolean().optional(),
+        maxNodes: z.number().int().positive().optional(),
+        reactions: z.boolean().optional(),
+      }).optional(),
+      dryRun: z.boolean().optional(),
+    }),
   },
   {
     name: 'get_document',
@@ -1423,7 +1445,7 @@ for (const t of TOOLS) {
 }
 // Tools that never reach the plugin: on_file refuses them as targets.
 export const ON_FILE_REFUSED: ReadonlySet<string> = new Set([
-  'on_file', 'list_files', 'set_active_file', 'grip_health', 'grip_diagnose', 'grip_capabilities',
+  'on_file', 'copy_between_files', 'list_files', 'set_active_file', 'grip_health', 'grip_diagnose', 'grip_capabilities',
   'grip_load_tools', 'grip_update', 'subscribe',
 ]);
 

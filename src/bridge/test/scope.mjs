@@ -5,8 +5,8 @@ import { mergeToolScope, resolveToolScope, toolInScope, CORE_TOOL_NAMES, META_TO
 // Phase 3 task 6 (3b): storage/ui/slides/subscribe cluster merge landed 157 -> 146.
 // Server-side-optimization sprint task 3 added list_pages: 147 -> 148.
 // Server-side-optimization sprint task 6 added replace_text: 149 -> 150.
-// grip_load_tools (runtime scope widening): 150 -> 151. reorder_grid_tracks: 151 -> 152. list_library_variables: 152 -> 153. grip_update: 153 -> 154. create_component_set: 154 -> 155. on_file: 155 -> 156.
-assert.strictEqual(TOOLS.length, 156, `TOOLS.length should be 156, got ${TOOLS.length}`);
+// grip_load_tools (runtime scope widening): 150 -> 151. reorder_grid_tracks: 151 -> 152. list_library_variables: 152 -> 153. grip_update: 153 -> 154. create_component_set: 154 -> 155. on_file: 155 -> 156. copy_between_files: 156 -> 157.
+assert.strictEqual(TOOLS.length, 157, `TOOLS.length should be 157, got ${TOOLS.length}`);
 
 // Every tool has exactly one category; every core/meta name is a real tool.
 const allNames = new Set(TOOLS.map((t) => t.name));
@@ -99,7 +99,8 @@ import { resolveToolScope as _rs, toolInScope as _tis } from '../dist/tools.js';
 const coreDescBytes = TOOLS.filter((t) => _tis(t.name, _rs('core'))).reduce((a, t) => a + (t.description || '').length, 0);
 // (budget 7000 -> 7100 when the meta tool grip_update, always in scope, was added: +79 bytes. No existing description was touched.)
 // (7100 -> 7300 when the meta tool on_file, always in scope, was added: +215 bytes. No existing description was touched.)
-assert.ok(coreDescBytes < 7300, `core description bytes should drop below 7300, got ${coreDescBytes}`);
+// (7300 -> 7500 when the meta tool copy_between_files, always in scope, was added: +171 bytes. No existing description was touched.)
+assert.ok(coreDescBytes < 7500, `core description bytes should drop below 7500, got ${coreDescBytes}`);
 
 // grip_load_tools / mergeToolScope
 assert.ok(toolInScope('grip_load_tools', resolveToolScope('read')), 'grip_load_tools is meta (always listed)');
