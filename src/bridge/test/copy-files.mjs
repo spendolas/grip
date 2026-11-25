@@ -15,7 +15,8 @@ process.env.GRIP_REQUEST_TIMEOUT_MS = '2000';
 const { PluginBridge } = await import('../dist/ws-server.js');
 const { createSession } = await import('../dist/mcp-server.js');
 const { toolMayChangeDocument } = await import('../dist/methods.js');
-const { TOOLS, toolInScope, resolveToolScope } = await import('../dist/tools.js');
+const { TOOLS, toolInScope, resolveToolScope, toolDetail } = await import('../dist/tools.js');
+const { readFileSync } = await import('node:fs');
 const { nodeIdFromUrl, rewriteImages, planDefinitions, planComponents, collectInstances } = await import('../dist/copy.js');
 const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
 const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
@@ -363,6 +364,27 @@ assert.strictEqual(toolMayChangeDocument('copy_between_files', { from: 'a', to: 
   const a = await agent();
   const r = await a.call('on_file', { file: 'kA', tool: 'copy_between_files', args: {} });
   assert.ok(r.isError && /bridge-side/.test(r.text), 'on_file refuses copy_between_files');
+}
+
+// ---- 10. docs: every error code and option is documented where agents and maintainers look.
+{
+  const d = toolDetail('copy_between_files');
+  const md = readFileSync(new URL('../../../TOOLS.md', import.meta.url), 'utf8');
+  const sec = md.slice(md.indexOf('### `copy_between_files`'), md.indexOf('### `get_page_context`'));
+  assert.ok(sec.length > 100, 'TOOLS.md has a copy_between_files section');
+  for (const code of ['copy_same_file', 'copy_target_read_only', 'plugin_too_old', 'copy_no_source', 'copy_too_large', 'ambiguous_file_name', 'not_a_file_key', 'bound_file_not_open']) {
+    assert.ok(d.detail.includes(code), `detail names ${code}`);
+    assert.ok(sec.includes(code), `TOOLS.md names ${code}`);
+  }
+  for (const opt of ['nodeIds', 'parentId', 'pageId', 'select', 'maxNodes', 'reactions', 'styles', 'variables', 'components', 'dryRun']) {
+    assert.ok(sec.includes(opt), `TOOLS.md documents ${opt}`);
+    assert.ok(d.detail.includes(opt), `detail documents ${opt}`);
+  }
+  assert.ok(d.description.includes('grip_capabilities'));
+  const claude = readFileSync(new URL('../../../CLAUDE.md', import.meta.url), 'utf8');
+  assert.ok(claude.includes('copy_between_files') && claude.includes('copy.ts'), 'CLAUDE.md describes it');
+  assert.ok(md.startsWith('# Grip MCP Tools\n\n' + TOOLS.length + ' tools.'), 'TOOLS.md tool count is current');
+  assert.ok(claude.includes(TOOLS.length + ' tools. Per-tool reference'), 'CLAUDE.md tool count is current');
 }
 
 for (const p of [A, B]) p.ws.close();

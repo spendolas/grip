@@ -1,6 +1,6 @@
 # Grip MCP Tools
 
-156 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
+157 tools. Names below are the MCP tool names — Claude Code surfaces them as `mcp__grip__<name>`. All take a JSON params object; all return a JSON result.
 
 **Figma Plugin API coverage:** through plugin update 141 (Oct 15, 2026) and `@figma/plugin-typings` 1.142.0. <!-- figma-api-coverage: update=141 typings=1.142.0 --> The weekly API-updates check reads the marker in this line as its baseline — bump both numbers in the same commit whenever support for newly shipped Plugin API features lands.
 
@@ -48,8 +48,17 @@ Bind this MCP session to one Figma file; every later call routes there.
 Run any plugin tool against a NAMED file for one call, without moving this session's binding.
 - Params: `file` (req): fileKey, exact name, sessionId, figma.com URL or fileUid (same strict resolver as `set_active_file`); `tool` (req): a plugin-bound tool name; `args`: that tool's params (merged tools take their `op`/`target` here as usual).
 - Returns the wrapped tool's result, plus `_meta['grip/file'] = { fileName, fileKey, sessionId }`: the window that actually served the call (a receipt: check it when you passed a name).
-- Never moves the caller's bind or pin. Ambiguous names fail `ambiguous_file_name` with the candidates; `"0:0"` fails `not_a_file_key`; a file that is not open fails `bound_file_not_open` after the usual short wait and sends nothing to any other file. Bridge-side tools (`list_files`, `set_active_file`, `on_file`, `grip_*`, `subscribe`) are refused.
+- Never moves the caller's bind or pin. Ambiguous names fail `ambiguous_file_name` with the candidates; `"0:0"` fails `not_a_file_key`; a file that is not open fails `bound_file_not_open` after the usual short wait and sends nothing to any other file. Bridge-side tools (`list_files`, `set_active_file`, `on_file`, `copy_between_files`, `grip_*`, `subscribe`) are refused.
 - `run_script`, `get_page`, `get_node`, `get_nodes`, `get_selection`, `search_nodes`, `find_with_criteria`, `get_styles`, `get_variables`, `get_components` and `export_node` also take an optional `file` argument with the same meaning (it is not forwarded to the plugin). Writes other than `run_script` go through `on_file`.
+
+### `copy_between_files`
+Copy layers from one open file to another. The bridge does the whole move itself (layers, images, styles, variables, components); the layers never pass through the agent, which gets a report.
+- Params: `from` (req), `to` (req): fileKey, exact name, sessionId or figma.com URL (same strict resolver as `set_active_file`; neither binding moves). `options`: `nodeIds` (source layers; else the `?node-id=` of a `from` URL; else the source file's current selection), `parentId` / `pageId` (where in the target; default its current page, each layer at its source position), `x`/`y` (move the first layer there), `select`, `maxNodes` (default 5000), `reactions` (false drops prototype links), `styles` / `variables` / `components`: `'create'` (default) | `'match'` | `'detach'`. `dryRun: true`: resolve both files and report what would be copied, writing nothing.
+- `styles` / `variables`: `create` uses the target's own (same key, then same name and type; variables prefer the same collection), imports library ones by key, and creates the rest (variables with their collection, modes by name and aliased variables; styles with their values). `match` never creates (the rest is detached, values kept). `detach` keeps plain values.
+- `components`: `create` imports library components by key and copies local ones into the target first (at their source positions on the target page), so the copied instances stay instances (property values, text / fill / visibility overrides; property definitions recreated under new keys). `match` imports library ones and matches local ones by name and set name in the target. `detach` turns instances into frames. A target component with the same key is always used.
+- Returns `{copied, from, to, created {count, roots, parentId}, images {moved, failed}, missingFonts [{family, style, substitute}], styles, variables, components {referenced, <how>: n, items [{name, how}], copiedTo?}, instances {count, detached}, skipped [{sourceId, name, what, reason}], warnings?}`. `how` is `key`, `import`, `name`, `create`, `copy` or `detach`.
+- Errors: `copy_same_file`; `copy_target_read_only` (checked before the source is read); `plugin_too_old` (that file's Grip plugin lacks the `copyTree` capability: update it in Figma); `copy_no_source`; `copy_too_large`; `copy_bad_source` (a page); `copy_missing_file`; plus `ambiguous_file_name`, `not_a_file_key`, `bound_file_not_open`. Another agent bound to the target gives a `warnings` entry; the copy still runs.
+- Not copied: FigJam and other layer types outside frames/shapes/text/vectors/groups/booleans/components/instances/sections/slices (listed in `skipped`), video fills, images over the 8MB response cap, prototype links to layers outside the copy. Missing fonts are replaced (same family Regular, else Inter Regular) and listed. Each import is one undo step in the target (two when local components are copied along).
 
 ### `get_page_context`
 Cheap "where am I" probe (one plugin round-trip, no node tree).
