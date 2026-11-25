@@ -247,6 +247,14 @@ assert.strictEqual(exp.components[0].name, 'Btn');
 eq(exp.components[0].children[0].propertyReferences, { characters: 'Text#1:0' });
 assert.ok(r0.children[1].reactions.length === 2);
 
+// ---- props that do not apply are not exported (Figma refuses them on import)
+{
+  const plain = wire(await A.run('exportTree', { nodeIds: [outside.id] })).roots[0];
+  for (const k of ['paddingTop', 'itemSpacing', 'primaryAxisSizingMode']) assert.ok(!(k in plain.props), `${k} not exported without auto-layout`);
+  assert.ok('layoutMode' in plain.props && 'clipsContent' in plain.props);
+  assert.ok('itemSpacing' in r0.props && 'paddingTop' in r0.props, 'auto-layout frame keeps them');
+}
+
 // ---- export guards
 await assert.rejects(A.run('exportTree', {}), /copy_no_source/);
 await assert.rejects(A.run('exportTree', { nodeIds: [card.id], maxNodes: 3 }), /copy_too_large/);

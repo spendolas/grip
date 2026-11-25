@@ -5121,8 +5121,19 @@ const COPY_PROPS = [
 const COPY_CHILD_PROPS = [
   'layoutPositioning', 'layoutAlign', 'layoutGrow', 'layoutSizingHorizontal', 'layoutSizingVertical',
   'minWidth', 'maxWidth', 'minHeight', 'maxHeight',
-  'gridRowSpan', 'gridColumnSpan', 'gridRowAnchorIndex', 'gridColumnAnchorIndex', 'gridChildHorizontalAlign', 'gridChildVerticalAlign',
+  'gridRowSpan', 'gridColumnSpan', 'gridChildHorizontalAlign', 'gridChildVerticalAlign',
 ];
+// Props that only mean something on an auto-layout frame / a GRID frame / a
+// GRID child. Figma refuses them elsewhere, so they are not exported there.
+const COPY_AUTOLAYOUT_ONLY = ['layoutWrap', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'itemSpacing', 'counterAxisSpacing',
+  'primaryAxisSizingMode', 'counterAxisSizingMode', 'primaryAxisAlignItems', 'counterAxisAlignItems', 'counterAxisAlignContent',
+  'itemReverseZIndex', 'strokesIncludedInLayout'];
+const COPY_GRID_ONLY = ['gridRowCount', 'gridColumnCount', 'gridRowGap', 'gridColumnGap', 'gridColumnSizes', 'gridRowSizes'];
+const COPY_GRID_CHILD_ONLY = ['gridRowSpan', 'gridColumnSpan', 'gridChildHorizontalAlign', 'gridChildVerticalAlign'];
+// What an instance may override (its layout comes from its main component).
+const COPY_INSTANCE_PROPS = ['visible', 'locked', 'opacity', 'blendMode', 'isMask', 'maskType', 'clipsContent', 'constraints',
+  'cornerRadius', 'topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius', 'cornerSmoothing',
+  'fills', 'strokes', 'strokeWeight', 'strokeAlign', 'effects', 'layoutGrids', 'exportSettings'];
 // Types import_tree can rebuild. INSTANCE becomes a FRAME (detached) unless the
 // bridge mapped its main component to one in the target.
 const COPY_TYPES = new Set([
@@ -5179,12 +5190,20 @@ async function exportTree(params: any): Promise<any> {
         if (v !== undefined) spec.props[k] = v;
       } catch { /* unreadable here */ }
     }
+    const lm = spec.props.layoutMode;
+    if (!lm || lm === 'NONE') for (const k of COPY_AUTOLAYOUT_ONLY) delete spec.props[k];
+    if (lm !== 'GRID') for (const k of COPY_GRID_ONLY) delete spec.props[k];
+    const vw = spec.props.variableWidthStrokeProperties;
+    if (vw && !(Array.isArray(vw.variableWidthPoints) && vw.variableWidthPoints.length)) delete spec.props.variableWidthStrokeProperties;
+    const cs = spec.props.complexStrokeProperties;
+    if (cs && (cs.type === 'BASIC' || !cs.type)) delete spec.props.complexStrokeProperties;
     scanPaints(spec.props.fills); scanPaints(spec.props.strokes);
     if ('width' in sn) { spec.props.width = sn.width; spec.props.height = sn.height; }
     if ('relativeTransform' in sn) spec.relativeTransform = copyPlain(sn.relativeTransform);
     if (isRoot && 'absoluteTransform' in sn) spec.absoluteTransform = copyPlain(sn.absoluteTransform);
     for (const k of COPY_CHILD_PROPS) {
       if (!(k in sn)) continue;
+      if (COPY_GRID_CHILD_ONLY.includes(k) && (node.parent as any)?.layoutMode !== 'GRID') continue;
       try { const v = copyPlain(sn[k]); if (v !== undefined) (spec.childProps ??= {})[k] = v; } catch { /* ignore */ }
     }
     // Style references (resolved on import by the bridge's style map).
@@ -5766,7 +5785,7 @@ async function copyBuild(spec: any, container: BaseNode & ChildrenMixin, ctx: Co
       try { (node as InstanceNode).setProperties(vals); } catch (e) { copySkip(ctx, spec, 'component properties', e); }
     }
   }
-  await copyApplyProps(node, spec, COPY_PROPS, spec.props, ctx);
+  await copyApplyProps(node, spec, isInstance ? COPY_INSTANCE_PROPS : COPY_PROPS, spec.props, ctx);
   if (node.type !== 'VECTOR' && !isInstance) copyResize(node, spec);
   if (node.type === 'TEXT' && spec.props?.textAutoResize) {
     try { (node as TextNode).textAutoResize = spec.props.textAutoResize; } catch { /* ignore */ }
