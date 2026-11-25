@@ -38,7 +38,8 @@ async function client(name) {
   await waitFor(() => c.frames.some((f) => f.kind === 'welcome'));
   ws.send(JSON.stringify({ kind: 'hello', version: '0.9.6', capabilities: [], fileKey: 'KEY-' + name, fileName: name, currentPageId: '0:1', currentPageName: 'P' }));
   await waitFor(() => bridge.snapshot().plugins.some((p) => p.fileName === name && p.hello));
-  c.alerts = () => c.frames.filter((f) => f.type === 'foreign_alert');
+  c.alerts = () => c.frames.filter((f) => f.type === 'foreign_alert' && !f.pulse);
+  c.pulses = () => c.frames.filter((f) => f.type === 'foreign_alert' && f.pulse);
   c.toasts = () => c.frames.filter((f) => f.method === 'notify');
   return c;
 }
