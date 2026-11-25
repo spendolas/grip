@@ -16,7 +16,7 @@ const { PluginBridge } = await import('../dist/ws-server.js');
 const { createSession } = await import('../dist/mcp-server.js');
 const { toolMayChangeDocument } = await import('../dist/methods.js');
 const { TOOLS, toolInScope, resolveToolScope } = await import('../dist/tools.js');
-const { nodeIdFromUrl, rewriteImages, planDefinitions } = await import('../dist/copy.js');
+const { nodeIdFromUrl, rewriteImages, planDefinitions, planComponents, collectInstances } = await import('../dist/copy.js');
 const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
 const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
 
@@ -31,9 +31,13 @@ await new Promise((r) => bridge.once('listening', r));
 const TREE = {
   roots: [{
     type: 'FRAME', name: 'Card', sourceId: '1:2', props: { width: 100, height: 50, fills: [{ type: 'IMAGE', imageHash: 'h-src', scaleMode: 'FILL' }, { type: 'IMAGE', imageHash: 'h-bad', scaleMode: 'FILL' }, { type: 'VIDEO', videoHash: 'v' }] },
-    children: [{ type: 'TEXT', name: 'Label', sourceId: '1:3', props: {}, text: { characters: 'Hi', segments: [{ start: 0, end: 2, fontName: { family: 'Inter', style: 'Bold' }, fills: [{ type: 'IMAGE', imageHash: 'h-src' }] }] } }],
+    children: [
+      { type: 'TEXT', name: 'Label', sourceId: '1:3', props: {}, text: { characters: 'Hi', segments: [{ start: 0, end: 2, fontName: { family: 'Inter', style: 'Bold' }, fills: [{ type: 'IMAGE', imageHash: 'h-src' }] }] } },
+      { type: 'INSTANCE', name: 'Btn', sourceId: '1:4', props: {}, instance: { componentId: '5:1', key: 'lk', name: 'Btn', remote: false } },
+      { type: 'INSTANCE', name: 'Icon', sourceId: '1:5', props: {}, instance: { componentId: '6:1', key: 'rk', name: 'Icon', remote: true } },
+    ],
   }],
-  components: [], count: 2, byType: { FRAME: 1, TEXT: 1 }, unsupported: [{ sourceId: '1:9', name: 'Sticky', type: 'STICKY' }],
+  components: [{ type: 'COMPONENT', name: 'Btn', sourceId: '5:1', props: {}, children: [] }], count: 2, byType: { FRAME: 1, TEXT: 1 }, unsupported: [{ sourceId: '1:9', name: 'Sticky', type: 'STICKY' }],
   images: ['h-src', 'h-bad'], fonts: [{ family: 'Inter', style: 'Bold' }, { family: 'Brand', style: 'Regular' }],
   styles: {
     'S:1': { id: 'S:1', key: 'k1', name: 'Brand/Blue', type: 'PAINT', remote: false, value: { paints: [] } },
@@ -61,6 +65,7 @@ async function plugin(fileKey, fileName, { caps = ['copyTree'], editable = true 
         ...(m.params.inventory ? { inventory: { styles: [], variables: [{ id: 'VT:9', key: 'x', name: 'space/4', resolvedType: 'FLOAT', collection: 'Spacing' }], collections: [] } } : {}),
       });
       case 'import_style_by_key': return reply({ id: 'ST:lib', key: m.params.key });
+      case 'import_component_by_key': return reply({ id: 'TC:6', key: m.params.key });
       case 'import_variable_by_key': return ws.send(JSON.stringify({ id: m.id, error: 'library_key_unresolved: no' }));
       case 'export_tree': return reply(JSON.parse(JSON.stringify(TREE)));
       case 'get_image_by_hash':
@@ -71,6 +76,7 @@ async function plugin(fileKey, fileName, { caps = ['copyTree'], editable = true 
         roots: [{ id: '9:1', name: 'Card', type: 'FRAME', sourceId: '1:2' }], created: 2, detachedInstances: 0, missingFonts: [], skipped: [], parentId: '0:1',
         styleMap: { ...(m.params.styleMap ?? {}), ...Object.fromEntries((m.params.create?.styles ?? []).map((x) => [x.srcId, 'new-' + x.srcId])) },
         variableMap: { ...(m.params.variableMap ?? {}), ...Object.fromEntries((m.params.create?.variables ?? []).map((x) => [x.srcId, 'new-' + x.srcId])) },
+        ...(m.params.returnIdMap ? { idMap: Object.fromEntries(m.params.roots.map((x) => [x.sourceId, 'new-' + x.sourceId])), propKeyMap: { 'Text#1:0': 'Text#9:9' } } : {}),
       });
       default: return reply({ served: fileName });
     }
@@ -157,6 +163,33 @@ assert.strictEqual(nodeIdFromUrl('kA'), undefined);
   assert.deepStrictEqual(pd.toImport, { styles: [], variables: [] }, 'detach imports nothing');
 }
 
+// ---- 0c. planComponents (pure)
+{
+  const refs = collectInstances([{ type: 'FRAME', children: [
+    { type: 'INSTANCE', instance: { componentId: 'C1', key: 'k1', name: 'Card', remote: false }, children: [
+      { type: 'INSTANCE', instance: { componentId: 'C4', key: 'k4', name: 'Size=S', setName: 'Btn', remote: false } },
+    ] },
+    { type: 'INSTANCE', instance: { componentId: 'C2', key: 'ck2', name: 'Icon', remote: true } },
+    { type: 'INSTANCE', instance: { componentId: 'C3', key: 'ck3', name: 'Logo', remote: true } },
+    { type: 'INSTANCE', instance: { componentId: 'C1', key: 'k1', name: 'Card', remote: false } },
+  ] }]);
+  assert.deepStrictEqual([...refs.keys()], ['C1', 'C4', 'C2', 'C3'], 'each main once, nested instances too');
+  const inv = [{ id: 'T4', key: 'zz', name: 'Size=S', setName: 'Btn' }, { id: 'T5', key: 'k5', name: 'Card' }, { id: 'TL', key: 'zz2', name: 'Logo', setName: 'Brand' }];
+  const c1 = planComponents(refs, 'create', inv);
+  assert.deepStrictEqual(c1.how, { C1: 'copy', C4: 'copy' });
+  assert.deepStrictEqual(c1.toImport, [{ componentId: 'C2', key: 'ck2' }, { componentId: 'C3', key: 'ck3' }]);
+  const c2 = planComponents(refs, 'create', inv, { C2: 'TC2', C3: null });
+  assert.deepStrictEqual(c2.how, { C1: 'copy', C4: 'copy', C2: 'import', C3: 'detach' }, 'Logo name matches only with the same set name');
+  assert.deepStrictEqual(c2.componentMap, { C2: 'TC2' });
+  const m = planComponents(refs, 'match', inv, { C2: 'TC2', C3: null });
+  assert.deepStrictEqual(m.how, { C1: 'name', C4: 'name', C2: 'import', C3: 'detach' });
+  assert.deepStrictEqual(m.componentMap, { C1: 'T5', C4: 'T4', C2: 'TC2' });
+  const k = planComponents(refs, 'create', [{ id: 'TK', key: 'k1', name: 'whatever' }], {});
+  assert.strictEqual(k.how.C1, 'key', 'same key in the target wins');
+  const d = planComponents(refs, 'detach', inv);
+  assert.ok(Object.values(d.how).every((h) => h === 'detach') && d.toImport.length === 0);
+}
+
 // ---- 1. dryRun: both files resolved, fonts checked, nothing written.
 {
   const a = await agent({ key: 'kA' });
@@ -189,11 +222,20 @@ assert.strictEqual(nodeIdFromUrl('kA'), undefined);
   assert.strictEqual(r.json.copied, true);
   assert.deepStrictEqual(A.got[0].params.nodeIds, ['1:2'], 'the URL node-id names the source layer');
   assert.deepStrictEqual(methods(A), ['export_tree', 'get_image_by_hash', 'get_image_by_hash']);
-  assert.deepStrictEqual(methods(B), ['copy_check', 'copy_check', 'import_style_by_key', 'upload_image', 'import_tree']);
-  const imp = B.got.find((m) => m.method === 'import_tree').params;
-  assert.deepStrictEqual(imp.styleMap, { 'S:2': 'ST:lib' }, 'library style imported by key');
+  assert.deepStrictEqual(methods(B), ['copy_check', 'copy_check', 'import_style_by_key', 'import_component_by_key', 'upload_image', 'import_tree', 'import_tree']);
+  assert.strictEqual(A.got[0].params.includeComponents, true, 'create mode asks for the local main components');
+  const [first, imp] = B.got.filter((m) => m.method === 'import_tree').map((m) => m.params);
+  assert.deepStrictEqual(first.roots.map((x) => x.sourceId), ['5:1'], 'local main component copied first');
+  assert.strictEqual(first.returnIdMap, true);
+  assert.deepStrictEqual(first.create.styles.map((x) => x.srcId), ['S:1'], 'local style created (in the first import)');
+  assert.ok(!imp.create, 'definitions are created once');
+  assert.deepStrictEqual(imp.styleMap, { 'S:2': 'ST:lib', 'S:1': 'new-S:1' }, 'library style imported by key, created one passed on');
   assert.deepStrictEqual(imp.variableMap, { 'V:1': 'VT:9' }, 'variable matched by name');
-  assert.deepStrictEqual(imp.create.styles.map((x) => x.srcId), ['S:1'], 'local style created in the target');
+  assert.deepStrictEqual(imp.componentMap, { '6:1': 'TC:6', '5:1': 'new-5:1' }, 'library component imported, local one copied');
+  assert.deepStrictEqual(imp.propKeyMap, { 'Text#1:0': 'Text#9:9' }, 'new property keys passed on');
+  assert.strictEqual(r.json.components.import, 1);
+  assert.strictEqual(r.json.components.copy, 1);
+  assert.strictEqual(r.json.components.copiedTo.count, 2);
   assert.strictEqual(r.json.styles.create, 1);
   assert.strictEqual(r.json.styles.import, 1);
   assert.strictEqual(r.json.variables.name, 1);
@@ -218,6 +260,19 @@ assert.strictEqual(nodeIdFromUrl('kA'), undefined);
   assert.ok(!methods(B).includes('import_style_by_key'));
   const imp = B.got.find((m) => m.method === 'import_tree').params;
   assert.deepStrictEqual([imp.styleMap, imp.variableMap, imp.create], [{}, {}, undefined]);
+  assert.strictEqual(methods(B).filter((x) => x === 'import_tree').length, 2, 'components still copied along by default');
+  reset(A, B);
+  const d = await a.call('copy_between_files', { from: 'kA', to: 'kB', options: { nodeIds: ['1:2'], components: 'detach' } });
+  assert.ok(!d.isError, d.text);
+  assert.ok(!A.got[0].params.includeComponents, 'detach: no main components exported');
+  assert.ok(!methods(B).includes('import_component_by_key'));
+  assert.strictEqual(methods(B).filter((x) => x === 'import_tree').length, 1);
+  assert.deepStrictEqual(B.got.find((m) => m.method === 'import_tree').params.componentMap, {});
+  assert.strictEqual(d.json.components.detach, 2);
+  reset(A, B);
+  const mt = await a.call('copy_between_files', { from: 'kA', to: 'kB', options: { nodeIds: ['1:2'], components: 'match' }, dryRun: true });
+  assert.ok(!mt.isError, mt.text);
+  assert.strictEqual(B.got[0].params.components, true, 'match mode asks the target for its components');
   assert.strictEqual(r.json.styles.detach, 2);
   const bad = await a.call('copy_between_files', { from: 'kA', to: 'kB', options: { styles: 'nope' } });
   assert.ok(bad.isError, 'unknown mode refused');

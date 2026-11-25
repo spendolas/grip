@@ -5346,7 +5346,7 @@ function copyStyleValue(s: BaseStyle): any {
 
 // The target's own styles, variables and collections (ids, keys, names), so
 // the bridge can match the source's by key or name.
-async function copyInventory(): Promise<any> {
+async function copyInventory(withComponents = false): Promise<any> {
   const styles: any[] = [];
   const lists = await Promise.all([
     figma.getLocalPaintStylesAsync(), figma.getLocalTextStylesAsync(), figma.getLocalEffectStylesAsync(), figma.getLocalGridStylesAsync(),
@@ -5359,7 +5359,16 @@ async function copyInventory(): Promise<any> {
   const variables = (await figma.variables.getLocalVariablesAsync()).map((v) => ({
     id: v.id, key: v.key, name: v.name, resolvedType: v.resolvedType, collection: byCol.get(v.variableCollectionId),
   }));
-  return { styles, variables, collections };
+  // Local components by name (only when asked: it loads every page).
+  let components: any[] | undefined;
+  if (withComponents) {
+    await figma.loadAllPagesAsync();
+    components = (figma.root.findAllWithCriteria({ types: ['COMPONENT'] }) as ComponentNode[]).slice(0, 5000).map((c) => {
+      const set = c.parent && c.parent.type === 'COMPONENT_SET' ? c.parent : null;
+      return { id: c.id, key: c.key, name: c.name, ...(set ? { setName: set.name } : {}) };
+    });
+  }
+  return { styles, variables, collections, ...(components ? { components } : {}) };
 }
 
 // Create the styles and variables the bridge could not match (create mode).
@@ -5459,7 +5468,7 @@ async function copyCheck(params: any): Promise<any> {
     const avail = new Set((await figma.listAvailableFontsAsync()).map((f) => `${f.fontName.family}|${f.fontName.style}`));
     missingFonts = want.filter((f: any) => f && !avail.has(`${f.family}|${f.style}`));
   }
-  const inventory = params.inventory ? await copyInventory() : undefined;
+  const inventory = params.inventory ? await copyInventory(!!params.components) : undefined;
   return { editable, editorType, ...(reason ? { reason } : {}), missingFonts, ...(inventory ? { inventory } : {}), currentPageId: figma.currentPage.id, currentPageName: figma.currentPage.name, fileName: figma.root.name };
 }
 

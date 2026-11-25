@@ -363,6 +363,7 @@ export const TOOLS: ToolDef[] = [
         reactions: z.boolean().optional(),
         styles: z.enum(['create', 'match', 'detach']).optional(),
         variables: z.enum(['create', 'match', 'detach']).optional(),
+        components: z.enum(['create', 'match', 'detach']).optional(),
       }).optional(),
       dryRun: z.boolean().optional(),
     }),

@@ -313,6 +313,7 @@ const SLOW_METHOD_TIMEOUT_MS: Record<string, number> = {
   map_nodes: SCAN_TIMEOUT_MS,   // bulk edit over many nodes; chunks+yields, but the whole run can be long
   export_tree: SCAN_TIMEOUT_MS,  // copy_between_files: serialize a whole subtree
   import_tree: SCAN_TIMEOUT_MS,  // copy_between_files: rebuild it (fonts, vectors, images)
+  copy_check: SCAN_TIMEOUT_MS,   // copy_between_files: the target inventory can load every page
   set_current_page: PAGE_TIMEOUT_MS,
   get_document: PAGE_TIMEOUT_MS,   // loadAllPagesAsync across the file
   get_page: PAGE_TIMEOUT_MS,       // serialize a whole page tree

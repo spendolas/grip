@@ -405,6 +405,28 @@ assert.strictEqual(wire(await A.run('exportTree', { useSelection: true })).roots
   eq(inv.variables.map((v) => [v.name, v.collection]), [['color/primary', 'Tokens'], ['blue/500', 'Primitives'], ['broken', 'Tokens']]);
 }
 
+// ---------------------------------------------------------------- 6b. nested local components copied along
+{
+  const S = fakeFile({ prefix: 'S', name: 'Src' });
+  const icon = S.add(new S.C(), S.page, { name: 'Icon', relativeTransform: at(0, 300) });
+  const chip = S.add(new S.C(), S.page, { name: 'Chip', relativeTransform: at(0, 400) });
+  const inner = icon.createInstance(); inner.name = 'Icon'; chip.appendChild(inner);
+  const frame = S.add(new S.N('FRAME'), S.page, { name: 'Screen' });
+  const use = chip.createInstance(); use.name = 'Chip'; frame.appendChild(use);
+  const e = wire(await S.run('exportTree', { nodeIds: [frame.id], includeComponents: true }));
+  eq(e.components.map((c) => c.name), ['Chip', 'Icon'], 'a component is exported before the ones it uses');
+  const B = fakeFile({ prefix: 'B', name: 'Target' });
+  // The bridge imports them reversed (dependencies first) ...
+  const pre = wire(await B.run('importTree', { roots: [...e.components].reverse(), returnIdMap: true }));
+  const newChip = B.nodes.get(pre.idMap[chip.id]);
+  assert.strictEqual(newChip.children[0].type, 'INSTANCE', 'the copied Chip uses the copied Icon');
+  assert.strictEqual(newChip.children[0]._main, B.nodes.get(pre.idMap[icon.id]));
+  // ... then the layers, with componentMap from that.
+  await B.run('importTree', { roots: e.roots, componentMap: { [chip.id]: newChip.id } });
+  const screen = B.page.children.find((n) => n.name === 'Screen');
+  assert.strictEqual(screen.children[0]._main, newChip, 'the copied layers use the copied component');
+}
+
 // ---------------------------------------------------------------- 7. export describes styles and variables fully
 {
   eq(exp.styles['S:1'].value, { paints: [{ type: 'SOLID', color: { r: 0, g: 0, b: 1 } }] }, 'a style carries its value, so the target can recreate it');

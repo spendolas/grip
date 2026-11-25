@@ -21,6 +21,7 @@ export interface CopyOptions {
   reactions?: boolean;
   styles?: DefMode;
   variables?: DefMode;
+  components?: DefMode;
 }
 
 // How styles / variables the copied layers use reach the target:
@@ -28,12 +29,68 @@ export interface CopyOptions {
 // ones there (what a paste in Figma does); match = use the target's, detach the
 // rest (their values stay); detach = never link, keep plain values.
 export type DefMode = 'create' | 'match' | 'detach';
-export type How = 'key' | 'import' | 'name' | 'create' | 'detach';
+export type How = 'key' | 'import' | 'name' | 'create' | 'copy' | 'detach';
 
 export interface Inventory {
   styles: Array<{ id: string; key: string; name: string; type: string }>;
   variables: Array<{ id: string; key: string; name: string; resolvedType: string; collection?: string }>;
   collections?: Array<{ id: string; name: string; modes: string[] }>;
+  components?: Array<{ id: string; key: string; name: string; setName?: string }>;
+}
+
+// A main component that copied instances use.
+export interface CompRef { componentId: string; key?: string; name: string; remote?: boolean; setName?: string }
+
+// Every main component used by an instance anywhere in these spec trees.
+export function collectInstances(specs: any[]): Map<string, CompRef> {
+  const out = new Map<string, CompRef>();
+  const visit = (s: any) => {
+    if (!s || typeof s !== 'object') return;
+    const i = s.instance;
+    if (i && i.componentId && !out.has(i.componentId)) {
+      out.set(i.componentId, { componentId: i.componentId, key: i.key, name: i.name, remote: !!i.remote, ...(i.setName ? { setName: i.setName } : {}) });
+    }
+    for (const c of s.children ?? []) visit(c);
+  };
+  for (const s of specs) visit(s);
+  return out;
+}
+
+export interface CompPlan {
+  componentMap: Record<string, string>;
+  toImport: Array<{ componentId: string; key: string }>;
+  how: Record<string, How>;
+}
+
+// Pure: how each main component reaches the target. create = library ones
+// imported by key, local ones copied along ('copy': the bridge copies the
+// exported components first and fills componentMap from that); match = library
+// ones imported, local ones matched by name (and set name) in the target;
+// detach = instances become plain frames. A target component with the same
+// key is always used.
+export function planComponents(
+  refs: Map<string, CompRef>,
+  mode: DefMode,
+  targetComponents: NonNullable<Inventory['components']>,
+  imported: Record<string, string | null> = {},
+): CompPlan {
+  const plan: CompPlan = { componentMap: {}, toImport: [], how: {} };
+  for (const r of refs.values()) {
+    const set = (how: How, id?: string) => { plan.how[r.componentId] = how; if (id) plan.componentMap[r.componentId] = id; };
+    if (mode === 'detach') { set('detach'); continue; }
+    const byKey = r.key ? targetComponents.find((t) => t.key === r.key) : undefined;
+    if (byKey) { set('key', byKey.id); continue; }
+    if (r.remote && r.key) {
+      const got = imported[r.componentId];
+      if (got === undefined) { plan.toImport.push({ componentId: r.componentId, key: r.key }); continue; }
+      if (got) { set('import', got); continue; }
+    }
+    if (!r.remote && mode === 'create') { set('copy'); continue; }
+    const byName = targetComponents.find((t) => t.name === r.name && (t.setName ?? null) === (r.setName ?? null));
+    if (byName) { set('name', byName.id); continue; }
+    set('detach');
+  }
+  return plan;
 }
 
 export interface DefPlan {
@@ -240,8 +297,9 @@ export async function copyBetweenFiles(
   // Target first: a read-only target fails before anything is read.
   const styleMode: DefMode = opts.styles ?? 'create';
   const varMode: DefMode = opts.variables ?? 'create';
-  const needInv = styleMode !== 'detach' || varMode !== 'detach';
-  const check = await on<any>(tgt.sessionId, 'copy_check', needInv ? { inventory: true } : {});
+  const compMode: DefMode = opts.components ?? 'create';
+  const needInv = styleMode !== 'detach' || varMode !== 'detach' || compMode === 'match';
+  const check = await on<any>(tgt.sessionId, 'copy_check', needInv ? { inventory: true, ...(compMode === 'match' ? { components: true } : {}) } : {});
   if (!check?.editable) {
     throw new Error(`copy_target_read_only: "${tgt.fileName}" cannot be edited (${check?.reason ?? check?.editorType ?? 'view only'}). Open it with edit access in Design mode, then retry.`);
   }
@@ -249,14 +307,21 @@ export async function copyBetweenFiles(
   const exp = await on<any>(src.sessionId, 'export_tree', {
     ...(nodeIds.length ? { nodeIds } : { useSelection: true }),
     ...(typeof opts.maxNodes === 'number' ? { maxNodes: opts.maxNodes } : {}),
+    ...(compMode === 'create' ? { includeComponents: true } : {}),
   });
   const roots: any[] = exp.roots ?? [];
+  // Local main components copied along (create mode). Built dependencies
+  // first: a component is exported before the ones it uses.
+  const comps: any[] = [...(exp.components ?? [])].reverse();
+  const refs = collectInstances([...roots, ...comps]);
   const fonts: Array<{ family: string; style: string }> = exp.fonts ?? [];
   const fontCheck = fonts.length ? await on<any>(tgt.sessionId, 'copy_check', { fonts }) : { missingFonts: [] };
 
   const inv: Inventory = check.inventory ?? { styles: [], variables: [] };
   const modes = { styles: styleMode, variables: varMode };
   let plan = planDefinitions(exp, inv, modes);
+  let cplan = planComponents(refs, compMode, inv.components ?? []);
+  const refNames = Object.fromEntries([...refs.values()].map((r) => [r.componentId, { name: r.setName ? `${r.setName} / ${r.name}` : r.name }]));
   const summary = {
     layers: exp.count ?? countNodes(roots),
     byType: exp.byType ?? {},
@@ -279,7 +344,8 @@ export async function copyBetweenFiles(
       // 'import' here means: from a library, imported by key if the target has that library.
       styles: summarizeHow(dryHow(plan.how.styles, plan.toImport.styles), exp.styles ?? {}),
       variables: summarizeHow(dryHow(plan.how.variables, plan.toImport.variables), exp.variables ?? {}),
-      instances: { count: (exp.instances ?? []).length, willDetach: (exp.instances ?? []).length },
+      components: summarizeHow(dryHow(cplan.how, cplan.toImport.map((t) => ({ srcId: t.componentId }))), refNames),
+      instances: (exp.instances ?? []).length,
       note: 'Nothing was written. Run again without dryRun to copy.',
     };
   }
@@ -299,6 +365,16 @@ export async function copyBetweenFiles(
     plan = planDefinitions(exp, inv, modes, imported);
   }
 
+  // Library components: import by key (a variant's key brings its set).
+  if (cplan.toImport.length) {
+    const got: Record<string, string | null> = {};
+    for (const it of cplan.toImport) {
+      try { got[it.componentId] = (await on<any>(tgt.sessionId, 'import_component_by_key', { key: it.key })).id ?? null; }
+      catch { got[it.componentId] = null; }
+    }
+    cplan = planComponents(refs, compMode, inv.components ?? [], got);
+  }
+
   // Images: move the bytes, then point the paints at the target's hashes.
   const imageMap: Record<string, string> = {};
   const failed = new Set<string>();
@@ -314,7 +390,38 @@ export async function copyBetweenFiles(
       imageErrors.push({ hash, reason: e instanceof Error ? e.message : String(e) });
     }
   }
-  const img = rewriteImages(roots, imageMap, failed);
+  const img = rewriteImages([...roots, ...comps], imageMap, failed);
+
+  // Local components first (create mode), on the target page at their source
+  // positions; their ids and new property keys feed the main import.
+  let styleMap = plan.styleMap, variableMap = plan.variableMap;
+  let create: DefPlan['create'] | undefined = plan.create.styles.length || plan.create.variables.length ? plan.create : undefined;
+  let propKeyMap: Record<string, string> = {};
+  let compRes: any;
+  const copied = Object.entries(cplan.how).filter(([, h]) => h === 'copy').map(([id]) => id);
+  if (copied.length && comps.length) {
+    compRes = await on<any>(tgt.sessionId, 'import_tree', {
+      roots: comps,
+      ...(opts.pageId ? { pageId: opts.pageId } : {}),
+      ...(opts.reactions === false ? { reactions: false } : {}),
+      styleMap, variableMap, componentMap: cplan.componentMap, returnIdMap: true,
+      ...(create ? { create } : {}),
+    });
+    styleMap = compRes.styleMap ?? styleMap;
+    variableMap = compRes.variableMap ?? variableMap;
+    create = undefined;
+    propKeyMap = compRes.propKeyMap ?? {};
+  }
+  // A main component that is itself among the copied layers is built in the
+  // same import (the plugin maps it there), so it stays 'copy'.
+  const inTree = new Set<string>();
+  const walk = (x: any) => { inTree.add(x.sourceId); for (const c of x.children ?? []) walk(c); };
+  for (const r of roots) walk(r);
+  for (const id of copied) {
+    const to = compRes?.idMap?.[id];
+    if (to) cplan.componentMap[id] = to;
+    else if (!inTree.has(id)) cplan.how[id] = 'detach';
+  }
 
   const res = await on<any>(tgt.sessionId, 'import_tree', {
     roots,
@@ -324,15 +431,14 @@ export async function copyBetweenFiles(
     ...(typeof opts.y === 'number' ? { y: opts.y } : {}),
     ...(opts.select ? { select: true } : {}),
     ...(opts.reactions === false ? { reactions: false } : {}),
-    styleMap: plan.styleMap,
-    variableMap: plan.variableMap,
-    ...(plan.create.styles.length || plan.create.variables.length ? { create: plan.create } : {}),
+    styleMap, variableMap, componentMap: cplan.componentMap, propKeyMap,
+    ...(create ? { create } : {}),
   });
   // Anything the target failed to create is detached.
   for (const [id, h] of Object.entries(plan.how.styles)) if (h === 'create' && !res.styleMap?.[id]) plan.how.styles[id] = 'detach';
   for (const [id, h] of Object.entries(plan.how.variables)) if (h === 'create' && !res.variableMap?.[id]) plan.how.variables[id] = 'detach';
 
-  const skipped: any[] = [...(res.skipped ?? [])];
+  const skipped: any[] = [...(compRes?.skipped ?? []), ...(res.skipped ?? [])];
   for (const u of summary.unsupported) skipped.push({ sourceId: u.sourceId, name: u.name, what: 'layer', reason: `${u.type} layers cannot be copied between files` });
   if (imageErrors.length) for (const e of imageErrors) skipped.push({ what: 'image', reason: `image ${e.hash.slice(0, 8)}: ${e.reason}` });
   if (img.videos) skipped.push({ what: 'video', reason: `${img.videos} video fill(s) cannot be copied between files` });
@@ -344,7 +450,11 @@ export async function copyBetweenFiles(
     missingFonts: res.missingFonts ?? [],
     styles: summarizeHow(plan.how.styles, exp.styles ?? {}),
     variables: summarizeHow(plan.how.variables, exp.variables ?? {}),
-    instances: { count: (exp.instances ?? []).length, detached: res.detachedInstances ?? 0 },
+    components: {
+      ...summarizeHow(cplan.how, refNames),
+      ...(compRes ? { copiedTo: { count: compRes.created ?? 0, roots: compRes.roots ?? [] } } : {}),
+    },
+    instances: { count: (exp.instances ?? []).length, detached: (res.detachedInstances ?? 0) + (compRes?.detachedInstances ?? 0) },
     skipped,
   };
 }
