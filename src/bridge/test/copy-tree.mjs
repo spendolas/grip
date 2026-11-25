@@ -113,6 +113,9 @@ function fakeFile({ prefix, name, styles = {}, variables = {}, readOnly = false,
   const page = new N('PAGE'); page.name = 'Page 1'; page.selection = [];
   const root = { name, getPluginData: () => '', setPluginData: () => { if (readOnly) throw new Error('Cannot write to a read-only document'); } };
   const vars = new Map(Object.entries(variables));
+  const cols = [];
+  const localStyles = [];
+  const makeStyle = (type) => () => { const st = { id: `${prefix}S:${seq++}`, key: `sk-${seq}`, type, name: '', description: '' }; if (type === 'TEXT') st.setBoundVariable = (f, v) => { st.boundVariables = { ...(st.boundVariables ?? {}), [f]: { type: 'VARIABLE_ALIAS', id: v.id } }; }; localStyles.push(st); return st; };
   const figma = {
     mixed, editorType: 'figma', root, currentPage: page, viewport: { scrollAndZoomIntoView() {} },
     createFrame: () => new N('FRAME'), createRectangle: () => new N('RECTANGLE'), createEllipse: () => new N('ELLIPSE'),
@@ -139,9 +142,27 @@ function fakeFile({ prefix, name, styles = {}, variables = {}, readOnly = false,
     async listAvailableFontsAsync() { return [...available].map((k) => { const [family, style] = k.split('|'); return { fontName: { family, style } }; }); },
     async getNodeByIdAsync(id) { return nodes.get(id) ?? null; },
     async getStyleByIdAsync(id) { return styles[id] ?? null; },
+    createPaintStyle: makeStyle('PAINT'), createTextStyle: makeStyle('TEXT'), createEffectStyle: makeStyle('EFFECT'), createGridStyle: makeStyle('GRID'),
+    async getLocalPaintStylesAsync() { return localStyles.filter((x) => x.type === 'PAINT'); },
+    async getLocalTextStylesAsync() { return localStyles.filter((x) => x.type === 'TEXT'); },
+    async getLocalEffectStylesAsync() { return []; },
+    async getLocalGridStylesAsync() { return []; },
     variables: {
+      async getLocalVariableCollectionsAsync() { return cols; },
+      async getLocalVariablesAsync() { return [...vars.values()].filter((v) => v.local); },
+      createVariableCollection(n) {
+        const c = { id: `${prefix}C:${seq++}`, name: n, modes: [{ modeId: `${prefix}M:${seq++}`, name: 'Mode 1' }] };
+        c.renameMode = (id, nm) => { c.modes.find((m) => m.modeId === id).name = nm; };
+        c.addMode = (nm) => { const id = `${prefix}M:${seq++}`; c.modes.push({ modeId: id, name: nm }); return id; };
+        cols.push(c); return c;
+      },
+      createVariable(n, col, type) {
+        const v = { id: `${prefix}V:${seq++}`, key: `vk-${seq}`, name: n, resolvedType: type, variableCollectionId: col.id, valuesByMode: {}, local: true, description: '' };
+        v.setValueForMode = (m, x) => { v.valuesByMode[m] = x; };
+        vars.set(v.id, v); return v;
+      },
       async getVariableByIdAsync(id) { return vars.get(id) ?? null; },
-      async getVariableCollectionByIdAsync() { return { name: 'Tokens' }; },
+      async getVariableCollectionByIdAsync() { return { name: 'Tokens', modes: [{ modeId: 'M:1', name: 'Light' }] }; },
       setBoundVariableForPaint(p, f, v) { return { ...p, boundVariables: { [f]: { type: 'VARIABLE_ALIAS', id: v.id } } }; },
       setBoundVariableForEffect(e, f, v) { return { ...e, boundVariables: { [f]: { type: 'VARIABLE_ALIAS', id: v.id } } }; },
     },
@@ -156,7 +177,7 @@ function fakeFile({ prefix, name, styles = {}, variables = {}, readOnly = false,
   });
   vm.runInContext(BLOCK, ctx);
   const add = (n, parent = page, props = {}) => { Object.assign(n, props); parent.appendChild(n); return n; };
-  return { figma, page, nodes, calls, ctx, N, T, C, add, loaded, run: (fn, params) => ctx[fn](params) };
+  return { figma, page, nodes, calls, ctx, N, T, C, add, loaded, cols, vars, localStyles, run: (fn, params) => ctx[fn](params) };
 }
 
 const wire = (x) => JSON.parse(JSON.stringify(x));
@@ -167,8 +188,8 @@ const at = (x, y) => [[1, 0, x], [0, 1, y]];
 // ---------------------------------------------------------------- source file
 const A = fakeFile({
   prefix: 'A', name: 'Source', fonts: [['Inter', 'Regular'], ['Inter', 'Bold'], ['Brand', 'Regular']],
-  styles: { 'S:1': { key: 'sk1', name: 'Brand/Blue', type: 'PAINT', remote: false } },
-  variables: { 'V:1': { id: 'V:1', key: 'vk1', name: 'color/primary', resolvedType: 'COLOR', remote: false, variableCollectionId: 'C:1' } },
+  styles: { 'S:1': { key: 'sk1', name: 'Brand/Blue', type: 'PAINT', remote: false, description: 'Primary', paints: [{ type: 'SOLID', color: { r: 0, g: 0, b: 1 } }] } },
+  variables: { 'V:1': { id: 'V:1', key: 'vk1', name: 'color/primary', resolvedType: 'COLOR', remote: false, variableCollectionId: 'C:1', valuesByMode: { 'M:1': { r: 0, g: 0, b: 1, a: 1 } } } },
 });
 // A local component used by an instance in the copied tree, with a TEXT property.
 const btn = A.add(new A.C(), A.page, { name: 'Btn', relativeTransform: at(900, 0) });
@@ -341,6 +362,55 @@ assert.strictEqual(wire(await A.run('exportTree', { useSelection: true })).roots
   eq(c2.missingFonts, [{ family: 'Brand', style: 'Regular' }]);
   ok.figma.editorType = 'dev';
   assert.strictEqual((await ok.run('copyCheck', {})).editable, false, 'Dev Mode is read-only');
+}
+
+// ---------------------------------------------------------------- 6. create styles and variables (create mode)
+{
+  const B = fakeFile({ prefix: 'B', name: 'Target' });
+  const existing = B.figma.variables.createVariableCollection('Primitives');
+  existing.renameMode(existing.modes[0].modeId, 'Light');
+  const res = wire(await B.run('importTree', {
+    roots: exp.roots,
+    create: {
+      variables: [
+        { srcId: 'V:1', name: 'color/primary', resolvedType: 'COLOR', collection: 'Tokens', collectionModes: ['Light', 'Dark'], modes: [{ mode: 'Light', value: { type: 'VARIABLE_ALIAS', id: 'V:2' } }, { mode: 'Dark', value: { r: 1, g: 1, b: 1, a: 1 } }] },
+        { srcId: 'V:2', name: 'blue/500', resolvedType: 'COLOR', collection: 'Primitives', collectionModes: ['Light'], modes: [{ mode: 'Light', value: { r: 0, g: 0, b: 1, a: 1 } }] },
+        { srcId: 'V:3', name: 'broken', resolvedType: 'COLOR', collection: 'Tokens', modes: [{ mode: 'Light', value: { type: 'VARIABLE_ALIAS', id: 'V:404' } }] },
+      ],
+      styles: [
+        { srcId: 'S:1', type: 'PAINT', name: 'Brand/Blue', value: { paints: [{ type: 'SOLID', color: { r: 0, g: 0, b: 1 }, boundVariables: { color: { type: 'VARIABLE_ALIAS', id: 'V:1' } } }] } },
+        { srcId: 'S:2', type: 'TEXT', name: 'Text/Title', value: { fontName: { family: 'Inter', style: 'Bold' }, fontSize: 24 } },
+      ],
+    },
+  }));
+  assert.strictEqual(res.createdVariables, 3);
+  assert.strictEqual(res.createdStyles, 2);
+  eq(B.cols.map((c) => [c.name, c.modes.map((m) => m.name)]), [['Primitives', ['Light']], ['Tokens', ['Light', 'Dark']]], 'existing collection reused, new one takes the source modes');
+  const v1 = B.vars.get(res.variableMap['V:1']), v2 = B.vars.get(res.variableMap['V:2']);
+  const tokens = B.cols[1];
+  eq(v1.valuesByMode[tokens.modes[0].modeId], { type: 'VARIABLE_ALIAS', id: v2.id }, 'alias re-aimed at the created variable');
+  eq(v1.valuesByMode[tokens.modes[1].modeId], { r: 1, g: 1, b: 1, a: 1 });
+  assert.ok(res.skipped.some((x) => x.name === 'broken' && /not copied/.test(x.reason)), 'alias to an unknown variable reported');
+  const paint = B.localStyles.find((x) => x.name === 'Brand/Blue');
+  eq(paint.paints[0].boundVariables, { color: { type: 'VARIABLE_ALIAS', id: v1.id } }, 'style paint bound to the created variable');
+  const text = B.localStyles.find((x) => x.name === 'Text/Title');
+  eq([text.fontName, text.fontSize], [{ family: 'Inter', style: 'Bold' }, 24]);
+  const copy = B.page.children[0];
+  assert.strictEqual(copy.fillStyleId, paint.id, 'layers use the created style');
+  eq(copy.fills[0].boundVariables, { color: { type: 'VARIABLE_ALIAS', id: v1.id } }, 'layers use the created variable');
+  // inventory: what the bridge matches against next time
+  const inv = wire(await B.run('copyCheck', { inventory: true })).inventory;
+  eq(inv.styles.map((x) => [x.name, x.type]), [['Brand/Blue', 'PAINT'], ['Text/Title', 'TEXT']]);
+  eq(inv.collections.map((c) => c.name), ['Primitives', 'Tokens']);
+  eq(inv.variables.map((v) => [v.name, v.collection]), [['color/primary', 'Tokens'], ['blue/500', 'Primitives'], ['broken', 'Tokens']]);
+}
+
+// ---------------------------------------------------------------- 7. export describes styles and variables fully
+{
+  eq(exp.styles['S:1'].value, { paints: [{ type: 'SOLID', color: { r: 0, g: 0, b: 1 } }] }, 'a style carries its value, so the target can recreate it');
+  assert.strictEqual(exp.styles['S:1'].description, 'Primary');
+  eq(exp.variables['V:1'].modes, [{ mode: 'Light', value: { r: 0, g: 0, b: 1, a: 1 } }], 'values by mode NAME');
+  eq(exp.variables['V:1'].direct, true);
 }
 
 console.log('copy-tree.mjs OK');

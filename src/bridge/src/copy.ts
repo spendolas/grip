@@ -19,6 +19,114 @@ export interface CopyOptions {
   select?: boolean;
   maxNodes?: number;
   reactions?: boolean;
+  styles?: DefMode;
+  variables?: DefMode;
+}
+
+// How styles / variables the copied layers use reach the target:
+// create = use the target's (same key, or same name) and create the missing
+// ones there (what a paste in Figma does); match = use the target's, detach the
+// rest (their values stay); detach = never link, keep plain values.
+export type DefMode = 'create' | 'match' | 'detach';
+export type How = 'key' | 'import' | 'name' | 'create' | 'detach';
+
+export interface Inventory {
+  styles: Array<{ id: string; key: string; name: string; type: string }>;
+  variables: Array<{ id: string; key: string; name: string; resolvedType: string; collection?: string }>;
+  collections?: Array<{ id: string; name: string; modes: string[] }>;
+}
+
+export interface DefPlan {
+  styleMap: Record<string, string>;
+  variableMap: Record<string, string>;
+  // Library items to import into the target by key before the copy (remote
+  // in the source); `imported` on the next planDefinitions call says how it went.
+  toImport: { styles: Array<{ srcId: string; key: string }>; variables: Array<{ srcId: string; key: string }> };
+  create: { styles: any[]; variables: any[] };
+  how: { styles: Record<string, How>; variables: Record<string, How> };
+}
+
+// Pure: decide, for every style and variable the copied layers use, how it
+// reaches the target. `imported` holds the results of earlier key imports
+// (target id, or null when the library is not available there).
+export function planDefinitions(
+  exp: { styles?: Record<string, any>; variables?: Record<string, any> },
+  inv: Inventory,
+  modes: { styles: DefMode; variables: DefMode },
+  imported: { styles: Record<string, string | null>; variables: Record<string, string | null> } = { styles: {}, variables: {} },
+): DefPlan {
+  const plan: DefPlan = {
+    styleMap: {}, variableMap: {}, toImport: { styles: [], variables: [] },
+    create: { styles: [], variables: [] }, how: { styles: {}, variables: {} },
+  };
+  // Styles
+  for (const st of Object.values(exp.styles ?? {}) as any[]) {
+    const set = (how: How, id?: string) => { plan.how.styles[st.id] = how; if (id) plan.styleMap[st.id] = id; };
+    if (modes.styles === 'detach') { set('detach'); continue; }
+    const byKey = inv.styles.find((t) => t.key && t.key === st.key);
+    if (byKey) { set('key', byKey.id); continue; }
+    if (st.remote && st.key) {
+      const r = imported.styles[st.id];
+      if (r === undefined) { plan.toImport.styles.push({ srcId: st.id, key: st.key }); continue; }
+      if (r) { set('import', r); continue; }
+    }
+    const byName = inv.styles.find((t) => t.name === st.name && t.type === st.type);
+    if (byName) { set('name', byName.id); continue; }
+    if (modes.styles === 'create' && st.value) {
+      set('create');
+      plan.create.styles.push({ srcId: st.id, type: st.type, name: st.name, description: st.description, value: st.value });
+      continue;
+    }
+    set('detach');
+  }
+  // Variables: the ones the layers (and styles) use, plus what the ones we
+  // create alias.
+  const all = exp.variables ?? {};
+  const queue = (Object.values(all) as any[]).filter((v) => v.direct !== false).map((v) => v.id);
+  const seen = new Set<string>();
+  while (queue.length) {
+    const id = queue.shift()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const v = all[id];
+    if (!v) continue;
+    const set = (how: How, tid?: string) => { plan.how.variables[id] = how; if (tid) plan.variableMap[id] = tid; };
+    if (modes.variables === 'detach') { set('detach'); continue; }
+    const byKey = inv.variables.find((t) => t.key && t.key === v.key);
+    if (byKey) { set('key', byKey.id); continue; }
+    if (v.remote && v.key) {
+      const r = imported.variables[id];
+      if (r === undefined) { plan.toImport.variables.push({ srcId: id, key: v.key }); continue; }
+      if (r) { set('import', r); continue; }
+    }
+    const sameType = inv.variables.filter((t) => t.name === v.name && t.resolvedType === v.resolvedType);
+    const byName = sameType.find((t) => t.collection === v.collection) ?? (sameType.length === 1 ? sameType[0] : undefined);
+    if (byName) { set('name', byName.id); continue; }
+    if (modes.variables === 'create') {
+      set('create');
+      plan.create.variables.push({
+        srcId: id, name: v.name, resolvedType: v.resolvedType, collection: v.collection, collectionModes: v.collectionModes,
+        modes: v.modes ?? [], scopes: v.scopes, description: v.description,
+      });
+      for (const m of v.modes ?? []) {
+        if (m.value && typeof m.value === 'object' && m.value.type === 'VARIABLE_ALIAS') queue.push(m.value.id);
+      }
+      continue;
+    }
+    set('detach');
+  }
+  return plan;
+}
+
+// Counts + named items (capped) for the report.
+export function summarizeHow(how: Record<string, How>, defs: Record<string, any>): Record<string, unknown> {
+  const counts: Record<string, number> = {};
+  const items: Array<{ name: string; how: How }> = [];
+  for (const [id, h] of Object.entries(how)) {
+    counts[h] = (counts[h] ?? 0) + 1;
+    if (items.length < 50) items.push({ name: defs[id]?.name ?? id, how: h });
+  }
+  return { referenced: Object.keys(how).length, ...counts, items };
 }
 
 export interface CopyArgs {
@@ -90,6 +198,13 @@ function countNodes(roots: any[]): number {
   return n;
 }
 
+// In a dry run nothing is imported yet: list library items as 'import'.
+function dryHow(how: Record<string, How>, toImport: Array<{ srcId: string }>): Record<string, How> {
+  const out = { ...how };
+  for (const t of toImport) out[t.srcId] = 'import';
+  return out;
+}
+
 export async function copyBetweenFiles(
   bridge: PluginBridge,
   mcp: McpSession,
@@ -123,7 +238,10 @@ export async function copyBetweenFiles(
     callContext.run({ fileTarget: sessionId }, () => bridge.request(method, params, mcp)) as Promise<T>;
 
   // Target first: a read-only target fails before anything is read.
-  const check = await on<any>(tgt.sessionId, 'copy_check', {});
+  const styleMode: DefMode = opts.styles ?? 'create';
+  const varMode: DefMode = opts.variables ?? 'create';
+  const needInv = styleMode !== 'detach' || varMode !== 'detach';
+  const check = await on<any>(tgt.sessionId, 'copy_check', needInv ? { inventory: true } : {});
   if (!check?.editable) {
     throw new Error(`copy_target_read_only: "${tgt.fileName}" cannot be edited (${check?.reason ?? check?.editorType ?? 'view only'}). Open it with edit access in Design mode, then retry.`);
   }
@@ -136,8 +254,9 @@ export async function copyBetweenFiles(
   const fonts: Array<{ family: string; style: string }> = exp.fonts ?? [];
   const fontCheck = fonts.length ? await on<any>(tgt.sessionId, 'copy_check', { fonts }) : { missingFonts: [] };
 
-  const styles = Object.values(exp.styles ?? {}) as any[];
-  const variables = Object.values(exp.variables ?? {}) as any[];
+  const inv: Inventory = check.inventory ?? { styles: [], variables: [] };
+  const modes = { styles: styleMode, variables: varMode };
+  let plan = planDefinitions(exp, inv, modes);
   const summary = {
     layers: exp.count ?? countNodes(roots),
     byType: exp.byType ?? {},
@@ -157,11 +276,27 @@ export async function copyBetweenFiles(
       ...base,
       wouldCopy: summary,
       missingFonts: fontCheck.missingFonts ?? [],
-      styles: { referenced: styles.length, willDetach: styles.length },
-      variables: { referenced: variables.length, willDetach: variables.length },
+      // 'import' here means: from a library, imported by key if the target has that library.
+      styles: summarizeHow(dryHow(plan.how.styles, plan.toImport.styles), exp.styles ?? {}),
+      variables: summarizeHow(dryHow(plan.how.variables, plan.toImport.variables), exp.variables ?? {}),
       instances: { count: (exp.instances ?? []).length, willDetach: (exp.instances ?? []).length },
       note: 'Nothing was written. Run again without dryRun to copy.',
     };
+  }
+
+  // Library styles/variables: import them into the target by key (rounds:
+  // a created variable can alias another library variable).
+  const imported = { styles: {} as Record<string, string | null>, variables: {} as Record<string, string | null> };
+  for (let round = 0; round < 5 && (plan.toImport.styles.length || plan.toImport.variables.length); round++) {
+    for (const it of plan.toImport.styles) {
+      try { imported.styles[it.srcId] = (await on<any>(tgt.sessionId, 'import_style_by_key', { key: it.key })).id ?? null; }
+      catch { imported.styles[it.srcId] = null; }
+    }
+    for (const it of plan.toImport.variables) {
+      try { imported.variables[it.srcId] = (await on<any>(tgt.sessionId, 'import_variable_by_key', { key: it.key })).id ?? null; }
+      catch { imported.variables[it.srcId] = null; }
+    }
+    plan = planDefinitions(exp, inv, modes, imported);
   }
 
   // Images: move the bytes, then point the paints at the target's hashes.
@@ -189,7 +324,13 @@ export async function copyBetweenFiles(
     ...(typeof opts.y === 'number' ? { y: opts.y } : {}),
     ...(opts.select ? { select: true } : {}),
     ...(opts.reactions === false ? { reactions: false } : {}),
+    styleMap: plan.styleMap,
+    variableMap: plan.variableMap,
+    ...(plan.create.styles.length || plan.create.variables.length ? { create: plan.create } : {}),
   });
+  // Anything the target failed to create is detached.
+  for (const [id, h] of Object.entries(plan.how.styles)) if (h === 'create' && !res.styleMap?.[id]) plan.how.styles[id] = 'detach';
+  for (const [id, h] of Object.entries(plan.how.variables)) if (h === 'create' && !res.variableMap?.[id]) plan.how.variables[id] = 'detach';
 
   const skipped: any[] = [...(res.skipped ?? [])];
   for (const u of summary.unsupported) skipped.push({ sourceId: u.sourceId, name: u.name, what: 'layer', reason: `${u.type} layers cannot be copied between files` });
@@ -201,8 +342,8 @@ export async function copyBetweenFiles(
     created: { count: res.created ?? 0, roots: res.roots ?? [], parentId: res.parentId },
     images: { moved: Object.keys(imageMap).length, failed: imageErrors.length },
     missingFonts: res.missingFonts ?? [],
-    styles: { referenced: styles.length, detached: styles.length },
-    variables: { referenced: variables.length, detached: variables.length },
+    styles: summarizeHow(plan.how.styles, exp.styles ?? {}),
+    variables: summarizeHow(plan.how.variables, exp.variables ?? {}),
     instances: { count: (exp.instances ?? []).length, detached: res.detachedInstances ?? 0 },
     skipped,
   };

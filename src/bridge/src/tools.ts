@@ -361,6 +361,8 @@ export const TOOLS: ToolDef[] = [
         select: z.boolean().optional(),
         maxNodes: z.number().int().positive().optional(),
         reactions: z.boolean().optional(),
+        styles: z.enum(['create', 'match', 'detach']).optional(),
+        variables: z.enum(['create', 'match', 'detach']).optional(),
       }).optional(),
       dryRun: z.boolean().optional(),
     }),

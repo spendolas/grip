@@ -5270,13 +5270,6 @@ async function exportTree(params: any): Promise<any> {
 
   // Describe every style and variable the tree refers to, so the bridge can
   // map them to the target by key or name.
-  const styles: Record<string, any> = {};
-  for (const id of styleIds) {
-    try {
-      const s = await figma.getStyleByIdAsync(id);
-      if (s) styles[id] = { id, key: s.key, name: s.name, type: s.type, remote: s.remote };
-    } catch { /* unreadable */ }
-  }
   const varIds = new Set<string>();
   const walkAlias = (v: any) => {
     if (!v || typeof v !== 'object') return;
@@ -5284,15 +5277,42 @@ async function exportTree(params: any): Promise<any> {
     if (v.type === 'VARIABLE_ALIAS' && typeof v.id === 'string') varIds.add(v.id);
     for (const x of Object.values(v)) walkAlias(x);
   };
+  const styles: Record<string, any> = {};
+  for (const id of styleIds) {
+    try {
+      const s = await figma.getStyleByIdAsync(id);
+      if (s) {
+        styles[id] = { id, key: s.key, name: s.name, type: s.type, remote: s.remote, description: s.description, value: copyStyleValue(s) };
+        walkAlias(styles[id].value);
+      }
+    } catch { /* unreadable */ }
+  }
   walkAlias(roots);
+  walkAlias(components);
+  // Variables, plus every variable their values alias (so a created token
+  // keeps its chain), with values by mode NAME.
   const variables: Record<string, any> = {};
-  for (const id of varIds) {
+  const direct = new Set(varIds);
+  const todo = [...varIds];
+  while (todo.length) {
+    const id = todo.shift()!;
+    if (variables[id]) continue;
     try {
       const v = await figma.variables.getVariableByIdAsync(id);
       if (!v) continue;
-      let collection: string | undefined;
-      try { collection = (await figma.variables.getVariableCollectionByIdAsync(v.variableCollectionId))?.name; } catch { /* ignore */ }
-      variables[id] = { id, key: v.key, name: v.name, resolvedType: v.resolvedType, remote: v.remote, collection };
+      let col: VariableCollection | null = null;
+      try { col = await figma.variables.getVariableCollectionByIdAsync(v.variableCollectionId); } catch { /* ignore */ }
+      const modes: Array<{ mode: string; value: any }> = [];
+      for (const [modeId, val] of Object.entries(v.valuesByMode ?? {})) {
+        const name = col?.modes?.find((m) => m.modeId === modeId)?.name ?? modeId;
+        modes.push({ mode: name, value: copyPlain(val) });
+        if (val && typeof val === 'object' && (val as any).type === 'VARIABLE_ALIAS' && !variables[(val as any).id]) todo.push((val as any).id);
+      }
+      variables[id] = {
+        id, key: v.key, name: v.name, resolvedType: v.resolvedType, remote: v.remote,
+        collection: col?.name, collectionModes: col?.modes?.map((m) => m.name), modes,
+        scopes: copyPlain((v as any).scopes), description: v.description, direct: direct.has(id),
+      };
     } catch { /* unreadable */ }
   }
 
@@ -5303,6 +5323,117 @@ async function exportTree(params: any): Promise<any> {
     styles, variables, instances,
     file: { fileName: figma.root.name, pageId: figma.currentPage.id },
   };
+}
+
+// What a style looks like, so the target can recreate it.
+function copyStyleValue(s: BaseStyle): any {
+  const x = s as any;
+  try {
+    if (s.type === 'PAINT') return { paints: copyPlain(x.paints) };
+    if (s.type === 'EFFECT') return { effects: copyPlain(x.effects) };
+    if (s.type === 'GRID') return { layoutGrids: copyPlain(x.layoutGrids) };
+    if (s.type === 'TEXT') {
+      const o: any = {};
+      for (const k of ['fontName', 'fontSize', 'lineHeight', 'letterSpacing', 'textCase', 'textDecoration', 'paragraphSpacing', 'paragraphIndent', 'leadingTrim', 'listSpacing']) {
+        if (k in x && x[k] !== undefined) o[k] = copyPlain(x[k]);
+      }
+      try { if (x.boundVariables && Object.keys(x.boundVariables).length) o.boundVariables = copyPlain(x.boundVariables); } catch { /* ignore */ }
+      return o;
+    }
+  } catch { /* unreadable */ }
+  return null;
+}
+
+// The target's own styles, variables and collections (ids, keys, names), so
+// the bridge can match the source's by key or name.
+async function copyInventory(): Promise<any> {
+  const styles: any[] = [];
+  const lists = await Promise.all([
+    figma.getLocalPaintStylesAsync(), figma.getLocalTextStylesAsync(), figma.getLocalEffectStylesAsync(), figma.getLocalGridStylesAsync(),
+  ]);
+  for (const l of lists) for (const st of l) styles.push({ id: st.id, key: st.key, name: st.name, type: st.type });
+  const collections: any[] = [];
+  const cols = await figma.variables.getLocalVariableCollectionsAsync();
+  const byCol = new Map<string, string>();
+  for (const c of cols) { collections.push({ id: c.id, name: c.name, modes: c.modes.map((m) => m.name) }); byCol.set(c.id, c.name); }
+  const variables = (await figma.variables.getLocalVariablesAsync()).map((v) => ({
+    id: v.id, key: v.key, name: v.name, resolvedType: v.resolvedType, collection: byCol.get(v.variableCollectionId),
+  }));
+  return { styles, variables, collections };
+}
+
+// Create the styles and variables the bridge could not match (create mode).
+// Variables first (styles may bind them), aliases after every variable exists.
+async function copyCreate(create: any, ctx: CopyCtx): Promise<{ styles: number; variables: number }> {
+  let ns = 0, nv = 0;
+  const vars: any[] = Array.isArray(create?.variables) ? create.variables : [];
+  const made: Array<{ v: Variable; spec: any; col: VariableCollection }> = [];
+  const colCache = new Map<string, VariableCollection>();
+  const fresh = new Set<string>();
+  for (const spec of vars) {
+    try {
+      const colName = String(spec.collection ?? 'Copied');
+      let col = colCache.get(colName);
+      if (!col) {
+        col = (await figma.variables.getLocalVariableCollectionsAsync()).find((c) => c.name === colName);
+        if (!col) { col = figma.variables.createVariableCollection(colName); fresh.add(col.id); }
+        colCache.set(colName, col);
+      }
+      // Modes by name: a new collection takes the source's modes; an existing
+      // one gets the missing ones added when the plan allows.
+      const wantModes: string[] = Array.isArray(spec.collectionModes) && spec.collectionModes.length ? spec.collectionModes : spec.modes.map((m: any) => m.mode);
+      if (fresh.has(col.id) && col.modes.length === 1 && wantModes.length && col.modes[0].name !== wantModes[0]) col.renameMode(col.modes[0].modeId, wantModes[0]);
+      for (const mName of wantModes) {
+        if (!col.modes.some((m) => m.name === mName)) {
+          try { col.addMode(mName); } catch (e) { copySkip(ctx, { name: spec.name }, `mode ${mName}`, e); }
+        }
+      }
+      const v = figma.variables.createVariable(String(spec.name), col, spec.resolvedType);
+      if (spec.description) v.description = spec.description;
+      if (Array.isArray(spec.scopes)) { try { v.scopes = spec.scopes; } catch { /* ignore */ } }
+      ctx.variableMap[spec.srcId] = v.id;
+      made.push({ v, spec, col });
+      nv++;
+    } catch (e) { copySkip(ctx, { name: spec.name }, 'variable', e); }
+  }
+  for (const { v, spec, col } of made) {
+    for (const m of spec.modes ?? []) {
+      const mode = col.modes.find((x) => x.name === m.mode) ?? (spec.modes.length === 1 ? col.modes[0] : undefined);
+      if (!mode) continue;
+      let val = m.value;
+      if (val && typeof val === 'object' && val.type === 'VARIABLE_ALIAS') {
+        const to = ctx.variableMap[val.id];
+        if (!to) { copySkip(ctx, { name: spec.name }, `value in ${m.mode}`, 'it aliases a variable that was not copied'); continue; }
+        val = { type: 'VARIABLE_ALIAS', id: to };
+      }
+      try { v.setValueForMode(mode.modeId, val); } catch (e) { copySkip(ctx, { name: spec.name }, `value in ${m.mode}`, e); }
+    }
+  }
+  for (const spec of Array.isArray(create?.styles) ? create.styles : []) {
+    try {
+      const val = spec.value ?? {};
+      let st: any;
+      if (spec.type === 'PAINT') { st = figma.createPaintStyle(); await copySetList(st, 'paints' as any, val.paints ?? [], ctx, spec); }
+      else if (spec.type === 'EFFECT') { st = figma.createEffectStyle(); await copySetList(st, 'effects', val.effects ?? [], ctx, spec); }
+      else if (spec.type === 'GRID') { st = figma.createGridStyle(); await copySetList(st, 'layoutGrids', val.layoutGrids ?? [], ctx, spec); }
+      else if (spec.type === 'TEXT') {
+        st = figma.createTextStyle();
+        if (val.fontName) st.fontName = await copyLoadFont(val.fontName, ctx);
+        for (const k of ['fontSize', 'lineHeight', 'letterSpacing', 'textCase', 'textDecoration', 'paragraphSpacing', 'paragraphIndent', 'leadingTrim', 'listSpacing']) {
+          if (k in val) { try { st[k] = val[k]; } catch (e) { copySkip(ctx, spec, k, e); } }
+        }
+        for (const [f, a] of Object.entries((val.boundVariables ?? {}) as Record<string, any>)) {
+          const v = a && a.type === 'VARIABLE_ALIAS' ? await copyVariable(a.id, ctx) : null;
+          if (v) { try { st.setBoundVariable(f, v); } catch (e) { copySkip(ctx, spec, `variable ${f}`, e); } }
+        }
+      } else continue;
+      st.name = String(spec.name);
+      if (spec.description) st.description = spec.description;
+      ctx.styleMap[spec.srcId] = st.id;
+      ns++;
+    } catch (e) { copySkip(ctx, spec, 'style', e); }
+  }
+  return { styles: ns, variables: nv };
 }
 
 // Is this file writable, and which of these fonts can it load? Writes the
@@ -5328,7 +5459,8 @@ async function copyCheck(params: any): Promise<any> {
     const avail = new Set((await figma.listAvailableFontsAsync()).map((f) => `${f.fontName.family}|${f.fontName.style}`));
     missingFonts = want.filter((f: any) => f && !avail.has(`${f.family}|${f.style}`));
   }
-  return { editable, editorType, ...(reason ? { reason } : {}), missingFonts, currentPageId: figma.currentPage.id, currentPageName: figma.currentPage.name, fileName: figma.root.name };
+  const inventory = params.inventory ? await copyInventory() : undefined;
+  return { editable, editorType, ...(reason ? { reason } : {}), missingFonts, ...(inventory ? { inventory } : {}), currentPageId: figma.currentPage.id, currentPageName: figma.currentPage.name, fileName: figma.root.name };
 }
 
 interface CopyCtx {
@@ -5389,7 +5521,7 @@ async function copyVariable(id: string, ctx: CopyCtx): Promise<Variable | null> 
   try { return await figma.variables.getVariableByIdAsync(mapped); } catch { return null; }
 }
 
-async function copySetList(node: any, key: 'fills' | 'strokes' | 'effects' | 'layoutGrids', list: any[], ctx: CopyCtx, spec: any) {
+async function copySetList(node: any, key: 'fills' | 'strokes' | 'paints' | 'effects' | 'layoutGrids', list: any[], ctx: CopyCtx, spec: any) {
   const { clean, binds } = copySplitBindings(list);
   let out = clean;
   for (const b of binds) {
@@ -5397,7 +5529,7 @@ async function copySetList(node: any, key: 'fills' | 'strokes' | 'effects' | 'la
     if (!v) continue;
     try {
       const fv = figma.variables as any;
-      if (key === 'fills' || key === 'strokes') out[b.i] = fv.setBoundVariableForPaint(out[b.i], b.field, v);
+      if (key === 'fills' || key === 'strokes' || key === 'paints') out[b.i] = fv.setBoundVariableForPaint(out[b.i], b.field, v);
       else if (key === 'effects') out[b.i] = fv.setBoundVariableForEffect(out[b.i], b.field, v);
       else out[b.i] = fv.setBoundVariableForLayoutGrid(out[b.i], b.field, v);
     } catch (e) { copySkip(ctx, spec, `${key} variable ${b.field}`, e); }
@@ -5752,6 +5884,7 @@ async function importTree(params: any): Promise<any> {
     styleMap: params.styleMap ?? {}, variableMap: params.variableMap ?? {}, componentMap: params.componentMap ?? {},
     propKeyMap: params.propKeyMap ?? {}, detached: 0, reactions: [], refs: [],
   };
+  const createdDefs = params.create ? await copyCreate(params.create, ctx) : { styles: 0, variables: 0 };
   // Shift so the first root lands at (x, y) when given; else keep each root's
   // position on the page (absolute) or in the parent (relative).
   const first = roots[0];
@@ -5781,6 +5914,8 @@ async function importTree(params: any): Promise<any> {
   }
   return {
     roots: made, created: Object.keys(ctx.idMap).length, detachedInstances: ctx.detached,
+    createdStyles: createdDefs.styles, createdVariables: createdDefs.variables,
+    styleMap: ctx.styleMap, variableMap: ctx.variableMap,
     missingFonts: ctx.missingFonts, skipped: ctx.skipped, ...(params.returnIdMap ? { idMap: ctx.idMap, propKeyMap: ctx.propKeyMap } : {}),
     parentId: (container as BaseNode).id,
   };
