@@ -159,7 +159,9 @@ jobs:
           if [ "$(node -p "require('./flavour/flavour.json').payloadLoader === true")" = "true" ]; then
             echo "::notice::Loader flavour: running the flavour-agnostic checks; the full shared suite runs upstream."
             npm run build
-            node --test scripts/ed25519-check.test.mjs scripts/payload.test.mjs scripts/build-shell.test.mjs scripts/sign-release.test.mjs scripts/audit-gate.test.mjs scripts/workflow-paths.test.mjs
+            node --test scripts/ed25519-check.test.mjs scripts/payload.test.mjs scripts/build-shell.test.mjs scripts/sign-release.test.mjs scripts/audit-gate.test.mjs
+            # a snapshot repo proves its shared tree was not edited (scripts/snapshot-check.mjs, UPSTREAM.json)
+            if [ -f UPSTREAM.json ]; then node scripts/snapshot-check.mjs; fi
           else
             npm test
           fi
