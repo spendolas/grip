@@ -2,6 +2,16 @@
 
 Newest first. Each `## <version>` heading is the exact version number; the GitHub Release for that version uses its section as the release notes. The history starts at 0.6.0.
 
+## 0.10.0
+
+**Grip can now be built as separate flavours that never mix, and updates are checked more strictly. Nothing changes in how you use Grip.**
+
+- **Flavours.** One flavour file now decides a build's ports, home folder, names, plugin id and where it looks for releases. This build is the public flavour and behaves as before. A bridge and a plugin of different flavours refuse each other at the first message, pairing proofs cannot cross between flavours, and a flavour cannot install an update meant for another one.
+- **Stricter updates.** Each flavour pins its own release signing key, and the signature covers which flavour a release is for, so a release for another flavour is refused even if it is correctly signed. Downloads are only accepted from the release repository itself, including after redirects, and file names with path tricks are rejected. Where a flavour locks its settings, the environment variables that point updates at another server or key are ignored.
+- **Warning about an old, insecure Grip.** A flavour can be told which other Grip builds to watch for. If it finds a bridge older than a version it names, it warns with a tooltip, a toast and a note to your agent about once a minute, and offers `remove-foreign` to list and remove it. It never blocks anything. The public flavour watches for nothing.
+- **Plugin.** The plugin strip understands the new warning (only used by flavours that turn it on). Older plugins keep working with this bridge.
+- **Under the hood.** A build option for a small "shell" plugin that runs a signed plugin payload from the bridge (used only by flavours that turn it on), release scripts that name the target repository from the flavour file, and an export script for flavour repositories.
+
 ## 0.9.6
 
 **Only your Figma plugin can talk to the bridge, and files an agent reads or writes are kept to safe places. Update the plugin too.**
