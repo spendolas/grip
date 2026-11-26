@@ -17,6 +17,7 @@ import { HttpServer } from './http-server.js';
 import { runProxy } from './proxy.js';
 import { isUpdateCli, runUpdateCli } from './update-cli.js';
 import { isPairCli, runPairCli } from './pair-cli.js';
+import { isRemoteCli, runRemoteCli } from './remote-cli.js';
 import { isForeignCli, runForeignCli } from './foreign-cli.js';   // phase 2B
 import { PairingStore } from './pairing.js';
 import { IDENTITY } from './identity.js';
@@ -48,6 +49,8 @@ const IS_DAEMON = process.argv.includes('--daemon');
 const IS_UPDATE_CLI = !IS_DAEMON && isUpdateCli(process.argv);
 // `pair` configures plugin pairing through files only (pair-cli.ts): same rules as `update`.
 const IS_PAIR_CLI = !IS_DAEMON && isPairCli(process.argv);
+// `remote` edits the remote-access policy file only (remote-cli.ts): same rules as `pair`.
+const IS_REMOTE_CLI = !IS_DAEMON && isRemoteCli(process.argv);
 // >>> phase 2B: `remove-foreign [--yes]` (foreign-cli.ts): same rules, never starts a daemon
 const IS_FOREIGN_CLI = !IS_DAEMON && isForeignCli(process.argv);
 // <<< phase 2B
@@ -60,7 +63,7 @@ const MAX_LIFETIME_MS = 6 * 60 * 60 * 1000;
 // Mirror stderr to ~/.grip-bridge.log (or GRIP_LOG_PATH) so forensics
 // survive across crashes. Done in-process — no bash wrap, no PATH issue.
 // Goes to both real stderr (so MCP clients can read it) AND the file.
-if (!IS_UPDATE_CLI && !IS_PAIR_CLI && !IS_FOREIGN_CLI) (() => {
+if (!IS_UPDATE_CLI && !IS_PAIR_CLI && !IS_REMOTE_CLI && !IS_FOREIGN_CLI) (() => {
   try {
     const path = IDENTITY.logPath;
     // The log holds the full code of every run_script and file names: owner-only, and
@@ -249,7 +252,7 @@ async function runDaemon(bridge: PluginBridge) {
         // The CLI (`update`) has no WebSocket of its own: it reads the connected
         // plugin versions from here to check compatibility before installing.
         plugins: snap.plugins.map((p) => ({
-          pluginVersion: p.pluginVersion, fileName: p.fileName, wsReady: p.wsReady, hello: p.hello, minBridge: p.minBridge,
+          pluginVersion: p.pluginVersion, fileName: p.fileName, fileKey: p.fileKey, wsReady: p.wsReady, hello: p.hello, minBridge: p.minBridge,
           protocol: p.protocol, minBridgeProtocol: p.minBridgeProtocol,
         })),
         pendingCount: snap.pendingCount,
@@ -432,6 +435,9 @@ async function main() {
   }
   if (IS_PAIR_CLI) {
     process.exit(runPairCli(process.argv));
+  }
+  if (IS_REMOTE_CLI) {
+    process.exit(runRemoteCli(process.argv));
   }
   if (IS_FOREIGN_CLI) {   // phase 2B
     process.exit(await runForeignCli(process.argv));

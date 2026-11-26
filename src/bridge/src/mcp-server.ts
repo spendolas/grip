@@ -26,6 +26,7 @@ import {
   helpNotices, pluginsBehind, findPluginCopies, copyNeedsWork,
   type UpdateState, type PluginInfo,
 } from './update.js';
+import { remotePolicyStore, remoteToolAllowed, remoteToolListed, remoteFileAllowed, isRemoteFileKey } from './remote-policy.js';
 // >>> phase 2B: insecure-Grip guard
 import { getForeignGuard, foreignGripSummary, foreignAlertTexts, ownInfo, type ForeignSummary, type ForeignAlertTexts } from './foreign-guard.js';
 
@@ -195,6 +196,7 @@ function wireBridgeEvents(bridge: PluginBridge) {
   eventsWired = true;
   bridge.on('event', (evt: BridgeEvent) => {
     for (const { server, session } of liveSessions) {
+      if (session.remote) continue;   // remote sessions never get events
       const subbed =
         (evt.event === 'selectionchange' && session.subscriptions.selection) ||
         (evt.event === 'documentchange' && session.subscriptions.document) ||
@@ -235,8 +237,35 @@ function otherSessions(self: McpSession): McpSession[] {
   return liveSessions.map((l) => l.session).filter((s) => s !== self);
 }
 
-export function createSession(bridge: PluginBridge): LiveSession {
+// A remote session (an agent that is not on this Mac): see remote-policy.ts.
+export interface RemoteSessionOptions {
+  clientId: string;
+  // Which allowed file to bind; may be omitted when remote.json allows exactly one.
+  file?: string;
+}
+
+export class RemoteSessionError extends Error {
+  constructor(readonly code: 'remote_disabled' | 'remote_no_files' | 'remote_file_required' | 'remote_file_denied' | 'remote_bind_failed', message: string) {
+    super(`${code}: ${message}`);
+  }
+}
+
+// Throws RemoteSessionError when the policy does not allow a remote session right now.
+function pickRemoteFile(opts: RemoteSessionOptions): string {
+  const p = remotePolicyStore().read();
+  if (!p.enabled) throw new RemoteSessionError('remote_disabled', 'remote access is switched off on this Mac');
+  if (!p.files.length) throw new RemoteSessionError('remote_no_files', 'no Figma file is allowed for remote access on this Mac');
+  if (opts.file !== undefined) {
+    if (!isRemoteFileKey(opts.file) || !p.files.includes(opts.file)) throw new RemoteSessionError('remote_file_denied', 'that file is not allowed for remote access');
+    return opts.file;
+  }
+  if (p.files.length > 1) throw new RemoteSessionError('remote_file_required', `${p.files.length} files are allowed; name one`);
+  return p.files[0];
+}
+
+export function createSession(bridge: PluginBridge, opts: { remote?: RemoteSessionOptions } = {}): LiveSession {
   wireBridgeEvents(bridge);
+  const remoteFile = opts.remote ? pickRemoteFile(opts.remote) : null;
 
   const session: McpSession = {
     id: uuid(),
@@ -247,12 +276,25 @@ export function createSession(bridge: PluginBridge): LiveSession {
     toolScopeSpec: null,
     updateNoticeSent: false,
   };
+  if (opts.remote && remoteFile) {
+    // Bound before the session exists anywhere else; it can never rebind (set_active_file,
+    // on_file and `file` arguments are denied), and every call re-checks the binding.
+    session.remote = { clientId: String(opts.remote.clientId).slice(0, 128), fileKey: remoteFile };
+    bridge.bindFromLaunch(remoteFile, session);
+    if (session.bind?.key !== remoteFile) {
+      throw new RemoteSessionError('remote_bind_failed', 'could not bind the allowed file');
+    }
+    // Update / help / foreign notices ask for actions only this Mac's user can take.
+    session.updateNoticeSent = true;
+    session.helpNoticeSent = true;
+    session.foreignNoticeSent = true;
+  }
   // Agent update notice (this paragraph + the first tool result's text block):
   // only when an update is signalled (available AND compatible with every
   // connected plugin) and not already shown for this version in the last 3
   // days, across sessions. The purple strip is not throttled.
   let updateParagraph = '';
-  if (!updatesDisabled()) {
+  if (!session.remote && !updatesDisabled()) {
     const u = getUpdateState();
     if (u && updateSignal(u, pluginInfos(bridge)).signal) {
       if (claimNotice(u.latest!)) { session.updateNoticeGranted = true; updateParagraph = updateInstructionsParagraph(u); }
@@ -266,7 +308,11 @@ export function createSession(bridge: PluginBridge): LiveSession {
     if (granted.length) session.helpNoticesGranted = granted;
   }
   // >>> phase 2B: an insecure foreign Grip is told to EVERY session (no throttle, not silenced by GRIP_NO_UPDATE_CHECK)
-  { const fx = foreignNow().texts; if (fx) updateParagraph += `\n\n${fx.instructions}`; }
+  if (!session.remote) { const fx = foreignNow().texts; if (fx) updateParagraph += `\n\n${fx.instructions}`; }
+  if (session.remote) {
+    updateParagraph += '\n\nThis is a remote session: it works on one Figma file chosen by the user on their Mac, ' +
+      'with the tools they allowed. Calls outside that fail with remote_denied; do not try to work around it.';
+  }
   // <<< phase 2B
   // `instructions` is returned with initialize and injected into the agent's
   // context once — unlike tool descriptions, it costs nothing per tool and is
@@ -304,6 +350,17 @@ export function createSession(bridge: PluginBridge): LiveSession {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
+    if (session.remote) {
+      // Remote: exactly what the policy allows now (tool scope does not widen or narrow it).
+      const p = remotePolicyStore().read();
+      return {
+        tools: TOOLS.filter((t) => remoteToolListed(p, t.name)).map((t) => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: toolInputSchema(t.name),
+        })),
+      };
+    }
     const scope = resolveToolScope(session.toolScopeSpec);
     return {
       tools: TOOLS.filter((t) => toolInScope(t.name, scope)).map((t) => ({
@@ -332,7 +389,16 @@ export function createSession(bridge: PluginBridge): LiveSession {
     // Per-call context the bridge fills in (time spent queued behind other
     // calls, a retry hint on plugin_working / plugin_busy / plugin_overloaded).
     const ctx: CallContext = {};
-    const res = await callContext.run(ctx, () => handleCall(name, args));
+    let callArgs = args;
+    if (session.remote) {
+      const gate = remoteGate(name, args);
+      if (gate) {
+        process.stderr.write(`[grip] « ${sid} ${name} remote_denied\n`);
+        return errorResult(`remote_denied: ${gate}`);
+      }
+      callArgs = remoteArgs(name, args);
+    }
+    const res = await callContext.run(ctx, () => handleCall(name, callArgs));
     if ((ctx.queuedMs ?? 0) >= QUEUED_NOTE_MS || ctx.retryAfterMs !== undefined) {
       const meta: Record<string, unknown> = { ...((res as any)._meta ?? {}) };
       if ((ctx.queuedMs ?? 0) >= QUEUED_NOTE_MS) meta['grip/queuedMs'] = ctx.queuedMs;
@@ -384,6 +450,27 @@ export function createSession(bridge: PluginBridge): LiveSession {
     );
     return res;
   });
+
+  // Remote sessions: null = allowed, else the reason. Re-reads remote.json on every call, so
+  // `remote off` / `deny-file` / an expired write window apply to live sessions at once.
+  function remoteGate(name: string, args: Record<string, unknown>): string | null {
+    const r = session.remote!;
+    const p = remotePolicyStore().read();
+    const t = remoteToolAllowed(p, name, args);
+    if (!t.ok) return t.reason;
+    if (!remoteFileAllowed(p, r.fileKey)) return 'this file is no longer allowed for remote access on this Mac';
+    if (session.bind?.key !== r.fileKey) return 'this session is no longer bound to its file';
+    return null;
+  }
+  // Remote calls never move the user's page and never write to this Mac's disk.
+  function remoteArgs(name: string, args: Record<string, unknown>): Record<string, unknown> {
+    if (name === 'set_selection' || name === 'scroll_to') return { ...args, keepPage: true };
+    if (name === 'export_node') {
+      const f = String(args.format ?? '');
+      if (f !== 'SVG' && f !== 'CSS' && f !== 'JSON') return { ...args, inline: true };
+    }
+    return args;
+  }
 
   // Run `fn` with the call aimed at `file` for this one call (bridge.request reads
   // callContext.fileTarget). The session's own bind/pin never change. The

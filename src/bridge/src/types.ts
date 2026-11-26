@@ -178,6 +178,10 @@ export interface McpSession {
   helpNoticesGranted?: string[];
   // phase 2B: the insecure-foreign-Grip notice was put on a tool result of this session (once, every session).
   foreignNoticeSent?: boolean;
+  // Set when this session is a REMOTE agent (not on this Mac): every call is checked
+  // against <GRIP_HOME>/remote.json (remote-policy.ts), the session is bound to exactly
+  // one allowed file and can never rebind, and it gets no events. Absent = local (as before).
+  remote?: { clientId: string; fileKey: string };
 }
 
 export interface SerializedPaint {
