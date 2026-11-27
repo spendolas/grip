@@ -8,6 +8,7 @@ import {
   RemotePolicyStore, isRemoteFileKey, writeArmed, DEFAULT_WRITE_MINUTES, MAX_WRITE_MINUTES, type RemotePolicy,
 } from './remote-policy.js';
 import { liveIdentity } from './identity.js';
+import { auditPolicy, auditSummary, filterAudit, formatEntry, parseSince, readAudit, auditPath } from './remote-audit.js';
 
 export function isRemoteCli(argv: string[]): boolean {
   if (argv.includes('--daemon')) return false;
@@ -57,7 +58,7 @@ function describe(p: RemotePolicy, now = Date.now()): string[] {
   return lines;
 }
 
-const USAGE = 'usage: remote status | on | off | allow-file <key|figma.com URL|exact file name> | deny-file <key|URL> | mode read | mode write [--minutes N]';
+const USAGE = 'usage: remote status | on | off | allow-file <key|figma.com URL|exact file name> | deny-file <key|URL> | mode read | mode write [--minutes N] | log [--tail N] [--since 1h] [--json] [--denied]';
 
 export function runRemoteCli(argv: string[], io: { out?: Out; err?: Out; store?: RemotePolicyStore; statusPath?: string; now?: () => number } = {}): number {
   const out: Out = io.out ?? ((m = '') => { process.stdout.write(m + '\n'); });
@@ -67,20 +68,25 @@ export function runRemoteCli(argv: string[], io: { out?: Out; err?: Out; store?:
   const now = io.now ?? Date.now;
   const [cmd = 'status', ...rest] = argv.slice(3);
   const p = store.read();
+  const home = store.dir;
 
   switch (cmd) {
     case 'status':
     case '--status':
       for (const l of describe(p, now())) out(l);
+      { const a = auditSummary(readAudit(home), 86_400_000, now());
+        out(`audit, last 24h: ${a.calls} remote call(s), ${a.denied} denied, ${a.errors} error(s) (\`remote log\` for details)`); }
       out(`(${store.path})`);
       return 0;
     case 'on':
       if (!p.files.length) { err('Refusing: no file is allowed yet. Run `remote allow-file <key|URL|name>` first.'); return 1; }
       store.write({ ...p, enabled: true });
+      auditPolicy({ event: 'remote_on', by: 'cli' }, home);
       out(`Remote access is ON for ${p.files.length} file(s), ${writeArmed(p, now()) ? 'write armed' : 'read only'}.`);
       return 0;
     case 'off':
       store.write({ ...p, enabled: false });
+      auditPolicy({ event: 'remote_off', by: 'cli' }, home);
       out('Remote access is off. Remote sessions are refused from their next call.');
       return 0;
     case 'allow-file': {
@@ -89,6 +95,7 @@ export function runRemoteCli(argv: string[], io: { out?: Out; err?: Out; store?:
       if ('error' in r) { err(r.error); return 1; }
       if (p.files.includes(r.key)) { out(`Already allowed: ${r.key}`); return 0; }
       store.write({ ...p, files: [...p.files, r.key] });
+      auditPolicy({ event: 'allow_file', by: 'cli', fileKey: r.key }, home);
       out(`Allowed for remote access: ${r.key}${p.enabled ? '' : ' (remote access is still off: `remote on`)'}`);
       return 0;
     }
@@ -100,6 +107,8 @@ export function runRemoteCli(argv: string[], io: { out?: Out; err?: Out; store?:
       const files = p.files.filter((f) => f !== key);
       // The last file gone: switch off too, so `on` with no file can never be the state.
       store.write({ ...p, files, enabled: files.length ? p.enabled : false });
+      auditPolicy({ event: 'deny_file', by: 'cli', fileKey: key }, home);
+      if (!files.length && p.enabled) auditPolicy({ event: 'remote_off', by: 'cli' }, home);
       out(`Removed: ${key}${!files.length && p.enabled ? '. No file is left, so remote access is now off.' : ''}`);
       return 0;
     }
@@ -108,6 +117,7 @@ export function runRemoteCli(argv: string[], io: { out?: Out; err?: Out; store?:
       if (m === 'read') {
         const { writeUntil: _w, ...keep } = p;
         store.write({ ...keep, mode: 'read' });
+        auditPolicy({ event: 'mode_read', by: 'cli' }, home);
         out('Remote mode: read only.');
         return 0;
       }
@@ -122,10 +132,35 @@ export function runRemoteCli(argv: string[], io: { out?: Out; err?: Out; store?:
         }
         const until = now() + Math.round(minutes * 60_000);
         store.write({ ...p, mode: 'write', writeUntil: until });
+        auditPolicy({ event: 'write_armed', by: 'cli', until: new Date(until).toISOString(), minutes }, home);
         out(`Remote write access armed for ${minutes} min (until ${new Date(until).toLocaleString()}); read only after that.${p.enabled ? '' : ' Remote access is still off: `remote on`.'}`);
         return 0;
       }
       err(USAGE); return 2;
+    }
+    case 'log': {
+      const f: { tail?: number; sinceMs?: number; denied?: boolean } = {};
+      let json = false;
+      for (let i = 0; i < rest.length; i++) {
+        const a = rest[i];
+        if (a === '--json') json = true;
+        else if (a === '--denied') f.denied = true;
+        else if (a === '--tail') {
+          const n = Number(rest[++i]);
+          if (!Number.isInteger(n) || n < 0) { err('--tail needs a whole number'); return 2; }
+          f.tail = n;
+        } else if (a === '--since') {
+          const ms = parseSince(rest[++i] ?? '');
+          if (ms === undefined) { err('--since needs a duration like 30m, 1h or 2d'); return 2; }
+          f.sinceMs = ms;
+        } else { err(USAGE); return 2; }
+      }
+      if (f.tail === undefined && f.sinceMs === undefined) f.tail = 50;
+      const rows = filterAudit(readAudit(home), f, now());
+      if (json) { for (const e of rows) out(JSON.stringify(e)); return 0; }
+      if (!rows.length) { out(`No matching entries in ${auditPath(home)}.`); return 0; }
+      for (const e of rows) out(formatEntry(e));
+      return 0;
     }
     default:
       err(USAGE); return 2;
