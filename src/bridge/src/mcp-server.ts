@@ -26,7 +26,18 @@ import {
   helpNotices, pluginsBehind, findPluginCopies, copyNeedsWork,
   type UpdateState, type PluginInfo,
 } from './update.js';
-import { remotePolicyStore, remoteToolAllowed, remoteToolListed, remoteFileAllowed, isRemoteFileKey } from './remote-policy.js';
+import { remotePolicyStore, remoteToolAllowed, remoteToolListed, remoteFileAllowed, isRemoteFileKey, toolAnnotations } from './remote-policy.js';
+
+import { auditCall, auditPolicy, summarizeArgsForAudit } from './remote-audit.js';
+
+// Write windows whose expiry was already put in the remote audit log (once per window).
+const expiryLogged = new Set<number>();
+
+// MCP tool annotations (readOnlyHint / destructiveHint), derived from the remote classification.
+function annotationsFor(name: string): { annotations?: { readOnlyHint: boolean; destructiveHint: boolean } } {
+  const a = toolAnnotations(name);
+  return a ? { annotations: a } : {};
+}
 // >>> phase 2B: insecure-Grip guard
 import { getForeignGuard, foreignGripSummary, foreignAlertTexts, ownInfo, type ForeignSummary, type ForeignAlertTexts } from './foreign-guard.js';
 
@@ -358,6 +369,7 @@ export function createSession(bridge: PluginBridge, opts: { remote?: RemoteSessi
           name: t.name,
           description: t.description,
           inputSchema: toolInputSchema(t.name),
+          ...annotationsFor(t.name),
         })),
       };
     }
@@ -367,6 +379,7 @@ export function createSession(bridge: PluginBridge, opts: { remote?: RemoteSessi
         name: t.name,
         description: t.description,
         inputSchema: toolInputSchema(t.name),
+          ...annotationsFor(t.name),
       })),
     };
   });
@@ -394,11 +407,19 @@ export function createSession(bridge: PluginBridge, opts: { remote?: RemoteSessi
       const gate = remoteGate(name, args);
       if (gate) {
         process.stderr.write(`[grip] « ${sid} ${name} remote_denied\n`);
+        audit(name, args, 'denied', gate, undefined, Date.now() - t0);
         return errorResult(`remote_denied: ${gate}`);
       }
       callArgs = remoteArgs(name, args);
     }
     const res = await callContext.run(ctx, () => handleCall(name, callArgs));
+    if (session.remote) {
+      const r = res as any;
+      let bytes = 0;
+      try { bytes = JSON.stringify(r?.content ?? '').length; } catch { /* ignore */ }
+      const errText = r?.isError ? String(r?.content?.[0]?.text ?? '') : '';
+      audit(name, args, r?.isError ? 'error' : 'ok', r?.isError ? (/^([a-z][a-z0-9_]*)[:\s]/.exec(errText)?.[1] ?? 'error') : undefined, bytes, Date.now() - t0);
+    }
     if ((ctx.queuedMs ?? 0) >= QUEUED_NOTE_MS || ctx.retryAfterMs !== undefined) {
       const meta: Record<string, unknown> = { ...((res as any)._meta ?? {}) };
       if ((ctx.queuedMs ?? 0) >= QUEUED_NOTE_MS) meta['grip/queuedMs'] = ctx.queuedMs;
@@ -453,9 +474,29 @@ export function createSession(bridge: PluginBridge, opts: { remote?: RemoteSessi
 
   // Remote sessions: null = allowed, else the reason. Re-reads remote.json on every call, so
   // `remote off` / `deny-file` / an expired write window apply to live sessions at once.
+  // One remote-audit line per remote call (never for local sessions). Never throws.
+  function audit(name: string, args: Record<string, unknown>, status: 'ok' | 'denied' | 'error', code: string | undefined, bytes: number | undefined, ms: number) {
+    const r = session.remote;
+    if (!r) return;
+    let fileName: string | undefined;
+    try { fileName = bridge.bindingState(session).fileName; } catch { /* stub bridge */ }
+    const disc = MERGED_TOOLS[name]?.discriminator;
+    const op = disc && typeof args[disc] === 'string' ? String(args[disc]).slice(0, 40) : undefined;
+    auditCall({
+      clientId: r.clientId, sessionId: session.id, tool: name, ...(op ? { op } : {}),
+      file: { fileKey: r.fileKey, ...(fileName ? { name: fileName } : {}) },
+      args: summarizeArgsForAudit(args), status, ...(code ? { code: code.slice(0, 200) } : {}),
+      ...(bytes !== undefined ? { bytes } : {}), ms,
+    });
+  }
+
   function remoteGate(name: string, args: Record<string, unknown>): string | null {
     const r = session.remote!;
     const p = remotePolicyStore().read();
+    if (p.mode === 'write' && typeof p.writeUntil === 'number' && p.writeUntil <= Date.now() && !expiryLogged.has(p.writeUntil)) {
+      expiryLogged.add(p.writeUntil);
+      auditPolicy({ event: 'write_expired', by: 'daemon', until: new Date(p.writeUntil).toISOString() });
+    }
     const t = remoteToolAllowed(p, name, args);
     if (!t.ok) return t.reason;
     if (!remoteFileAllowed(p, r.fileKey)) return 'this file is no longer allowed for remote access on this Mac';

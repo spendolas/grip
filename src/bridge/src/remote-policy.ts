@@ -137,6 +137,53 @@ export const REMOTE_TOOL_CLASS: Readonly<Record<string, ToolClass>> = Object.fre
 });
 
 
+// ---- MCP tool annotations, derived from the classification above (one source of truth).
+// `read` => readOnly. `write` / `extended` change the document => not readOnly. `never` tools
+// are judged one by one: the few that only report state are in NEVER_READS, the rest are
+// treated as changing something. destructiveHint marks deletes, removals, detaches, bulk
+// overwrites and anything that can do all of those (run_script, map_nodes, undo, updates).
+// A merged tool is readOnly only if every op is a read, and destructive if any op is.
+const NEVER_READS: ReadonlySet<string> = new Set([
+  'grip_health', 'grip_diagnose', 'list_files', 'get_active_users', 'get_current_user',
+]);
+const DESTRUCTIVE: ReadonlySet<string> = new Set([
+  // whole tools
+  'delete_node', 'delete_page', 'delete_style', 'detach_instance', 'reset_instance_overrides',
+  'flatten_nodes', 'boolean_operation', 'replace_text', 'set_vector_network',
+  'run_script', 'map_nodes', 'trigger_undo', 'grip_update', 'on_file', 'client_storage',
+  // ops of merged tools, as tool:op
+  'group:ungroup', 'variable:delete', 'variable_collection:delete', 'variable_collection:remove_overrides',
+  'variable_collection:remove_override_for_mode', 'variable_mode:remove', 'annotation_category:delete',
+  'measurement:delete', 'dev_resource:delete', 'table_op:remove_row', 'table_op:remove_column',
+  'animation_style:remove', 'animation_style:remove_entry', 'manual_keyframe_track:remove',
+  'edit_characters:delete', 'component_property:delete',
+]);
+
+export interface ToolAnnotations { readOnlyHint: boolean; destructiveHint: boolean }
+
+function opIsRead(tool: string, tier: RemoteTier): boolean {
+  return tier === 'read' || (tier === 'never' && NEVER_READS.has(tool));
+}
+
+// Annotations for one tool, or undefined for a tool the classification does not know (the
+// remote-policy test fails on that, so it cannot ship).
+export function toolAnnotations(tool: string): ToolAnnotations | undefined {
+  const c = Object.prototype.hasOwnProperty.call(REMOTE_TOOL_CLASS, tool) ? REMOTE_TOOL_CLASS[tool] : undefined;
+  if (!c) return undefined;
+  if (typeof c === 'string') {
+    const ro = opIsRead(tool, c);
+    return { readOnlyHint: ro, destructiveHint: !ro && DESTRUCTIVE.has(tool) };
+  }
+  const ops = Object.entries(c);
+  const ro = ops.every(([, t]) => opIsRead(tool, t));
+  const destructive = DESTRUCTIVE.has(tool) || ops.some(([op, t]) => !opIsRead(tool, t) && DESTRUCTIVE.has(`${tool}:${op}`));
+  return { readOnlyHint: ro, destructiveHint: !ro && destructive };
+}
+
+// For tests: the names in DESTRUCTIVE (so a typo there is caught).
+export const DESTRUCTIVE_NAMES: readonly string[] = [...DESTRUCTIVE];
+export const NEVER_READ_NAMES: readonly string[] = [...NEVER_READS];
+
 const VIDEO_FORMATS = new Set(['MP4', 'GIF', 'WEBM']);
 
 export function writeArmed(p: RemotePolicy, now = Date.now()): boolean {
